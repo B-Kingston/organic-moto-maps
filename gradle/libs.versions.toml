@@ -1,0 +1,28 @@
+[versions]
+agp = "9.3.1"
+kotlin = "2.2.10"
+maplibre = "13.5.0"
+graphhopper = "11.0"
+slf4j = "1.7.36"
+composeBom = "2024.12.01"
+activityCompose = "1.9.3"
+lifecycle = "2.8.7"
+coroutines = "1.9.0"
+
+[libraries]
+maplibre-android-sdk = { module = "org.maplibre.gl:android-sdk", version.ref = "maplibre" }
+graphhopper-core = { module = "com.graphhopper:graphhopper-core", version.ref = "graphhopper" }
+slf4j-android = { module = "org.slf4j:slf4j-android", version.ref = "slf4j" }
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+compose-ui = { module = "androidx.compose.ui:ui" }
+compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+compose-material3 = { module = "androidx.compose.material3:material3" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

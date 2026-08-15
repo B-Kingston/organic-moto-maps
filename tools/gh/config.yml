@@ -1,0 +1,11 @@
+graphhopper:
+  version: 1
+  datareader.file: /Users/bailee/Downloads/queensland-260812.osm.pbf
+  graph.location: /Users/bailee/orca/projects/organic-moto-maps/data/graph-cache
+  profiles:
+    - name: motorcycle
+      custom_model_files: [motorcycle.json]
+  import.osm.ignored_highways: footway,steps,corridor,bridleway
+  graph.encoded_values: car_access, track_type, road_access, road_class, car_average_speed, surface
+  profiles_ch:
+    - profile: motorcycle

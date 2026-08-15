@@ -1,0 +1,15 @@
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.keystore
+data/
+app/src/main/assets/graph-cache/
+tools/gh/*.jar
+*.osm.pbf
