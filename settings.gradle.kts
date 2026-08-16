@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OrganicMotoMaps"
 include(":app")
+include(":geocoder-tool")

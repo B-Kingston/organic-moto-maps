@@ -13,3 +13,6 @@ data/
 app/src/main/assets/graph-cache/
 tools/gh/*.jar
 *.osm.pbf
+
+# Generated geocoding search index (built by :geocoder-tool from the OSM PBF)
+app/src/main/assets/geocoder/

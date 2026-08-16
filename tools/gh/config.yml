@@ -1,9 +1,25 @@
 graphhopper:
   version: 1
-  datareader.file: /Users/bailee/Downloads/queensland-260812.osm.pbf
-  graph.location: /Users/bailee/orca/projects/organic-moto-maps/data/graph-cache
+  # OSM extract to import. Relative paths resolve against the process working
+  # directory, so run the import command from the REPO ROOT (see README.md).
+  # Copy your extract into data/ (e.g. data/queensland.osm.pbf) or point this
+  # at your local file.
+  datareader.file: data/queensland.osm.pbf
+  # Graph output. Relative to the repo root when the import runs from there;
+  # the result is copied into app/src/main/assets/graph-cache afterwards.
+  graph.location: data/graph-cache
   profiles:
     - name: motorcycle
+      # GraphHopper 11 resolves this to the JAR's built-in classpath resource
+      # /com/graphhopper/custom_models/motorcycle.json — NOT tools/gh/motorcycle.json.
+      # tools/gh/motorcycle.json is the canonical reference copy of that built-in
+      # model and must stay identical to it; ./tools/gh/generate-weighting.sh
+      # verifies this before regenerating the app's pre-compiled weighting helper.
+      # Do NOT set custom_models.directory to a folder containing motorcycle.json:
+      # GraphHopper aborts with "Custom model file name 'motorcycle.json' is already
+      # used for built-in profiles". The custom_model_files value is part of the
+      # stored profile hash (motorcycle|198752012 for the current graph) and the
+      # app-side profile construction mirrors it exactly — do not rename it.
       custom_model_files: [motorcycle.json]
   import.osm.ignored_highways: footway,steps,corridor,bridleway
   graph.encoded_values: car_access, track_type, road_access, road_class, car_average_speed, surface

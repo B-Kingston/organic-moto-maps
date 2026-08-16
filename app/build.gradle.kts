@@ -40,6 +40,25 @@ android {
     }
 }
 
+// The geocoder index is generated from the selected OSM extract and is
+// intentionally gitignored. Do not allow an APK to be built successfully while
+// silently omitting the offline place-search feature.
+tasks.register("validateGeocoderAsset") {
+    val index = file("src/main/assets/geocoder/geocoder.dat")
+    doLast {
+        if (!index.isFile || index.length() == 0L) {
+            throw GradleException(
+                "Missing app/src/main/assets/geocoder/geocoder.dat. " +
+                    "Build it with :geocoder-tool before assembling the APK."
+            )
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn("validateGeocoderAsset")
+}
+
 dependencies {
     implementation(libs.maplibre.android.sdk)
     implementation(libs.graphhopper.core)

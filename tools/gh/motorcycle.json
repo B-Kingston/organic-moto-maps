@@ -1,0 +1,45 @@
+// CANONICAL motorcycle custom model (reference copy).
+//
+// GraphHopper 11 resolves `custom_model_files: [motorcycle.json]` to the JAR's
+// built-in classpath resource `/com/graphhopper/custom_models/motorcycle.json`
+// (graphhopper-web/graphhopper-core 11.0, see GraphHopper.resolveCustomModelFiles).
+// This file is the checked-in, authoritative reference copy of that model and MUST
+// stay byte-for-byte identical to the built-in resource. The import pipeline uses
+// the built-in (a filesystem file named motorcycle.json would collide with the
+// built-in name and abort with "Custom model file name 'motorcycle.json' is already
+// used for built-in profiles").
+//
+// Everything else derives from this model and must change together with it:
+//   - app/src/main/java/com/organicmoto/maps/routing/GraphHopperRouter.kt
+//     (motorcycleProfile(), the runtime profile — its content string is hashed
+//     into the graph's stored profile version, so it must stay bit-for-bit
+//     identical to what the import produced)
+//   - tools/gh/GenerateWeighting.java (motorcycleProfile() mirror used to dump
+//     the pre-compiled weighting helper)
+//   - app/src/main/java/com/graphhopper/routing/weighting/custom/
+//     MotorcycleWeightingHelper.java (Janino-generated getSpeed/getPriority)
+//   - app/src/main/java/com/organicmoto/maps/routing/
+//     MotorcycleWeightingFactory.kt (maxSpeed math mirroring these statements)
+//
+// ./tools/gh/generate-weighting.sh verifies that this file, the JAR built-in and
+// the profile construction in GenerateWeighting.java all describe the same model
+// before dumping the helper source.
+
+{
+  "distance_influence": 90,
+  "priority": [
+    { "if": "!car_access", "multiply_by": "0" },
+    { "if": "track_type.ordinal() > 1", "multiply_by": "0" },
+    { "if": "road_access == PRIVATE", "multiply_by": "0" },
+    { "if": "road_access == DESTINATION", "multiply_by": "0.1" },
+    { "if": "road_class == MOTORWAY || road_class == TRUNK", "multiply_by": "0.1" }
+  ],
+  "speed": [
+    { "if": "true", "limit_to": "0.9 * car_average_speed" },
+    { "if": "true", "limit_to": "120" },
+    {
+      "if": "surface==COBBLESTONE || surface==GRASS || surface==GRAVEL || surface==SAND || surface==PAVING_STONES || surface==DIRT || surface==GROUND || surface==UNPAVED || surface==COMPACTED",
+      "limit_to": "30"
+    }
+  ]
+}
