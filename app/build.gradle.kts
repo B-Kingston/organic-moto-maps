@@ -4,6 +4,31 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+import java.security.MessageDigest
+
+// SHA-256 of the packaged geocoder index, computed at build time so the app can
+// detect a stale/foreign on-device cache by hashing only the cached file (the
+// packaged asset is immutable and its hash is known — no per-load asset hash).
+// Empty when the asset is absent (fresh clone); the app then reports the usual
+// "asset missing" error at load time.
+val geocoderSha256: String = run {
+    val asset = file("src/main/assets/geocoder/geocoder.dat")
+    if (!asset.isFile || asset.length() == 0L) {
+        ""
+    } else {
+        val digest = MessageDigest.getInstance("SHA-256")
+        asset.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                digest.update(buffer, 0, n)
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
+
 android {
     namespace = "com.organicmoto.maps"
     compileSdk = 35
@@ -14,6 +39,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "GEOCODER_SHA256", "\"$geocoderSha256\"")
     }
 
     buildTypes {
@@ -37,6 +63,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -55,8 +82,21 @@ tasks.register("validateGeocoderAsset") {
     }
 }
 
+tasks.register("validateTileAsset") {
+    val archive = file("src/main/assets/tiles/queensland.pmtiles")
+    val archiveHash = file("src/main/assets/tiles/queensland.pmtiles.sha256")
+    doLast {
+        if (!archive.isFile || archive.length() == 0L || !archiveHash.isFile || archiveHash.length() == 0L) {
+            throw GradleException(
+                "Missing app/src/main/assets/tiles/queensland.pmtiles or its SHA-256 sidecar. " +
+                    "Build them with tools/tiles/build-tiles.sh before assembling the APK."
+            )
+        }
+    }
+}
+
 tasks.named("preBuild") {
-    dependsOn("validateGeocoderAsset")
+    dependsOn("validateGeocoderAsset", "validateTileAsset")
 }
 
 dependencies {

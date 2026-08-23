@@ -11,6 +11,7 @@ import com.graphhopper.routing.WeightingFactory
 import com.graphhopper.config.Profile
 import com.graphhopper.json.Statement
 import com.graphhopper.util.CustomModel
+import com.graphhopper.util.Parameters
 import com.graphhopper.util.shapes.GHPoint
 import java.io.File
 
@@ -136,12 +137,40 @@ class GraphHopperRouter(context: Context) {
         appContext.assets.list(assetPath)
     }.getOrNull()?.takeIf { it.isNotEmpty() }
 
-    fun route(from: GHPoint, to: GHPoint): ResponsePath {
+    /**
+     * Routes [from] to [to] with the motorcycle profile.
+     *
+     * [blend] is the route-blend slider position in [0,1] (default 1.0):
+     *  - 1.0: pure motorcycle CustomWeighting routed via CH — the stored CH
+     *    graph was built with exactly this weighting, so no extra request hints
+     *    are sent and behavior is identical to the pre-blend app.
+     *  - < 1.0: flexible routing with a BlendedWeighting that linearly blends
+     *    the CustomWeighting with fastest routing over the same motorcycle
+     *    travel speeds (hard car_access blocking at every position).
+     *
+     * `ch.disable=true` is MANDATORY for blend < 1.0: the CH solver ignores
+     * request hints and always uses the weighting baked into the CH graph at
+     * import time, so without it the slider would silently do nothing. The
+     * blend itself lives entirely in [MotorcycleWeightingFactory] — no graph,
+     * profile, or helper changes are involved.
+     */
+    fun route(from: GHPoint, to: GHPoint, blend: Double = 1.0): ResponsePath {
         // Intentionally no coordinates in the log: from/to are user-supplied
         // (typed or geocoded) locations. Timings/stats are logged after routing.
-        Log.i(TAG, "Requesting motorcycle route")
+        val clampedBlend = blend.coerceIn(0.0, 1.0)
+        val request = GHRequest(from, to).setProfile(MOTORCYCLE_PROFILE)
+        if (clampedBlend < 1.0) {
+            // CH hashes the weighting into the graph at import time and ignores
+            // per-request hints; the blend only exists in the weighting factory,
+            // so the flexible path is mandatory for t < 1 (see KDoc above).
+            request.putHint(Parameters.CH.DISABLE, true)
+            request.putHint(MOTO_BLEND, clampedBlend)
+            Log.i(TAG, "Requesting motorcycle route (blend $clampedBlend, flexible)")
+        } else {
+            Log.i(TAG, "Requesting motorcycle route")
+        }
         val started = SystemClock.elapsedRealtime()
-        val response = hopper.route(GHRequest(from, to).setProfile(MOTORCYCLE_PROFILE))
+        val response = hopper.route(request)
         if (response.hasErrors()) {
             val details = response.errors.joinToString("; ") { it.message ?: it.javaClass.simpleName }
             Log.e(TAG, "GraphHopper returned errors after ${SystemClock.elapsedRealtime() - started} ms")

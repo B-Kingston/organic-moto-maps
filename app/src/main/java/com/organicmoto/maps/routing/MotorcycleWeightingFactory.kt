@@ -3,8 +3,8 @@ package com.organicmoto.maps.routing
 import com.graphhopper.config.Profile
 import com.graphhopper.routing.DefaultWeightingFactory
 import com.graphhopper.routing.WeightingFactory
+import com.graphhopper.routing.ev.BooleanEncodedValue
 import com.graphhopper.routing.ev.DecimalEncodedValue
-import com.graphhopper.routing.ev.EncodedValue
 import com.graphhopper.routing.ev.EncodedValueLookup
 import com.graphhopper.routing.ev.TurnRestriction
 import com.graphhopper.routing.util.EncodingManager
@@ -30,6 +30,17 @@ import com.graphhopper.util.TurnCostsConfig
  * branch for the `motorcycle` profile only, assembling
  * [CustomWeighting.Parameters] from the pre-compiled [MotorcycleWeightingHelper]
  * instead.
+ *
+ * The factory also implements the `moto_blend` route slider (request hint
+ * [MOTO_BLEND], value in [0,1], default 1.0): a value below 1.0 returns a
+ * [BlendedWeighting] that linearly blends the motorcycle [CustomWeighting]
+ * with [FastestWeighting]. Both use the model's effective motorcycle speeds;
+ * Fastest omits only its scenic road priorities and distance influence. At
+ * t = 1.0 — and during graph load, where
+ * the hints PMap is empty — the pure CustomWeighting is returned exactly as
+ * before, so the stored graph and its baked-in profile hash are untouched.
+ * The caller must set `ch.disable` for t < 1: the CH solver ignores request
+ * hints and always uses the weighting baked into the CH graph at import time.
  *
  * Any other profile is delegated to the default factory: non-custom weightings
  * are safe (they do not involve Janino), while custom weightings on other
@@ -81,7 +92,12 @@ class MotorcycleWeightingFactory(
                 Parameters.Routing.DEFAULT_HEADING_PENALTY,
             )
 
-        val parameters = createParameters(mergedCustomModel, encodingManager)
+        // Resolved once here because the model's maximum effective speed is
+        // used by both CustomWeighting's and FastestWeighting's admissible A*
+        // lower bounds.
+        val avgSpeedEnc = encodingManager.getDecimalEncodedValue("car_average_speed")
+
+        val preparedModel = prepareModel(mergedCustomModel, encodingManager, avgSpeedEnc)
 
         val turnCostProvider = if (profile.hasTurnCosts() && !disableTurnCosts) {
             val turnRestrictionEnc =
@@ -98,7 +114,7 @@ class MotorcycleWeightingFactory(
                 turnRestrictionEnc,
                 graph,
                 tcConfig,
-                parameters.turnPenaltyMapping,
+                preparedModel.parameters.turnPenaltyMapping,
             )
         } else {
             if (mergedCustomModel.turnPenalty.isNotEmpty())
@@ -109,13 +125,42 @@ class MotorcycleWeightingFactory(
             TurnCostProvider.NO_TURN_COST_PROVIDER
         }
 
-        return CustomWeighting(turnCostProvider, parameters)
+        // Route-blend slider: t in [0,1] via the moto_blend request hint,
+        // default 1.0. At t >= 1.0 return the pure CustomWeighting exactly as
+        // before (this is also the path taken during graph load, where the
+        // hints PMap is empty). For t < 1.0 blend in FastestWeighting;
+        // GraphHopperRouter must also set Parameters.CH.DISABLE, because the
+        // CH solver uses the weighting baked into the CH graph at import time
+        // and ignores request hints entirely — without it the slider would
+        // silently do nothing.
+        val blend = hints.getDouble(MOTO_BLEND, 1.0).coerceIn(0.0, 1.0)
+        if (blend >= 1.0) return CustomWeighting(turnCostProvider, preparedModel.parameters)
+
+        val carAccessEnc: BooleanEncodedValue = encodingManager.getBooleanEncodedValue("car_access")
+        return BlendedWeighting(
+            CustomWeighting(turnCostProvider, preparedModel.parameters),
+            FastestWeighting(
+                preparedModel.helper::getSpeed,
+                preparedModel.maxSpeedKmh,
+                turnCostProvider,
+                carAccessEnc,
+            ),
+            blend,
+            carAccessEnc,
+        )
     }
 
-    private fun createParameters(
+    private data class PreparedModel(
+        val parameters: CustomWeighting.Parameters,
+        val helper: MotorcycleWeightingHelper,
+        val maxSpeedKmh: Double,
+    )
+
+    private fun prepareModel(
         customModel: CustomModel,
         lookup: EncodedValueLookup,
-    ): CustomWeighting.Parameters {
+        avgSpeedEnc: DecimalEncodedValue,
+    ): PreparedModel {
         val prio = MotorcycleWeightingHelper()
         prio.init(customModel, lookup, CustomModel.getAreasAsMap(customModel.areas))
 
@@ -134,11 +179,9 @@ class MotorcycleWeightingFactory(
         //     min(120, 0.9 * max(car_average_speed)).
         // If the model statements change, regenerate MotorcycleWeightingHelper
         // AND update these computations (see AGENTS.md).
-        val avgSpeedEnc = lookup.getEncodedValue("car_average_speed", EncodedValue::class.java)
-            as DecimalEncodedValue
         val maxSpeed = minOf(120.0, 0.9 * avgSpeedEnc.maxOrMaxStorableDecimal)
 
-        return CustomWeighting.Parameters(
+        val parameters = CustomWeighting.Parameters(
             prio::getSpeed,
             MaxCalc { maxSpeed },
             prio::getPriority,
@@ -147,5 +190,6 @@ class MotorcycleWeightingFactory(
             customModel.distanceInfluence ?: 0.0,
             customModel.headingPenalty ?: Parameters.Routing.DEFAULT_HEADING_PENALTY,
         )
+        return PreparedModel(parameters, prio, maxSpeed)
     }
 }

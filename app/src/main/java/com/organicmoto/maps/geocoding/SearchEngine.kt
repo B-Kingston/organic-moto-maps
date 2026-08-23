@@ -178,8 +178,11 @@ class SearchEngine(private val index: GeocoderIndex) {
                 if (!isActive()) throw CancellationException("geocoder search cancelled")
                 if (examined.set(id)) {
                     scanBudget--
+                    // docType reads one byte; doc() would decode the whole record
+                    // (name + tokens + city strings) for every examined doc.
+                    if (index.docType(id) != GeocoderIndex.TYPE_LOCALITY) return@forEachSetBit
                     val d = index.doc(id)
-                    if (d.type == GeocoderIndex.TYPE_LOCALITY) localLocs.add(d.id to d.rank)
+                    localLocs.add(d.id to d.rank)
                 }
             }
             if (localLocs.isEmpty()) continue
@@ -407,14 +410,14 @@ class SearchEngine(private val index: GeocoderIndex) {
         var matched = false
         val exact = index.findTerm(tb)
         if (exact != null) {
-            bs.orPostings(exact)
+            bs.orPostings(exact, MAX_FUZZY_POSTINGS)
             matched = true
         }
         for (s in SYNONYMS[t].orEmpty()) {
             if (!isActive()) throw CancellationException("geocoder search cancelled")
             val syn = index.findTerm(s.toByteArray(UTF_8))
             if (syn != null) {
-                bs.orPostings(syn)
+                bs.orPostings(syn, MAX_FUZZY_POSTINGS)
                 matched = true
             }
         }
@@ -422,17 +425,48 @@ class SearchEngine(private val index: GeocoderIndex) {
         if (maxErr > 0) {
             val range = index.termRange(byteArrayOf(tb[0]))
             if (!range.isEmpty()) {
+                val blockStart = range.first
+                val blockSize = range.last - range.first + 1
+                // Scan candidates outward from this token's dictionary insertion
+                // point (skipping the exact term, already unioned above), not
+                // forward from the start of the first-byte block: a block for a
+                // common letter holds tens of thousands of terms, and a forward
+                // scan capped at MAX_FUZZY_TERMS would only ever reach the
+                // alphabetically-first ones, silently missing typos of common
+                // words ("cofeee" -> "coffee").
+                val origin = (index.lowerBound(tb) - blockStart).coerceIn(0, blockSize)
+                var lo = origin
+                var hi = origin + (if (exact != null) 1 else 0)
                 var scanned = 0
-                for (i in range) {
-                    if (!isActive()) throw CancellationException("geocoder search cancelled")
-                    if (scanned >= MAX_FUZZY_TERMS || bs.size >= MAX_FUZZY_POSTINGS) break
-                    scanned++
-                    val (termBytes, postings) = index.termAt(i)
+                fun consider(dictIndex: Int) {
+                    // Skip oversized blobs without decoding them: termAt decodes
+                    // the whole posting list even when one bit would hit the
+                    // union cap, so a huge candidate costs a full IntArray
+                    // allocation for nothing.
+                    if (index.termPostingCount(dictIndex) > MAX_FUZZY_POSTINGS) return
+                    val (termBytes, postings) = index.termAt(dictIndex)
                     val termStr = String(termBytes, UTF_8)
-                    if (abs(termStr.length - t.length) > maxErr) continue
+                    if (abs(termStr.length - t.length) > maxErr) return
                     if (levenshteinBounded(termStr, t, maxErr) <= maxErr) {
                         bs.orPostings(postings, MAX_FUZZY_POSTINGS)
                         matched = true
+                    }
+                }
+                while (scanned < MAX_FUZZY_TERMS && bs.size < MAX_FUZZY_POSTINGS) {
+                    val canDown = lo > 0
+                    val canUp = hi < blockSize
+                    if (!canDown && !canUp) break
+                    if (canDown) {
+                        lo--
+                        scanned++
+                        if (!isActive()) throw CancellationException("geocoder search cancelled")
+                        consider(blockStart + lo)
+                    }
+                    if (canUp && scanned < MAX_FUZZY_TERMS && bs.size < MAX_FUZZY_POSTINGS) {
+                        scanned++
+                        if (!isActive()) throw CancellationException("geocoder search cancelled")
+                        consider(blockStart + hi)
+                        hi++
                     }
                 }
             }

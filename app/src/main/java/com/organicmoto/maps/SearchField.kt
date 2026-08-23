@@ -7,11 +7,17 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -24,17 +30,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.organicmoto.maps.geocoding.GeocodeResult
@@ -49,6 +61,12 @@ private const val MAX_DROPDOWN_ROWS = 6
 
 /** Max dropdown height before the result list scrolls (keeps the overlay from sprawling). */
 private val MAX_DROPDOWN_HEIGHT = 320.dp
+
+/** Max result rows visible at once in the inline panel list; extra rows scroll. */
+private const val MAX_INLINE_RESULTS = 5
+
+/** Max inline results height ≈ [MAX_INLINE_RESULTS] two-line result rows (≈56 dp each). */
+private val MAX_INLINE_RESULTS_HEIGHT = 280.dp
 
 /** True only for debuggable (debug) builds — raw user text is never logged in release. */
 private fun isDebugBuild(context: Context): Boolean =
@@ -194,6 +212,156 @@ fun GeocodeSearchField(
     }
 }
 
+/**
+ * Route-planning variant of [GeocodeSearchField]: same 300 ms debounced
+ * offline search-as-you-type, but styled as a 50 dp row (icon + bold text)
+ * for the bottom route-planning panel. Instead of a popup overlay, the
+ * results render inline directly below the field inside the same panel
+ * column: the container grows to fit the results (max [MAX_INLINE_RESULTS]
+ * rows at a time; the list scrolls vertically past that).
+ */
+@Composable
+fun RoutePlanSearchField(
+    label: String,
+    hint: String,
+    icon: @Composable () -> Unit,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onResultPicked: (GeocodeResult) -> Unit,
+    controller: GeocodeSearchController,
+    modifier: Modifier = Modifier,
+) {
+    var uiState by remember { mutableStateOf<SearchUiState>(SearchUiState.Idle) }
+    var hasFocus by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val debugLogs = isDebugBuild(LocalContext.current)
+
+    LaunchedEffect(value) {
+        if (value.isBlank()) {
+            uiState = SearchUiState.Idle
+            return@LaunchedEffect
+        }
+        delay(SEARCH_DEBOUNCE_MS)
+        if (debugLogs) Log.d(TAG, "[$label] debounce elapsed — searching \"$value\"")
+        uiState = SearchUiState.Loading
+        val results = try {
+            withContext(Dispatchers.IO) { controller.search(value) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Propagate cancellation so stale results never replace a newer search.
+            throw e
+        } catch (e: Exception) {
+            // Index unavailable (e.g. assets missing): degrade to empty results
+            // so the lat,lon PointParser fallback stays usable.
+            if (debugLogs) Log.w(TAG, "[$label] search for \"$value\" failed — degrading to empty results", e)
+            emptyList()
+        }
+        if (debugLogs) {
+            if (results.isEmpty()) {
+                Log.d(TAG, "[$label] \"$value\" -> no results")
+            } else {
+                Log.d(
+                    TAG,
+                    "[$label] \"$value\" -> ${results.size} result(s): " +
+                        results.take(MAX_INLINE_RESULTS).joinToString(", ") { it.name }
+                )
+            }
+        }
+        uiState = if (results.isEmpty()) SearchUiState.Empty else SearchUiState.Results(results)
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(start = 8.dp)
+                    .size(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                icon()
+            }
+            BasicTextField(
+                value = value,
+                onValueChange = {
+                    if (debugLogs) Log.v(TAG, "[$label] text changed: \"$it\"")
+                    onValueChange(it)
+                },
+                textStyle = TextStyle(
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFDE000000)
+                ),
+                cursorBrush = SolidColor(Color(0xFF249CF2)),
+                singleLine = true,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(horizontal = 8.dp)
+                    .onFocusChanged { focused ->
+                        val wasFocused = hasFocus
+                        hasFocus = focused.isFocused
+                        if (wasFocused && !focused.isFocused) uiState = SearchUiState.Idle
+                    },
+                decorationBox = { innerTextField ->
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (value.isEmpty()) {
+                            Text(
+                                text = hint,
+                                style = TextStyle(
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF8A000000)
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        innerTextField()
+                    }
+                }
+            )
+        }
+
+        // Results rendered inline in the panel column (no overlay window):
+        // the panel container itself grows to fit at most MAX_INLINE_RESULTS
+        // rows and the list scrolls vertically past that.
+        if (hasFocus && uiState != SearchUiState.Idle) {
+            InlineSearchResults {
+                when (val state = uiState) {
+                    SearchUiState.Idle -> Unit
+                    SearchUiState.Loading -> DropdownMessage("Searching…")
+                    SearchUiState.Empty -> DropdownMessage("No results", dim = true)
+                    is SearchUiState.Results ->
+                        state.results.forEachIndexed { index, result ->
+                            if (index > 0) {
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                            ResultRow(result) {
+                                uiState = SearchUiState.Idle
+                                focusManager.clearFocus()
+                                if (debugLogs) {
+                                    Log.i(
+                                        TAG,
+                                        "[$label] picked \"${result.name}${if (result.subtitle.isNotBlank()) ", " + result.subtitle else ""}\" " +
+                                            "(${result.type}, lat=${result.lat}, lon=${result.lon}, score=${result.score})"
+                                    )
+                                }
+                                onResultPicked(result)
+                            }
+                        }
+                }
+            }
+        }
+    }
+}
+
 /** Elevated surface anchored directly below the text field (overlays the map). */
 @Composable
 private fun SearchDropdown(
@@ -216,6 +384,27 @@ private fun SearchDropdown(
             content = content,
         )
     }
+}
+
+/**
+ * Inline results block rendered inside the route-planning panel directly
+ * below the owning field. Grows to fit its content up to
+ * [MAX_INLINE_RESULTS_HEIGHT] (≈ [MAX_INLINE_RESULTS] result rows), then
+ * scrolls vertically.
+ */
+@Composable
+private fun InlineSearchResults(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = MAX_INLINE_RESULTS_HEIGHT)
+            .verticalScroll(rememberScrollState())
+            .padding(top = 2.dp, bottom = 8.dp),
+        content = content,
+    )
 }
 
 @Composable

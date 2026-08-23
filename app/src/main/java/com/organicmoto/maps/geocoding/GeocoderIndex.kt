@@ -3,6 +3,7 @@ package com.organicmoto.maps.geocoding
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import com.organicmoto.maps.BuildConfig
 import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -69,14 +70,8 @@ class GeocoderIndex private constructor() {
 
     /** Returns the document with the given id. Throws on out-of-range or corrupt data. */
     fun doc(id: Int): Doc {
-        if (id < 0 || id >= docCount) {
-            throw IllegalStateException("doc id $id out of range (docCount=$docCount)")
-        }
+        val o = docOffset(id)
         val b = buf()
-        val o = state.docOffsets[id]
-        if (o < state.docsOffset || o >= state.termsOffset) {
-            throw IllegalStateException("doc offset $o outside record range for doc $id")
-        }
         checkRead(b, o, 15)
         b.position(o)
         val type = b.get().toInt() and 0xFF
@@ -143,9 +138,54 @@ class GeocoderIndex private constructor() {
         return bytes to decodePostings(relOffset, count)
     }
 
+    /**
+     * Returns the doc type byte (0=POI, 1=STREET, 2=LOCALITY) without decoding
+     * the record — one bounded read at the doc's fixed offset. The search engine
+     * uses it to skip non-locality docs in the locality layer without allocating
+     * the name/token/city strings [doc] builds.
+     */
+    fun docType(id: Int): Int {
+        val o = docOffset(id)
+        val b = buf()
+        checkRead(b, o, 1)
+        val type = b.get(o).toInt() and 0xFF
+        if (type !in 0..2) {
+            throw IllegalStateException("corrupt geocoder index: doc $id has unknown type $type")
+        }
+        return type
+    }
+
+    /**
+     * Returns the posting count of dictionary entry [dictIndex] without decoding
+     * the posting list. The fuzzy scanner uses it to skip oversized blobs whose
+     * decode would be wasted (the union cap bounds the bits, not the decode).
+     */
+    fun termPostingCount(dictIndex: Int): Int {
+        if (dictIndex < 0 || dictIndex >= termCount) {
+            throw IllegalStateException("term index $dictIndex out of range (termCount=$termCount)")
+        }
+        val b = buf()
+        val o = state.termsOffset + state.dictOffsets[dictIndex]
+        checkRead(b, o, 2)
+        val len = b.getShort(o).toInt() and 0xFFFF
+        checkRead(b, o, 2 + len + 8)
+        return b.getInt(o + 2 + len + 4)
+    }
+
     // --- internals -------------------------------------------------------------
 
-    private fun lowerBound(key: ByteArray): Int {
+    private fun docOffset(id: Int): Int {
+        if (id < 0 || id >= docCount) {
+            throw IllegalStateException("doc id $id out of range (docCount=$docCount)")
+        }
+        val o = state.docOffsets[id]
+        if (o < state.docsOffset || o >= state.termsOffset) {
+            throw IllegalStateException("doc offset $o outside record range for doc $id")
+        }
+        return o
+    }
+
+    internal fun lowerBound(key: ByteArray): Int {
         var lo = 0
         var hi = termCount
         while (lo < hi) {
@@ -276,10 +316,12 @@ class GeocoderIndex private constructor() {
             val started = SystemClock.elapsedRealtime()
             // The cache survives APK upgrades, so format validation alone is not
             // enough: a valid index from an older extract must also be replaced.
-            val assetFingerprint = packagedAssetFingerprint(appContext)
+            // GEOCODER_SHA256 is the hash of the packaged asset computed at build
+            // time (app/build.gradle.kts). The asset inside this APK is immutable
+            // and its hash is known, so only the cached file needs hashing here.
             if (file.isFile) {
                 try {
-                    if (fileFingerprint(file) == assetFingerprint) {
+                    if (fileFingerprint(file) == BuildConfig.GEOCODER_SHA256) {
                         return parseFile(file).also { logLoaded(it, started, file) }
                     }
                     Log.i(TAG, "cached geocoder.dat differs from the packaged index; replacing it")
@@ -295,26 +337,15 @@ class GeocoderIndex private constructor() {
             }
             copyFromAssets(appContext, file, started)
             return try {
-                check(fileFingerprint(file) == assetFingerprint) {
-                    "packaged geocoder index changed while it was being copied"
+                check(fileFingerprint(file) == BuildConfig.GEOCODER_SHA256) {
+                    "packaged geocoder index does not match the build-time fingerprint — " +
+                        "regenerate geocoder.dat and rebuild the app"
                 }
                 parseFile(file).also { logLoaded(it, started, file) }
             } catch (e: Exception) {
                 file.delete()
                 throw e
             }
-        }
-
-        private fun packagedAssetFingerprint(context: Context): String {
-            val input = try {
-                context.assets.open("geocoder/geocoder.dat")
-            } catch (e: Exception) {
-                throw IllegalStateException(
-                    "geocoder index asset missing; rebuild it with :geocoder-tool " +
-                        "and place it in app/src/main/assets/geocoder", e
-                )
-            }
-            return input.use { stream -> digestHex(stream) }
         }
 
         private fun fileFingerprint(file: File): String =

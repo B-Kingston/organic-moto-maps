@@ -512,19 +512,32 @@ class IndexBuilder {
                     }
                 }
             }
-            if (best < 0) {
-                // Empty cell neighbourhood: linear scan over all localities.
-                for (lid in localities) {
-                    val dist = distanceM(d, docs[lid])
-                    if (dist < bestDist) {
-                        bestDist = dist
-                        best = lid
-                    }
-                }
-            }
             if (best >= 0 && bestDist <= LOCALITY_RADIUS_M[docs[best].subType]) {
                 d.localityId = best
                 d.cityName = docs[best].name
+            } else {
+                // Either the 3x3 neighbourhood is empty, or its nearest locality
+                // lies beyond its own class radius (e.g. a village at 13 km,
+                // radius 8 km, while the state centroid at 40 km, radius 300 km,
+                // is assignable). The 3x3 reach is only ~20-30 km, so an
+                // in-radius locality just outside it would otherwise be missed.
+                // Full linear scan, accepting only candidates within their own
+                // class radius (the nearest candidate may itself be out of
+                // radius — re-running the plain nearest scan would find it
+                // again and change nothing).
+                var fallback = -1
+                var fallbackDist = Double.MAX_VALUE
+                for (lid in localities) {
+                    val dist = distanceM(d, docs[lid])
+                    if (dist <= LOCALITY_RADIUS_M[docs[lid].subType] && dist < fallbackDist) {
+                        fallbackDist = dist
+                        fallback = lid
+                    }
+                }
+                if (fallback >= 0) {
+                    d.localityId = fallback
+                    d.cityName = docs[fallback].name
+                }
             }
         }
     }
