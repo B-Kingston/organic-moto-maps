@@ -1,0 +1,5 @@
+advisors:
+  - name: default
+    enabled: false
+  - name: Advisor 2
+    model: opencode-go/ox-alpha-free:max

@@ -13,6 +13,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -81,6 +83,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.graphhopper.ResponsePath
+import com.graphhopper.util.PointList
 import com.graphhopper.util.shapes.GHPoint
 import com.organicmoto.maps.geocoding.GeocodeResult
 import com.organicmoto.maps.geocoding.GeocodeSearchController
@@ -92,6 +95,13 @@ import com.organicmoto.maps.map.routeColorHex
 import com.organicmoto.maps.routing.GraphHopperRouter
 import com.organicmoto.maps.routing.PointParser
 import com.organicmoto.maps.routing.RouteResult
+import com.organicmoto.maps.storage.GeoPoint
+import com.organicmoto.maps.storage.PolylineCodec
+import com.organicmoto.maps.storage.RouteSimilarity
+import com.organicmoto.maps.storage.SavedRoute
+import com.organicmoto.maps.storage.SavedRouteDraft
+import com.organicmoto.maps.storage.SavedRouteRepository
+import com.organicmoto.maps.storage.SavedRouteSummary
 import com.organicmoto.maps.tiles.OfflineTileStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -115,6 +125,7 @@ import kotlin.math.sin
 import kotlin.math.roundToInt
 
 private const val TAG = "OrganicMoto.RouteScreen"
+private const val TAG_SAVED = "OrganicMoto.SavedRoutes"
 private const val STYLE_ASSET = "style.json"
 private const val TILES_PATH_PLACEHOLDER = "{tiles_path}"
 private const val ROUTE_PREFS = "route_preferences"
@@ -129,6 +140,10 @@ private const val DEFAULT_ROAD_SHARE = 70f
  */
 private fun isDebugBuild(context: Context): Boolean =
     (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+/** Converts GraphHopper's point list into the storage package's vocabulary type. */
+private fun PointList.toGeoPoints(): List<GeoPoint> =
+    List(size()) { index -> GeoPoint(getLat(index), getLon(index)) }
 
 private suspend fun loadOfflineStyle(context: Context): String {
     val tilesUrl = OfflineTileStore.ensureReady(context)
@@ -258,6 +273,9 @@ fun RouteScreen() {
     val geocodeController = remember { GeocodeSearchController(context.applicationContext) }
     val debugLogs = remember { isDebugBuild(context.applicationContext) }
     val mapRef = remember { mutableStateOf<MapLibreMap?>(null) }
+    // Saved-route storage: repository over device SQLite plus the menu flag.
+    val savedRouteRepository = remember { SavedRouteRepository(context.applicationContext) }
+    var savedRoutesOpen by remember { mutableStateOf(false) }
 
     val selectRoute: (Int) -> Unit = { index ->
         val current = routeState.value
@@ -330,8 +348,10 @@ fun RouteScreen() {
     /**
      * Runs a route [from]→[to] with unbounded [complexityValue] >= 0, with
      * cancel-and-restart semantics: any in-flight route job is cancelled before
-     * the new one starts. [onSuccess], when given, remembers the resolved
-     * endpoints for dial-triggered re-routes.
+     * the new one starts. [preferredGeometry], when given (saved-route
+     * restore), selects the fresh candidate closest to that stored shape
+     * instead of the routing set's default primary. [onSuccess], when given,
+     * remembers the resolved endpoints for dial-triggered re-routes.
      */
     fun submitRoute(
         from: GHPoint,
@@ -339,6 +359,7 @@ fun RouteScreen() {
         complexityValue: Float,
         roadSharePercent: Float = maxRoadShare,
         blockUnpavedRoads: Boolean = blockUnpaved,
+        preferredGeometry: String? = null,
         onSuccess: (() -> Unit)? = null,
     ) {
         routeJob?.cancel()
@@ -367,7 +388,19 @@ fun RouteScreen() {
                             "routes=${result.routes.size}, ${primary.distance}m, ${primary.time}ms, " +
                             "${primary.points.size()} points, eta=${formatRouteDuration(primary.time)}"
                     )
-                    RouteUiState.Success(result)
+                    // Restoring a saved route: prefer the fresh candidate that
+                    // most closely matches the stored shape over the routing
+                    // set's default primary.
+                    val matchedIndex = preferredGeometry?.let { encoded ->
+                        RouteSimilarity.bestMatchIndex(
+                            PolylineCodec.decode(encoded),
+                            result.routes.map { path -> path.points.toGeoPoints() },
+                        )
+                    } ?: 0
+                    if (matchedIndex != null && matchedIndex > 0) {
+                        Log.i(TAG_SAVED, "Restored route matched alternative ${matchedIndex + 1}")
+                    }
+                    RouteUiState.Success(result, matchedIndex ?: 0)
                 } catch (e: CancellationException) {
                     throw e // preserve coroutine cancellation (scope/screen gone)
                 } catch (e: Exception) {
@@ -419,6 +452,77 @@ fun RouteScreen() {
             submitRoute(resolvedFrom, resolvedTo, complexity, maxRoadShare, blockUnpaved) {
                 lastPoints = resolvedFrom to resolvedTo
             }
+        }
+    }
+
+    /** Persists one proposed route card together with the live planning state. */
+    fun saveProposedRoute(path: ResponsePath) {
+        val endpoints = lastPoints
+        if (endpoints == null) {
+            Log.w(TAG_SAVED, "Save ignored: no resolved endpoints for the current route")
+            return
+        }
+        scope.launch {
+            try {
+                val saved = savedRouteRepository.save(
+                    SavedRouteDraft(
+                        fromName = fromText.trim()
+                            .ifBlank { "${endpoints.first.lat}, ${endpoints.first.lon}" },
+                        from = GeoPoint(endpoints.first.lat, endpoints.first.lon),
+                        toName = toText.trim()
+                            .ifBlank { "${endpoints.second.lat}, ${endpoints.second.lon}" },
+                        to = GeoPoint(endpoints.second.lat, endpoints.second.lon),
+                        distanceMeters = path.distance,
+                        durationMillis = path.time,
+                        complexity = complexity,
+                        maxRoadSharePercent = maxRoadShare,
+                        blockUnpaved = blockUnpaved,
+                        points = path.points.toGeoPoints(),
+                    )
+                )
+                Log.i(TAG_SAVED, "Saved route ${saved.id} (${saved.distanceMeters} m)")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG_SAVED, "Saving route failed", e)
+            }
+        }
+    }
+
+    /**
+     * Restores a saved route into the editable planning state and routes it.
+     * The loaded route behaves like a fresh plan: every control reflects the
+     * stored value and can be changed to steer the route differently.
+     */
+    fun loadSavedRoute(saved: SavedRoute) {
+        savedRoutesOpen = false
+        val (from, to) = saved.endpoints
+        val restoredFrom = GHPoint(from.lat, from.lon)
+        val restoredTo = GHPoint(to.lat, to.lon)
+        fromText = saved.fromName
+        toText = saved.toName
+        fromPoint = restoredFrom
+        toPoint = restoredTo
+        complexity = saved.complexity.coerceAtLeast(0f)
+        maxRoadShare = saved.maxRoadSharePercent.coerceIn(10f, 90f)
+        blockUnpaved = saved.blockUnpaved
+        Log.i(TAG_SAVED, "Loading saved route ${saved.id}")
+        submitRoute(
+            restoredFrom,
+            restoredTo,
+            complexity,
+            maxRoadShare,
+            blockUnpaved,
+            preferredGeometry = saved.geometry,
+        ) {
+            lastPoints = restoredFrom to restoredTo
+        }
+    }
+
+    fun deleteSavedRoute(routeId: Long) {
+        scope.launch {
+            savedRouteRepository.delete(routeId)
+            Log.i(TAG_SAVED, "Deleted saved route $routeId")
         }
     }
 
@@ -476,6 +580,8 @@ fun RouteScreen() {
                 complexity = complexity,
                 onComplexityChange = { complexity = it },
                 onRouteSettings = { routeSettingsOpen = true },
+                onOpenSavedRoutes = { savedRoutesOpen = true },
+                onSaveRoute = ::saveProposedRoute,
                 onComplexityChangeFinished = { finalComplexity ->
                     // Re-route only when the knob is released, not for every
                     // drag event. Use the gesture's final value directly so a
@@ -521,9 +627,20 @@ fun RouteScreen() {
             },
         )
     }
+
+    if (savedRoutesOpen) {
+        SavedRoutesSheet(
+            summariesProvider = { savedRouteRepository.summaries() },
+            commentsProvider = { routeId -> savedRouteRepository.comments(routeId) },
+            onAddComment = { routeId, text -> savedRouteRepository.addComment(routeId, text) },
+            onLoadRoute = ::loadSavedRoute,
+            onDeleteRoute = { saved -> deleteSavedRoute(saved.id) },
+            onDismiss = { savedRoutesOpen = false },
+        )
+    }
 }
 
-private fun complexityLabel(value: Float): String =
+internal fun complexityLabel(value: Float): String =
     if (value < 0.5f) "Fastest" else "Curvy route ${value.roundToInt()}"
 
 /**
@@ -832,6 +949,7 @@ private fun RouteCarouselBar(
     routes: List<ResponsePath>,
     selectedIndex: Int,
     onSelectRoute: (Int) -> Unit,
+    onSaveRoute: (ResponsePath) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (routes.isEmpty()) return
@@ -883,6 +1001,8 @@ private fun RouteCarouselBar(
                 path = routes[page],
                 routeIndex = page,
                 selected = page == pagerState.targetPage,
+                onSelectRoute = onSelectRoute,
+                onSaveRoute = { onSaveRoute(routes[page]) },
                 modifier = Modifier
                     .graphicsLayer {
                         // Depth cue while swiping: neighbours shrink and fade,
@@ -901,11 +1021,14 @@ private fun RouteCarouselBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RouteCard(
     path: ResponsePath,
     routeIndex: Int,
     selected: Boolean,
+    onSelectRoute: (Int) -> Unit,
+    onSaveRoute: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val routeColor = Color(android.graphics.Color.parseColor(routeColorHex(routeIndex)))
@@ -919,6 +1042,8 @@ private fun RouteCard(
         animationSpec = tween(durationMillis = 150),
         label = "routeCardForeground",
     )
+    val view = LocalView.current
+    var saveBubbleShown by remember { mutableStateOf(false) }
     val metrics = "${formatRouteDuration(path.time)} · ${formatRouteDistance(path.distance)}"
     Surface(
         color = background,
@@ -929,6 +1054,15 @@ private fun RouteCard(
                 width = 1.dp,
                 color = if (selected) Color.Transparent else routeColor.copy(alpha = 0.45f),
                 shape = RoundedCornerShape(12.dp),
+            )
+            .combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { onSelectRoute(routeIndex) },
+                onLongClick = {
+                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    saveBubbleShown = true
+                },
             )
             .semantics {
                 contentDescription = "Route ${routeIndex + 1}: $metrics"
@@ -962,6 +1096,12 @@ private fun RouteCard(
                 )
             }
         }
+        SaveRouteBubble(
+            visible = saveBubbleShown,
+            metrics = metrics,
+            onSave = onSaveRoute,
+            onDismiss = { saveBubbleShown = false },
+        )
     }
 }
 
@@ -988,6 +1128,8 @@ private fun RoutePlanPanel(
     onComplexityChange: (Float) -> Unit,
     onComplexityChangeFinished: (Float) -> Unit,
     onRouteSettings: () -> Unit,
+    onOpenSavedRoutes: () -> Unit,
+    onSaveRoute: (ResponsePath) -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
     Surface(
@@ -1006,6 +1148,7 @@ private fun RoutePlanPanel(
                     routes = success.result.routes,
                     selectedIndex = success.selectedIndex,
                     onSelectRoute = onSelectRoute,
+                    onSaveRoute = onSaveRoute,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 HorizontalDivider(color = Color(0x1E000000), thickness = 1.dp)
@@ -1069,6 +1212,15 @@ private fun RoutePlanPanel(
                         onValueChange = onComplexityChange,
                         onValueChangeFinished = onComplexityChangeFinished,
                     )
+                    IconButton(
+                        onClick = onOpenSavedRoutes,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .size(32.dp)
+                            .semantics { contentDescription = "Saved routes" },
+                    ) {
+                        BookmarkIcon(filled = false)
+                    }
                     IconButton(
                         onClick = onRouteSettings,
                         modifier = Modifier

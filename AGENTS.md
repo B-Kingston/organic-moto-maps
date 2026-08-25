@@ -12,7 +12,20 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew assembleDebug
 - Output: `app/build/outputs/apk/debug/app-debug.apk`; size depends on generated graph and tile assets (~400 MB with the current Queensland archive).
 - `local.properties` (gitignored) points `sdk.dir` at `~/Library/Android/sdk`.
 - `minSdk = 26` is a hard floor: GraphHopper's jar fails dexing below it. Do not lower.
-- No tests, no lint, no CI. A successful build is the only verification.
+- Tests exist for the route-storage layer only: `./gradlew :app:testDebugUnitTest`
+  (JVM: codec, mini-map projection, similarity, repository contract) and
+  `./gradlew :app:connectedDebugAndroidTest` (real SQLite on the emulator; needs a booted AVD).
+  Instrumented test methods must NOT use backtick-spaced names — D8 rejects them at minSdk 26.
+  No lint, no CI. A successful build plus these suites is the verification.
+
+## Route storage (saved rides)
+
+The app persists user-saved routes in device SQLite (`saved_routes.db`, schema v1: `saved_routes` + `saved_route_comments` with an `ON DELETE CASCADE` foreign key). Long-pressing a coloured carousel card opens a save bubble (`SaveRouteBubble.kt`); the bookmark icon stores the exact path (encoded polyline, precision 1e5), geocoded From/To names, distance, duration, and the live routing controls (complexity, road share, block-unpaved). The storage menu is the bookmark button left of the ride-complexity knob; it opens `SavedRoutesSheet` (mini-map banner drawn by `RouteMiniMap.kt` from the decoded polyline — no tiles, no network), per-route comments, and delete-with-confirm.
+
+- Storage decision: raw `SQLiteOpenHelper` behind the narrow `SavedRouteStore` interface instead of Room — zero new toolchain deps (no KSP/kapt) for two tables, and every implementation must satisfy one documented contract (`SavedRouteStore.kt` KDoc), which both the JVM in-memory fake and the instrumented SQL suite assert. Revisit Room if the schema grows.
+- Key files: `app/src/main/java/com/organicmoto/maps/storage/` (models, `PolylineCodec`, `SqlSavedRouteStore`, `SavedRouteRepository`, `RouteSimilarity`) and root-package UI files (`SaveRouteBubble.kt`, `SavedRoutesSheet.kt`, `RouteMiniMap.kt`, `SavedRouteIcons.kt` — icons are hand-drawn Canvas like the rest of the app).
+- Loading a saved route restores the editable planning state (fields, points, complexity dial, road share, block-unpaved) and re-routes; `submitRoute(preferredGeometry=…)` then re-selects the fresh candidate closest to the stored shape via `RouteSimilarity` (mean haversine to strided candidate vertices). It does NOT rewrite the persisted road-share/block-unpaved preferences — those still change only through Route settings Apply.
+- Geofabrik now serves region extracts three levels deep (e.g. `/australia-oceania/australia/queensland-latest.osm.pbf`); shallower paths return their HTML index with HTTP 200, so verify the downloaded bytes are a PBF before importing.
 
 ## Graph data pipeline (do not route around it)
 
