@@ -25,3 +25,6 @@ app/src/main/assets/tiles/
 data/style/
 app/src/main/assets/glyphs/
 app/src/main/assets/sprites/
+
+# Local-only knowledge notes
+*.local.md
