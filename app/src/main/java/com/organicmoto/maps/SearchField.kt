@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -65,21 +66,34 @@ private val MAX_DROPDOWN_HEIGHT = 320.dp
 /** Max result rows visible at once in the inline panel list; extra rows scroll. */
 private const val MAX_INLINE_RESULTS = 5
 
-/** Max inline results height ≈ [MAX_INLINE_RESULTS] two-line result rows (≈56 dp each). */
-private val MAX_INLINE_RESULTS_HEIGHT = 280.dp
-
 /** True only for debuggable (debug) builds — raw user text is never logged in release. */
 private fun isDebugBuild(context: Context): Boolean =
     (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-
 /** Search-as-you-type state rendered in the dropdown below the field. */
-private sealed interface SearchUiState {
+internal sealed interface SearchUiState {
     data object Idle : SearchUiState
     data object Loading : SearchUiState
     data class Results(val results: List<GeocodeResult>) : SearchUiState
     data object Empty : SearchUiState
 }
 
+/**
+ * Search state of one route-planning field, hoisted so the panel can render
+ * the suggestions of whichever field is active in a single shared, fixed
+ * results viewport (instead of each field growing the panel inline).
+ */
+@Stable
+class RouteFieldSearchState internal constructor() {
+    internal var uiState by mutableStateOf<SearchUiState>(SearchUiState.Idle)
+    internal var hasFocus by mutableStateOf(false)
+    internal var onPick: (GeocodeResult) -> Unit = {}
+
+    /** True while this field owns the shared results viewport. */
+    val active: Boolean get() = hasFocus && uiState != SearchUiState.Idle
+}
+
+@Composable
+fun rememberRouteFieldSearchState(): RouteFieldSearchState = remember { RouteFieldSearchState() }
 /**
  * Text field with 300 ms debounced offline search-as-you-type. While focused,
  * a results dropdown is rendered as an anchored overlay window directly below
@@ -212,13 +226,14 @@ fun GeocodeSearchField(
     }
 }
 
+
 /**
  * Route-planning variant of [GeocodeSearchField]: same 300 ms debounced
  * offline search-as-you-type, but styled as a 50 dp row (icon + bold text)
- * for the bottom route-planning panel. Instead of a popup overlay, the
- * results render inline directly below the field inside the same panel
- * column: the container grows to fit the results (max [MAX_INLINE_RESULTS]
- * rows at a time; the list scrolls vertically past that).
+ * for the bottom route-planning panel. Results are NOT rendered here: the
+ * field publishes its state into [searchState] and the panel shows them in
+ * one shared, fixed-height viewport ([RoutePlanSearchResults]) so the panel
+ * frame never grows or shifts while typing.
  */
 @Composable
 fun RoutePlanSearchField(
@@ -229,21 +244,20 @@ fun RoutePlanSearchField(
     onValueChange: (String) -> Unit,
     onResultPicked: (GeocodeResult) -> Unit,
     controller: GeocodeSearchController,
+    searchState: RouteFieldSearchState,
     modifier: Modifier = Modifier,
 ) {
-    var uiState by remember { mutableStateOf<SearchUiState>(SearchUiState.Idle) }
-    var hasFocus by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val debugLogs = isDebugBuild(LocalContext.current)
 
     LaunchedEffect(value) {
         if (value.isBlank()) {
-            uiState = SearchUiState.Idle
+            searchState.uiState = SearchUiState.Idle
             return@LaunchedEffect
         }
         delay(SEARCH_DEBOUNCE_MS)
         if (debugLogs) Log.d(TAG, "[$label] debounce elapsed — searching \"$value\"")
-        uiState = SearchUiState.Loading
+        searchState.uiState = SearchUiState.Loading
         val results = try {
             withContext(Dispatchers.IO) { controller.search(value) }
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -266,7 +280,7 @@ fun RoutePlanSearchField(
                 )
             }
         }
-        uiState = if (results.isEmpty()) SearchUiState.Empty else SearchUiState.Results(results)
+        searchState.uiState = if (results.isEmpty()) SearchUiState.Empty else SearchUiState.Results(results)
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -302,9 +316,9 @@ fun RoutePlanSearchField(
                     .fillMaxHeight()
                     .padding(horizontal = 8.dp)
                     .onFocusChanged { focused ->
-                        val wasFocused = hasFocus
-                        hasFocus = focused.isFocused
-                        if (wasFocused && !focused.isFocused) uiState = SearchUiState.Idle
+                        val wasFocused = searchState.hasFocus
+                        searchState.hasFocus = focused.isFocused
+                        if (wasFocused && !focused.isFocused) searchState.uiState = SearchUiState.Idle
                     },
                 decorationBox = { innerTextField ->
                     Box(
@@ -329,35 +343,20 @@ fun RoutePlanSearchField(
             )
         }
 
-        // Results rendered inline in the panel column (no overlay window):
-        // the panel container itself grows to fit at most MAX_INLINE_RESULTS
-        // rows and the list scrolls vertically past that.
-        if (hasFocus && uiState != SearchUiState.Idle) {
-            InlineSearchResults {
-                when (val state = uiState) {
-                    SearchUiState.Idle -> Unit
-                    SearchUiState.Loading -> DropdownMessage("Searching…")
-                    SearchUiState.Empty -> DropdownMessage("No results", dim = true)
-                    is SearchUiState.Results ->
-                        state.results.forEachIndexed { index, result ->
-                            if (index > 0) {
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            }
-                            ResultRow(result) {
-                                uiState = SearchUiState.Idle
-                                focusManager.clearFocus()
-                                if (debugLogs) {
-                                    Log.i(
-                                        TAG,
-                                        "[$label] picked \"${result.name}${if (result.subtitle.isNotBlank()) ", " + result.subtitle else ""}\" " +
-                                            "(${result.type}, lat=${result.lat}, lon=${result.lon}, score=${result.score})"
-                                    )
-                                }
-                                onResultPicked(result)
-                            }
-                        }
-                }
+        // The panel renders this field's suggestions in the shared results
+        // viewport while the field is active; publish the pick handler that
+        // the viewport's rows invoke.
+        searchState.onPick = { result ->
+            searchState.uiState = SearchUiState.Idle
+            focusManager.clearFocus()
+            if (debugLogs) {
+                Log.i(
+                    TAG,
+                    "[$label] picked \"${result.name}${if (result.subtitle.isNotBlank()) ", " + result.subtitle else ""}\" " +
+                        "(${result.type}, lat=${result.lat}, lon=${result.lon}, score=${result.score})"
+                )
             }
+            onResultPicked(result)
         }
     }
 }
@@ -387,24 +386,37 @@ private fun SearchDropdown(
 }
 
 /**
- * Inline results block rendered inside the route-planning panel directly
- * below the owning field. Grows to fit its content up to
- * [MAX_INLINE_RESULTS_HEIGHT] (≈ [MAX_INLINE_RESULTS] result rows), then
- * scrolls vertically.
+ * Shared results viewport for the route-planning panel: renders the search
+ * state of whichever [RoutePlanSearchField] is active. Always bounded by
+ * [maxHeight] — extra rows scroll — so the panel frame around it never
+ * changes size while typing. Sits on the panel surface (no elevation).
  */
 @Composable
-private fun InlineSearchResults(
+fun RoutePlanSearchResults(
+    state: RouteFieldSearchState,
+    maxHeight: Dp,
     modifier: Modifier = Modifier,
-    content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(max = MAX_INLINE_RESULTS_HEIGHT)
+            .heightIn(max = maxHeight)
             .verticalScroll(rememberScrollState())
             .padding(top = 2.dp, bottom = 8.dp),
-        content = content,
-    )
+    ) {
+        when (val current = state.uiState) {
+            SearchUiState.Idle -> Unit
+            SearchUiState.Loading -> DropdownMessage("Searching…")
+            SearchUiState.Empty -> DropdownMessage("No results", dim = true)
+            is SearchUiState.Results ->
+                current.results.forEachIndexed { index, result ->
+                    if (index > 0) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                    ResultRow(result) { state.onPick(result) }
+                }
+        }
+    }
 }
 
 @Composable

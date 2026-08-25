@@ -24,12 +24,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -75,6 +78,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -425,78 +429,75 @@ fun RouteScreen() {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
-        Text(
-            text = "© OpenMapTiles.org © OpenStreetMap contributors · Noto (OFL) · icons CC BY 4.0",
-            color = Color.Black,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(4.dp)
-                .background(Color.White.copy(alpha = 0.78f), RoundedCornerShape(2.dp))
-                .padding(horizontal = 4.dp, vertical = 1.dp)
-        )
-
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
+    // Map above, panel below: the map is exactly the region the route menu
+    // does not cover, so the two never overlap and the menu cannot slide
+    // around over the map.
+    Column(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
                 .fillMaxWidth()
-                .imePadding()
+                .weight(1f)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                Spacer(Modifier.weight(1f))
-                ZoomPill(
-                    onZoomIn = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
-                    onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
-                    modifier = Modifier.padding(end = 8.dp, bottom = 8.dp)
-                )
-            }
-            RoutePlanPanel(
-                fromText = fromText,
-                onFromChange = { fromText = it; fromPoint = null; lastPoints = null },
-                onFromPicked = { result ->
-                    fromText =
-                        if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
-                    fromPoint = GHPoint(result.lat, result.lon)
-                    lastPoints = null
-                },
-                toText = toText,
-                onToChange = { toText = it; toPoint = null; lastPoints = null },
-                onToPicked = { result ->
-                    toText =
-                        if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
-                    toPoint = GHPoint(result.lat, result.lon)
-                    lastPoints = null
-                },
-                geocodeController = geocodeController,
-                state = state,
-                onSelectRoute = latestSelectRoute,
-                onRoute = onRoute,
-                complexity = complexity,
-                onComplexityChange = { complexity = it },
-                onRouteSettings = { routeSettingsOpen = true },
-                onComplexityChangeFinished = { finalComplexity ->
-                    // Re-route only when the knob is released, not for every
-                    // drag event. Use the gesture's final value directly so a
-                    // release cannot race the next Compose state frame.
-                    complexity = finalComplexity
-                    Log.i(TAG, "Ride complexity dial released: $finalComplexity")
-                    lastPoints?.let {
-                        submitRoute(
-                            it.first,
-                            it.second,
-                            finalComplexity,
-                            maxRoadShare,
-                            blockUnpaved,
-                        )
-                    }
-                }
+            AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+            Text(
+                text = "© OpenMapTiles.org © OpenStreetMap contributors · Noto (OFL) · icons CC BY 4.0",
+                color = Color.Black,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 4.dp, end = 64.dp, bottom = 4.dp)
+                    .background(Color.White.copy(alpha = 0.78f), RoundedCornerShape(2.dp))
+                    .padding(horizontal = 4.dp, vertical = 1.dp)
+            )
+            ZoomPill(
+                onZoomIn = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
+                onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 8.dp, bottom = 8.dp)
             )
         }
+        RoutePlanPanel(
+            fromText = fromText,
+            onFromChange = { fromText = it; fromPoint = null; lastPoints = null },
+            onFromPicked = { result ->
+                fromText =
+                    if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
+                fromPoint = GHPoint(result.lat, result.lon)
+                lastPoints = null
+            },
+            toText = toText,
+            onToChange = { toText = it; toPoint = null; lastPoints = null },
+            onToPicked = { result ->
+                toText =
+                    if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
+                toPoint = GHPoint(result.lat, result.lon)
+                lastPoints = null
+            },
+            geocodeController = geocodeController,
+            state = state,
+            onSelectRoute = latestSelectRoute,
+            onRoute = onRoute,
+            complexity = complexity,
+            onComplexityChange = { complexity = it },
+            onRouteSettings = { routeSettingsOpen = true },
+            onComplexityChangeFinished = { finalComplexity ->
+                // Re-route only when the knob is released, not for every
+                // drag event. Use the gesture's final value directly so a
+                // release cannot race the next Compose state frame.
+                complexity = finalComplexity
+                Log.i(TAG, "Ride complexity dial released: $finalComplexity")
+                lastPoints?.let {
+                    submitRoute(
+                        it.first,
+                        it.second,
+                        finalComplexity,
+                        maxRoadShare,
+                        blockUnpaved,
+                    )
+                }
+            }
+        )
     }
 
     if (routeSettingsOpen) {
@@ -877,6 +878,26 @@ private fun RoadShareKnob(
 private val ROUTE_CARD_WIDTH = 220.dp
 private val ROUTE_CARD_HEIGHT = 46.dp
 
+/** 50 dp From/To row inside the panel (see RoutePlanSearchField). */
+private val SEARCH_FIELD_ROW_HEIGHT = 50.dp
+
+/**
+ * Fixed panel-frame slot heights. Every panel state — idle, typing, route
+ * success, error — is built from exactly these slots, so the panel's total
+ * height, and with it the map viewport above, never changes with state.
+ */
+private val ROUTE_STATUS_HEIGHT = 40.dp
+
+/** Knob row (6 + 100 + 6 dp) plus the fixed status row. */
+private val RIDE_CONTROLS_HEIGHT = 112.dp + ROUTE_STATUS_HEIGHT
+
+/** Reserved carousel slot; equals the pager height in RouteCarouselBar. */
+private val CAROUSEL_SLOT_HEIGHT = ROUTE_CARD_HEIGHT + 12.dp
+
+/** Carousel + divider + two field rows + two dividers + ride controls + START row (2 + 40 + 10). */
+private val PANEL_CONTENT_HEIGHT = CAROUSEL_SLOT_HEIGHT + RIDE_CONTROLS_HEIGHT +
+    SEARCH_FIELD_ROW_HEIGHT * 2 + 52.dp + 3.dp
+
 /**
  * Thin horizontal bar on top of the route-planning panel: one card per
  * proposed route in a snap-scrolling carousel. The centered card IS the
@@ -1023,11 +1044,14 @@ private fun RouteCard(
 }
 
 /**
- * Bottom route-planning panel styled after Organic Maps: an optional thin
- * swipeable route-card bar on top, 50 dp From/To rows with leading icons,
- * dividers, an unbounded ride-complexity knob, optional error text and a
- * full-width START button, on a #F5F5F5 surface with rounded TOP corners
- * and a subtle shadow.
+ * Bottom route-planning panel styled after Organic Maps, with a FIXED frame:
+ * the carousel slot, the 50 dp From/To rows, the ride-controls region and
+ * the START row keep constant heights in every state, so the panel's top
+ * edge and every control sit at one screen position. Suggestions render
+ * inside the ride-controls region (replacing the knob + status rows while
+ * typing) and the carousel slot stays reserved while no route exists, so
+ * nothing outside the ride-controls region ever moves. The map viewport
+ * ends where this panel begins.
  */
 @Composable
 private fun RoutePlanPanel(
@@ -1047,6 +1071,8 @@ private fun RoutePlanPanel(
     onRouteSettings: () -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
+    val fromSearch = rememberRouteFieldSearchState()
+    val toSearch = rememberRouteFieldSearchState()
     Surface(
         color = Color(0xFFF5F5F5),
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
@@ -1056,17 +1082,31 @@ private fun RoutePlanPanel(
         Column(
             Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .heightIn(min = PANEL_CONTENT_HEIGHT)
+                // One combined bottom inset: nav-bar height while the
+                // keyboard is closed, keyboard height while it is open (the
+                // IME inset already spans the nav-bar area). The panel
+                // bottom always sits exactly on whatever is below it — no
+                // gap above the keyboard, no dead strip above the nav bar.
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
         ) {
-            (state as? RouteUiState.Success)?.takeIf { it.result.routes.isNotEmpty() }?.let { success ->
-                RouteCarouselBar(
-                    routes = success.result.routes,
-                    selectedIndex = success.selectedIndex,
-                    onSelectRoute = onSelectRoute,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                HorizontalDivider(color = Color(0x1E000000), thickness = 1.dp)
+            // Carousel slot, always reserved: route cards appear here on
+            // success without moving the fields below.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(CAROUSEL_SLOT_HEIGHT)
+            ) {
+                (state as? RouteUiState.Success)?.takeIf { it.result.routes.isNotEmpty() }?.let { success ->
+                    RouteCarouselBar(
+                        routes = success.result.routes,
+                        selectedIndex = success.selectedIndex,
+                        onSelectRoute = onSelectRoute,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
+            HorizontalDivider(color = Color(0x1E000000), thickness = 1.dp)
             RoutePlanSearchField(
                 label = "From",
                 hint = "Route from",
@@ -1075,6 +1115,7 @@ private fun RoutePlanPanel(
                 onValueChange = onFromChange,
                 onResultPicked = onFromPicked,
                 controller = geocodeController,
+                searchState = fromSearch,
                 modifier = Modifier.fillMaxWidth()
             )
             HorizontalDivider(
@@ -1090,6 +1131,7 @@ private fun RoutePlanPanel(
                 onValueChange = onToChange,
                 onResultPicked = onToPicked,
                 controller = geocodeController,
+                searchState = toSearch,
                 modifier = Modifier.fillMaxWidth()
             )
             HorizontalDivider(
@@ -1097,80 +1139,66 @@ private fun RoutePlanPanel(
                 thickness = 1.dp,
                 modifier = Modifier.padding(start = 40.dp)
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
+            // Fixed ride-controls region: while a field is searching, its
+            // suggestions replace the knob and status rows inside this box;
+            // nothing outside the box ever moves.
+            Box(
+                Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .heightIn(min = RIDE_CONTROLS_HEIGHT)
             ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = "Ride complexity",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF8A000000)
+                val activeSearch = fromSearch.takeIf { it.active } ?: toSearch.takeIf { it.active }
+                if (activeSearch != null) {
+                    RoutePlanSearchResults(
+                        state = activeSearch,
+                        maxHeight = RIDE_CONTROLS_HEIGHT,
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    Text(
-                        text = complexityLabel(complexity),
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Turn clockwise for longer, curvier roads",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF8A000000)
-                    )
-                }
-                Box(Modifier.size(width = 108.dp, height = 100.dp)) {
-                    InfiniteComplexityKnob(
-                        value = complexity,
-                        onValueChange = onComplexityChange,
-                        onValueChangeFinished = onComplexityChangeFinished,
-                    )
-                    IconButton(
-                        onClick = onRouteSettings,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .size(32.dp)
-                            .semantics { contentDescription = "Route settings" },
-                    ) {
-                        SettingsCogIcon()
+                } else {
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = "Ride complexity",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF8A000000)
+                                )
+                                Text(
+                                    text = complexityLabel(complexity),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Turn clockwise for longer, curvier roads",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF8A000000)
+                                )
+                            }
+                            Box(Modifier.size(width = 108.dp, height = 100.dp)) {
+                                InfiniteComplexityKnob(
+                                    value = complexity,
+                                    onValueChange = onComplexityChange,
+                                    onValueChangeFinished = onComplexityChangeFinished,
+                                )
+                                IconButton(
+                                    onClick = onRouteSettings,
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(32.dp)
+                                        .semantics { contentDescription = "Route settings" },
+                                ) {
+                                    SettingsCogIcon()
+                                }
+                            }
+                        }
+                        RouteStatusSlot(state)
                     }
                 }
-            }
-            // Route summary for the last successful route (set by START or a
-            // dial re-route): travel-time estimate + distance. Shown in place
-            // of nothing — Error takes this spot when a route fails, and both
-            // clear while Loading.
-            (state as? RouteUiState.Success)?.let { success ->
-                val selectedPath = success.result.routes.getOrNull(success.selectedIndex)
-                    ?: success.result.routes.first()
-                Row(
-                    verticalAlignment = Alignment.Bottom,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 2.dp)
-                ) {
-                    Text(
-                        text = formatRouteDuration(selectedPath.time),
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = formatRouteDistance(selectedPath.distance),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = Color(0xFF8A000000),
-                        modifier = Modifier.padding(bottom = 3.dp)
-                    )
-                }
-            }
-            (state as? RouteUiState.Error)?.let {
-                Text(
-                    text = it.message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                )
             }
             Button(
                 onClick = {
@@ -1193,6 +1221,57 @@ private fun RoutePlanPanel(
             ) {
                 Text("START", fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }
+        }
+    }
+}
+
+/**
+ * Fixed-height status row between the ride controls and START: the selected
+ * route's ETA and distance on success, the failure message on error, empty
+ * otherwise. The constant size keeps the panel frame identical in every
+ * state, so the START button never moves.
+ */
+@Composable
+private fun RouteStatusSlot(state: RouteUiState) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(ROUTE_STATUS_HEIGHT)
+    ) {
+        (state as? RouteUiState.Success)?.let { success ->
+            val selectedPath = success.result.routes.getOrNull(success.selectedIndex)
+                ?: success.result.routes.first()
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp)
+            ) {
+                Text(
+                    text = formatRouteDuration(selectedPath.time),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = formatRouteDistance(selectedPath.distance),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color(0xFF8A000000)
+                )
+            }
+        }
+        (state as? RouteUiState.Error)?.let {
+            Text(
+                text = it.message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.CenterStart)
+                    .padding(horizontal = 16.dp)
+            )
         }
     }
 }
