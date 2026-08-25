@@ -21,6 +21,12 @@ import kotlin.math.roundToLong
  */
 internal const val MOTO_COMPLEXITY = "moto_complexity"
 
+/** Previous-detent edge IDs to softly discourage when finding a distinct ride. */
+internal const val MOTO_PREVIOUS_EDGES = "moto_previous_edges"
+
+/** Added fastest-time multiples for edges in [MOTO_PREVIOUS_EDGES]. */
+internal const val MOTO_PREVIOUS_EDGE_PENALTY = "moto_previous_edge_penalty"
+
 /** Request hint that hard-blocks roads with a known unpaved surface. */
 internal const val BLOCK_UNPAVED = "block_unpaved"
 
@@ -33,6 +39,9 @@ internal const val BLOCK_UNPAVED = "block_unpaved"
  * `w_fastest + complexity * (w_custom - w_fastest + w_curvePenalty)`, so the
  * preference can be strengthened indefinitely without producing negative edge
  * weights. Curvy edges receive less added cost than geometrically straight ones.
+ * Positive detents can also add a soft, non-negative penalty to roads used by
+ * earlier detents. This encourages a genuinely different corridor without
+ * hard-blocking those roads when the graph has no viable alternative.
  *
  * Both components use seconds as their edge-weight unit. This is important:
  * GraphHopper's `car_average_speed` encoded value is in km/h, while its
@@ -64,6 +73,8 @@ class ComplexityWeighting(
     private val accessEnc: BooleanEncodedValue,
     private val surfaceEnc: EnumEncodedValue<Surface>,
     private val blockUnpaved: Boolean,
+    private val previousEdgeIds: Set<Int>,
+    private val previousEdgePenalty: Double,
 ) : Weighting {
 
     override fun calcMinWeightPerDistance(): Double = fastest.calcMinWeightPerDistance()
@@ -79,15 +90,20 @@ class ComplexityWeighting(
             if (surface in UNPAVED_SURFACES) return Double.POSITIVE_INFINITY
         }
         val wFastest = fastest.calcEdgeWeight(edgeState, reverse)
+        if (!wFastest.isFinite()) return Double.POSITIVE_INFINITY
+        val reusePenalty = if (edgeState.edge in previousEdgeIds) {
+            wFastest * previousEdgePenalty
+        } else {
+            0.0
+        }
         // Avoid `0 * Infinity` at Fastest. At every positive complexity an
         // infinite custom weight must stay blocked.
-        if (complexity == 0.0) return wFastest
-        if (!wFastest.isFinite()) return Double.POSITIVE_INFINITY
+        if (complexity == 0.0) return wFastest + reusePenalty
         val wCustom = custom.calcEdgeWeight(edgeState, reverse)
         if (!wCustom.isFinite()) return Double.POSITIVE_INFINITY
         val customPenalty = (wCustom - wFastest).coerceAtLeast(0.0)
         val curvePenalty = wFastest * STRAIGHT_ROAD_PENALTY * straightness(edgeState)
-        return wFastest + complexity * (customPenalty + curvePenalty)
+        return wFastest + complexity * (customPenalty + curvePenalty) + reusePenalty
     }
 
     override fun calcEdgeMillis(edgeState: EdgeIteratorState, reverse: Boolean): Long =

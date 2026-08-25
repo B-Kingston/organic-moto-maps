@@ -130,6 +130,8 @@ class MotorcycleWeightingFactory(
 
         val carAccessEnc: BooleanEncodedValue = encodingManager.getBooleanEncodedValue("car_access")
         val surfaceEnc = encodingManager.getEnumEncodedValue(Surface.KEY, Surface::class.java)
+        val previousEdgeIds = hints.getObject(MOTO_PREVIOUS_EDGES, emptySet<Int>())
+        val previousEdgePenalty = hints.getDouble(MOTO_PREVIOUS_EDGE_PENALTY, 0.0).coerceAtLeast(0.0)
         return ComplexityWeighting(
             CustomWeighting(turnCostProvider, preparedModel.parameters),
             FastestWeighting(
@@ -142,6 +144,8 @@ class MotorcycleWeightingFactory(
             carAccessEnc,
             surfaceEnc,
             hints.getBool(BLOCK_UNPAVED, false),
+            previousEdgeIds,
+            previousEdgePenalty,
         )
     }
 

@@ -5,6 +5,8 @@ import android.content.pm.ApplicationInfo
 import android.os.SystemClock
 import android.util.Log
 import android.view.HapticFeedbackConstants
+import android.view.View
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.spring
@@ -231,9 +233,10 @@ fun RouteScreen() {
     var toText by remember { mutableStateOf("") }
     var fromPoint by remember { mutableStateOf<GHPoint?>(null) }
     var toPoint by remember { mutableStateOf<GHPoint?>(null) }
-    // Unbounded ride-complexity dial: 0.0 = Fastest, 1.0 = one full step of
-    // motorcycle/curve preference, and every further clockwise revolution
-    // strengthens it again. The dial has a hard minimum but no maximum.
+    // Ride-complexity dial levels: 0 = Fastest, each click adds one level
+    // (+1.0 of motorcycle/curve preference). Eight clicks per revolution;
+    // winding past the eighth level keeps counting (9, 10, ...). The dial
+    // has a hard minimum at zero and no maximum.
     var complexity by remember { mutableStateOf(0f) }
     val routePreferences = remember {
         context.applicationContext.getSharedPreferences(ROUTE_PREFS, Context.MODE_PRIVATE)
@@ -526,10 +529,16 @@ fun RouteScreen() {
 private fun complexityLabel(value: Float): String =
     if (value < 0.5f) "Fastest" else "Curvy route ${value.roundToInt()}"
 
+/** Clicks per knob revolution; one click = one level = +1.0 complexity. */
+private const val KNOB_LEVELS_PER_REVOLUTION = 8
+
 /**
- * An endless rotary control. One clockwise revolution adds 1.0 complexity;
- * counter-clockwise rotation subtracts it until the hard Fastest stop at zero.
- * The painted angle wraps, while [value] itself remains unbounded.
+ * An endless click-stop rotary control: [KNOB_LEVELS_PER_REVOLUTION] detent
+ * clicks per revolution, each clockwise click adding one complexity level
+ * (+1.0). Winding past the eighth level keeps counting into the next
+ * revolution (9, 10, ...); counter-clockwise rotation stops hard at zero.
+ * Every crossed detent fires a short haptic tick, and release snaps to the
+ * nearest level with a small spring settle.
  */
 @Composable
 private fun InfiniteComplexityKnob(
@@ -540,12 +549,29 @@ private fun InfiniteComplexityKnob(
     val latestValue by rememberUpdatedState(value)
     val latestOnValueChange by rememberUpdatedState(onValueChange)
     val latestOnFinished by rememberUpdatedState(onValueChangeFinished)
+    val view = LocalView.current
+    val scope = rememberCoroutineScope()
+    // The painted angle chases the committed value: exact finger tracking
+    // while dragging (snapTo), then a short mechanical bounce onto the
+    // clicked detent after release (animateTo).
+    val paintedLevels = remember { Animatable(value) }
     Canvas(
         modifier = Modifier
             .size(92.dp)
+            .semantics {
+                contentDescription = "Ride complexity level ${value.roundToInt()}"
+            }
             .pointerInput(Unit) {
                 var previousAngle = 0f
                 var gestureValue = 0f
+                fun hapticTick(level: Int) {
+                    // CLOCK_TICK is the platform's rotary-detent click; the
+                    // Fastest end stop gets the firmer VIRTUAL_KEY pulse.
+                    view.performHapticFeedback(
+                        if (level <= 0) HapticFeedbackConstants.VIRTUAL_KEY
+                        else HapticFeedbackConstants.CLOCK_TICK,
+                    )
+                }
                 detectDragGestures(
                     onDragStart = { position ->
                         previousAngle = atan2(
@@ -553,13 +579,27 @@ private fun InfiniteComplexityKnob(
                             position.x - size.width / 2f,
                         )
                         gestureValue = latestValue
+                        scope.launch { paintedLevels.snapTo(gestureValue) }
                     },
                     onDragEnd = {
-                        // Full turns are route detents. Snapping gives every
-                        // detent a stable alternative that can be deduplicated.
-                        gestureValue = gestureValue.roundToInt().toFloat()
+                        val snapped = gestureValue.roundToInt()
+                        if (snapped != gestureValue.toInt()) {
+                            // Release crossed one more detent than the drag
+                            // ticks announced: click that detent too.
+                            hapticTick(snapped)
+                        }
+                        gestureValue = snapped.toFloat()
                         latestOnValueChange(gestureValue)
                         latestOnFinished(gestureValue)
+                        scope.launch {
+                            paintedLevels.animateTo(
+                                snapped.toFloat(),
+                                spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = Spring.StiffnessMedium,
+                                ),
+                            )
+                        }
                     },
                     onDragCancel = {},
                     onDrag = { change, _ ->
@@ -571,9 +611,16 @@ private fun InfiniteComplexityKnob(
                         if (delta > PI) delta -= (2.0 * PI).toFloat()
                         if (delta < -PI) delta += (2.0 * PI).toFloat()
                         previousAngle = angle
-                        gestureValue = (gestureValue + delta / (2.0 * PI).toFloat())
+                        val levelsPerRadian =
+                            KNOB_LEVELS_PER_REVOLUTION / (2.0 * PI).toFloat()
+                        val newValue = (gestureValue + delta * levelsPerRadian)
                             .coerceAtLeast(0f)
+                        if (newValue.toInt() != gestureValue.toInt()) {
+                            hapticTick(newValue.toInt())
+                        }
+                        gestureValue = newValue
                         latestOnValueChange(gestureValue)
+                        scope.launch { paintedLevels.snapTo(newValue) }
                         change.consume()
                     },
                 )
@@ -585,15 +632,22 @@ private fun InfiniteComplexityKnob(
 
         drawCircle(Color(0x18000000), outerRadius, center + Offset(0f, 2.dp.toPx()))
         drawCircle(Color(0xFFE7E7E7), outerRadius, center)
-        repeat(24) { index ->
-            val angle = Math.toRadians(index * 15.0 - 90.0)
+        repeat(KNOB_LEVELS_PER_REVOLUTION) { index ->
+            val angle = Math.toRadians(-135.0 + index * 45.0)
             val dotCenter = center + Offset(
                 (cos(angle) * outerRadius * 0.84).toFloat(),
                 (sin(angle) * outerRadius * 0.84).toFloat(),
             )
+            val level = value.roundToInt().coerceAtLeast(0)
+            val activeDot = ((level % KNOB_LEVELS_PER_REVOLUTION) +
+                KNOB_LEVELS_PER_REVOLUTION) % KNOB_LEVELS_PER_REVOLUTION
             drawCircle(
-                color = if (index == 0 && value <= 0.001f) Color(0xFF249CF2) else Color(0xFF8A8A8A),
-                radius = if (index % 3 == 0) 2.dp.toPx() else 1.3.dp.toPx(),
+                color = when {
+                    index == 0 && level <= 0 -> Color(0xFF249CF2)
+                    index == activeDot && level > 0 -> Color(0xFF249CF2)
+                    else -> Color(0xFF8A8A8A)
+                },
+                radius = 2.dp.toPx(),
                 center = dotCenter,
             )
         }
@@ -606,7 +660,9 @@ private fun InfiniteComplexityKnob(
             style = Stroke(width = 1.dp.toPx()),
         )
 
-        val indicatorAngle = Math.toRadians(-135.0 + value.toDouble() * 360.0)
+        val indicatorAngle = Math.toRadians(
+            -135.0 + paintedLevels.value.toDouble() * (360.0 / KNOB_LEVELS_PER_REVOLUTION),
+        )
         val indicatorStart = center + Offset(
             (cos(indicatorAngle) * knobRadius * 0.48).toFloat(),
             (sin(indicatorAngle) * knobRadius * 0.48).toFloat(),
@@ -670,7 +726,7 @@ private fun RouteSettingsDialog(
         text = {
             Column(Modifier.fillMaxWidth()) {
                 Text(
-                    "Maximum shared roads",
+                    "Target maximum shared roads",
                     style = MaterialTheme.typography.labelMedium,
                     color = Color(0xFF8A000000),
                 )
@@ -691,8 +747,9 @@ private fun RouteSettingsDialog(
                     )
                 }
                 Text(
-                    "Lower values force routes to use more different roads. " +
-                        "Higher values allow more overlap and usually find alternatives faster.",
+                    "Lower values ask routes to use more different roads. " +
+                        "Higher values allow more overlap. If the road network cannot meet the target, " +
+                            "the most distinct sensible route is still shown.",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF8A000000),
                 )

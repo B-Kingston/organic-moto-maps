@@ -46,9 +46,10 @@ class GraphHopperRouter(context: Context) {
     private val appContext = context.applicationContext
     private val graphDir = File(appContext.filesDir, "gh-cache")
 
-    // Distinct routes already assigned to each full-turn dial detent. Keeping
-    // the edge-distance signature lets later detents reject routes that share
-    // more than the configured road percentage with any earlier one.
+    // Distinct routes already assigned to each dial-detent level (one knob
+    // click). Keeping the edge-distance signature lets later detents reject
+    // routes that share more than the configured road percentage with any
+    // earlier one.
     private data class RouteKey(
         val fromLat: Double,
         val fromLon: Double,
@@ -77,6 +78,18 @@ class GraphHopperRouter(context: Context) {
     private data class CachedRouteSet(
         val routes: List<CachedRoute>,
         val maxRoadSharePercent: Int,
+    )
+
+    private data class RouteDiversity(
+        val maxOverlap: Double,
+        val longestDistinctStretch: Double,
+    )
+
+    private data class FallbackCandidate(
+        val route: CachedRoute,
+        val diversity: RouteDiversity,
+        val withinDetourBudget: Boolean,
+        val isPrimary: Boolean,
     )
 
     private val routeCache = mutableMapOf<RouteKey, MutableMap<Int, CachedRouteSet>>()
@@ -192,16 +205,19 @@ class GraphHopperRouter(context: Context) {
     /**
      * Routes [from] to [to] with the motorcycle profile.
      *
-     * [complexity] is the unbounded ride-complexity dial detent (default 0):
+     * [complexity] is the unbounded ride-complexity dial detent in levels
+     * (default 0; one level per knob click):
      *  - 0: fastest route over motorcycle-model travel speeds.
-     *  - each full turn requests a materially distinct alternative with stronger
-     *    motorcycle/curve preference and a progressively wider detour budget.
+     *  - each positive level requests a materially distinct alternative with
+     *    stronger motorcycle/curve preference and a progressively wider
+     *    detour budget.
      *
      * The first returned route is the primary route. Positive detents can
-     * return up to two additional routes. Alternatives sharing more than
-     * [maxRoadShare] of their road distance with any route already assigned to
-     * this endpoint pair are rejected. When [blockUnpaved] is true, known
-     * unpaved surface types are hard-blocked.
+     * return up to two additional routes. [maxRoadShare] is a strong diversity
+     * target against every route already assigned to this endpoint pair. If the
+     * network cannot meet it, routing returns the most distinct meaningful
+     * candidate available rather than rejecting the ride. When [blockUnpaved]
+     * is true, known unpaved surface types are hard-blocked.
      */
     fun route(
         from: GHPoint,
@@ -233,21 +249,21 @@ class GraphHopperRouter(context: Context) {
                 .orEmpty()
         }
 
-        // The first returned path of a positive detent is the complexity
-        // weighting's own optimum: it defines the ride the dial position asks
-        // for. Alternatives are safeguarded relative to it, never against the
-        // much faster complexity-0 route — a curvy ride is legitimately slow,
-        // and judging it against Fastest made mid detents fail entirely while
-        // higher detents (with looser caps) returned routes again.
+        // The first returned path of the first attempt is this detent's own
+        // softly diversified optimum: it defines the ride the dial position
+        // asks for. Alternatives are safeguarded relative to it, never against
+        // the much faster complexity-0 route — a curvy ride is legitimately
+        // slow, and judging it against Fastest made mid detents fail entirely.
         var referenceRoute: CachedRoute? = null
         val started = SystemClock.elapsedRealtime()
-        var leastOverlapping: Pair<CachedRoute, Double>? = null
         var rejectedAsDetour = 0
         val accepted = mutableListOf<CachedRoute>()
+        val fallbackCandidates = mutableListOf<FallbackCandidate>()
 
-        // Widen exploration on each retry, but never widen the accepted route
-        // weight. The old exponential 2.5x -> 5x -> 10x allowance manufactured
-        // extreme diversions merely to satisfy a low shared-road setting.
+        // Start with the requested overlap, then widen GraphHopper's INTERNAL
+        // candidate pool on retries. Our own overlap check remains unchanged;
+        // the wider pool is what lets us find a useful best-effort route when
+        // the road network cannot meet the target exactly.
         for (attempt in 0..2) {
             if (accepted.size >= MAX_DISPLAYED_ROUTES) break
             val request = GHRequest(from, to)
@@ -257,15 +273,29 @@ class GraphHopperRouter(context: Context) {
             request.putHint(MOTO_COMPLEXITY, detent.toDouble())
             request.putHint(BLOCK_UNPAVED, blockUnpaved)
             if (detent > 0) {
+                request.putHint(
+                    MOTO_PREVIOUS_EDGES,
+                    previous.flatMapTo(mutableSetOf()) { it.edgeDistances.keys },
+                )
+                request.putHint(
+                    MOTO_PREVIOUS_EDGE_PENALTY,
+                    previousRoadPenalty(safeMaxRoadShare, detent, attempt),
+                )
                 request.setAlgorithm(Parameters.Algorithms.ALT_ROUTE)
                 request.putHint(
                     Parameters.Algorithms.AltRoute.MAX_PATHS,
                     (8 + detent * 3 + attempt * 6).coerceAtMost(40),
                 )
-                request.putHint(Parameters.Algorithms.AltRoute.MAX_SHARE, safeMaxRoadShare)
+                request.putHint(
+                    Parameters.Algorithms.AltRoute.MAX_SHARE,
+                    min(MAX_CANDIDATE_SHARE, safeMaxRoadShare + attempt * CANDIDATE_SHARE_STEP),
+                )
                 request.putHint(
                     Parameters.Algorithms.AltRoute.MAX_WEIGHT,
-                    maxAlternativeWeight(detent),
+                    min(
+                        MAX_ALTERNATIVE_WEIGHT,
+                        maxAlternativeWeight(detent) + attempt * CANDIDATE_WEIGHT_STEP,
+                    ),
                 )
                 request.putHint(
                     "alternative_route.max_exploration_factor",
@@ -305,21 +335,29 @@ class GraphHopperRouter(context: Context) {
                 if (accepted.size >= MAX_DISPLAYED_ROUTES) break
                 val candidate = cachedRoute(path)
                 val reference = referenceRoute
-                if (reference != null &&
-                    (!withinGlobalDetourBudget(candidate.path, reference.path, detent) ||
-                        hasExcessiveLocalDetour(candidate.edgeSections, reference.edgeSections))
-                ) {
+                val isPrimary = reference == null
+                if (isPrimary) referenceRoute = candidate
+                val withinDetourBudget = reference == null ||
+                    withinGlobalDetourBudget(candidate.path, reference.path, detent)
+                val isLocalBubble = reference != null &&
+                    hasExcessiveLocalDetour(candidate.edgeSections, reference.edgeSections)
+                if (isLocalBubble) {
                     rejectedAsDetour++
                     continue
                 }
-                if (reference == null) referenceRoute = candidate
-                val overlap = previous.maxOfOrNull {
-                    sharedRoadFraction(candidate.edgeDistances, it.edgeDistances)
-                } ?: 0.0
-                if (leastOverlapping == null || overlap < leastOverlapping!!.second) {
-                    leastOverlapping = candidate to overlap
+                val diversity = routeDiversity(candidate, previous)
+                if (fallbackCandidates.none { it.route.edgeDistances == candidate.edgeDistances }) {
+                    fallbackCandidates += FallbackCandidate(
+                        candidate,
+                        diversity,
+                        withinDetourBudget,
+                        isPrimary,
+                    )
                 }
-                if (overlap > safeMaxRoadShare) continue
+                if (!withinDetourBudget ||
+                    !isMeaningfullyDifferent(candidate, diversity, previous) ||
+                    diversity.maxOverlap > safeMaxRoadShare
+                ) continue
                 val siblingOverlap = accepted.maxOfOrNull {
                     sharedRoadFraction(candidate.edgeDistances, it.edgeDistances)
                 } ?: 0.0
@@ -349,16 +387,91 @@ class GraphHopperRouter(context: Context) {
             return RouteResult(accepted.map { it.path })
         }
 
-        val bestOverlap = leastOverlapping?.second ?: 1.0
+        // The percentage is a strong target, not a reason to strand the rider.
+        // Prefer a meaningful candidate that reaches it even when the candidate
+        // exceeds the normal detour budget; otherwise take the most distinct
+        // sensible candidate. A tiny side-street-only variation ranks below the
+        // detent's own primary, so we show the honest optimum instead of
+        // manufacturing novelty.
+        val fallback = fallbackCandidates.minWithOrNull(
+            compareBy<FallbackCandidate> {
+                fallbackTier(it, safeMaxRoadShare, previous)
+            }.thenBy { it.diversity.maxOverlap }
+                .thenByDescending { it.diversity.longestDistinctStretch }
+                .thenBy { it.route.path.time }
+        ) ?: referenceRoute?.let {
+            FallbackCandidate(it, routeDiversity(it, previous), true, true)
+        } ?: throw IllegalStateException("No route was found")
+        val cachedSet = CachedRouteSet(listOf(fallback.route), sharePercent)
+        synchronized(routeCache) {
+            routeCache.getOrPut(key) { mutableMapOf() }[detent] = cachedSet
+        }
         Log.w(
             TAG,
-            "No sensible route at detent $detent met the $sharePercent% overlap limit; " +
-                "best overlap=$bestOverlap, detours rejected=$rejectedAsDetour",
+            "Shared-road target unavailable at detent $detent; returning best route " +
+                "(${(fallback.diversity.maxOverlap * 100.0).roundToInt()}% overlap, " +
+                "detours rejected=$rejectedAsDetour)",
         )
-        throw IllegalStateException(
-            "No sensible route with at most $sharePercent% shared roads was found. " +
-                "Increase the allowed shared-road percentage rather than taking a pointless detour."
+        return RouteResult(listOf(fallback.route.path))
+    }
+
+    private fun fallbackTier(
+        candidate: FallbackCandidate,
+        maxRoadShare: Double,
+        previous: List<CachedRoute>,
+    ): Int {
+        val meaningful = isMeaningfullyDifferent(candidate.route, candidate.diversity, previous)
+        return when {
+            meaningful && candidate.diversity.maxOverlap <= maxRoadShare -> 0
+            meaningful && candidate.withinDetourBudget -> 1
+            meaningful -> 2
+            candidate.isPrimary -> 3
+            else -> 4
+        }
+    }
+
+    private fun routeDiversity(
+        candidate: CachedRoute,
+        previous: List<CachedRoute>,
+    ): RouteDiversity {
+        if (previous.isEmpty()) return RouteDiversity(0.0, candidate.path.distance)
+        val closest = previous.maxByOrNull {
+            sharedRoadFraction(candidate.edgeDistances, it.edgeDistances)
+        } ?: return RouteDiversity(0.0, candidate.path.distance)
+        return RouteDiversity(
+            sharedRoadFraction(candidate.edgeDistances, closest.edgeDistances),
+            longestDistinctStretch(candidate.edgeSections, closest.edgeDistances.keys),
         )
+    }
+
+    private fun isMeaningfullyDifferent(
+        candidate: CachedRoute,
+        diversity: RouteDiversity,
+        previous: List<CachedRoute>,
+    ): Boolean {
+        if (previous.isEmpty()) return true
+        val requiredStretch = min(
+            MAX_MEANINGFUL_STRETCH,
+            maxOf(MIN_MEANINGFUL_STRETCH, candidate.path.distance * MEANINGFUL_STRETCH_FRACTION),
+        )
+        return diversity.longestDistinctStretch >= requiredStretch
+    }
+
+    private fun longestDistinctStretch(
+        candidate: List<EdgeSection>,
+        comparisonEdgeIds: Set<Int>,
+    ): Double {
+        var longest = 0.0
+        var current = 0.0
+        candidate.forEach { section ->
+            if (section.edgeId !in comparisonEdgeIds) {
+                current += section.distance
+                longest = maxOf(longest, current)
+            } else {
+                current = 0.0
+            }
+        }
+        return longest
     }
 
     private fun cachedRoute(path: ResponsePath): CachedRoute {
@@ -482,12 +595,29 @@ class GraphHopperRouter(context: Context) {
     }
 
     private fun maxAlternativeWeight(detent: Int): Double =
-        min(MAX_ALTERNATIVE_WEIGHT, 1.50 + detent * 0.25)
+        min(BASE_MAX_ALTERNATIVE_WEIGHT, 1.50 + detent * 0.25)
+
+    private fun previousRoadPenalty(maxRoadShare: Double, detent: Int, attempt: Int): Double =
+        (1.0 - maxRoadShare) *
+            (BASE_PREVIOUS_ROAD_PENALTY + attempt * PREVIOUS_ROAD_PENALTY_STEP) *
+            (1.0 + detent * PREVIOUS_ROAD_DETENT_STEP)
 
     private companion object {
         const val DEFAULT_MAX_ROUTE_SHARE = 0.70
-        const val MAX_ALTERNATIVE_WEIGHT = 2.50
+        const val BASE_MAX_ALTERNATIVE_WEIGHT = 2.50
+        const val MAX_ALTERNATIVE_WEIGHT = 4.00
+        const val CANDIDATE_WEIGHT_STEP = 0.75
+        const val MAX_CANDIDATE_SHARE = 0.98
+        const val CANDIDATE_SHARE_STEP = 0.20
         const val MIN_PLATEAU_FACTOR = 0.10
+
+        const val BASE_PREVIOUS_ROAD_PENALTY = 2.0
+        const val PREVIOUS_ROAD_PENALTY_STEP = 6.0
+        const val PREVIOUS_ROAD_DETENT_STEP = 0.10
+
+        const val MIN_MEANINGFUL_STRETCH = 750.0
+        const val MAX_MEANINGFUL_STRETCH = 3_000.0
+        const val MEANINGFUL_STRETCH_FRACTION = 0.05
 
         const val FIRST_DETENT_TIME_RATIO = 1.50
         const val FIRST_DETENT_DISTANCE_RATIO = 1.65
