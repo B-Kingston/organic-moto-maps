@@ -41,6 +41,7 @@ android {
         // (tools/fdroid-repo/publish.sh); defaults keep normal builds intact.
         versionCode = findProperty("moto.versionCode")?.toString()?.toIntOrNull() ?: 1
         versionName = findProperty("moto.versionName")?.toString() ?: "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GEOCODER_SHA256", "\"$geocoderSha256\"")
     }
 
@@ -115,4 +116,11 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
+
+    // Saved-route storage tests: pure JVM suites for the codec/projection/
+    // similarity/repository logic, instrumented suites for the real SQLite.
+    testImplementation(libs.junit4)
+    testImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
 }
