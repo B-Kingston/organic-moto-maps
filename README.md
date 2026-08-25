@@ -1,107 +1,58 @@
 # Organic Moto Maps
 
-Offline-first motorcycle routing for Android. Kotlin + Jetpack Compose + MapLibre
-Android SDK (map) + GraphHopper core (offline routing).
+Offline-first motorcycle routing for Android.
+Kotlin + Jetpack Compose + MapLibre Android SDK (map) + GraphHopper core (routing).
 
-## Status / Scope
+The app makes **zero runtime network calls**: the vector basemap, map style,
+glyphs/sprites, place-search index, and routing graph are all prebuilt on the
+desktop and shipped inside the APK.
 
-- Full-screen map rendering MapLibre demo tiles (`https://demotiles.maplibre.org/style.json`).
-  This is the only runtime network call in the app.
-- Routing runs fully offline against a GraphHopper graph built from a local OSM extract.
-- From/To are geocode-search fields backed by an offline index
-  (`assets/geocoder/geocoder.dat`, built by `:geocoder-tool`, see AGENTS.md).
-  Plain `lat,lon` pairs still work (geocoder COORDINATE result or `PointParser` fallback).
-- Location permissions are declared but no runtime permission request / GPS display yet.
+## Features
+
+- **Offline basemap** — OpenMapTiles vector tiles in a PMTiles archive, rendered
+  by MapLibre Native with a local style (`app/src/main/assets/style.json`).
+- **Offline place search** — From/To fields backed by a prebuilt on-device
+  geocoder index; raw `lat,lon` entry also works.
+- **Offline motorcycle routing** — GraphHopper with a motorcycle custom model,
+  shipped as a pre-compiled weighting helper because Janino bytecode cannot load
+  on ART.
+- **Ride complexity dial** — an endless click-detent knob. Level 0 is the
+  fastest route; each click adds one step of curve preference. Positive levels
+  request genuinely different alternatives, softly penalizing roads used by
+  lower levels, with a configurable maximum shared-road target (10–90%).
 
 ## Building
 
-Requires JDK 17 and Android SDK 35 (installs via Android Studio or `sdkmanager`).
+Requires JDK 17 and an Android SDK.
 
 ```
 JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew assembleDebug
 ```
 
-`JAVA_HOME` points at the keg-only Homebrew JDK 17; use any JDK 17 installation.
-The Gradle wrapper (8.13) is required — a plain `gradle` on a newer JDK breaks AGP.
+Output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-Note: the Gradle wrapper jar is not committed. If you have a local Gradle
-installation, run `gradle wrapper` once to generate `gradle/wrapper/gradle-wrapper.jar`
-(the wrapper properties file is already present and points at Gradle 8.13).
-Android Studio can also repair/generate the wrapper on open.
+The Gradle wrapper jar is not committed — run `gradle wrapper` once, or let
+Android Studio repair it on open.
 
-## Supplying map data
+## Data pipelines (required before first build)
 
-The routing graph is built on the desktop and shipped in the APK. The app never
-imports OSM data on the device.
+The generated assets are gitignored; a fresh clone has none of them until the
+pipelines are re-run. All take an OSM `.osm.pbf` extract placed at
+`data/queensland.osm.pbf`:
 
-1. Download an OSM extract in PBF format for your region (e.g. from Geofabrik)
-   and place it at `data/queensland.osm.pbf` (or point `tools/gh/config.yml`'s
-   `datareader.file` at your file — relative paths resolve against the repo root).
-2. Build the graph (needs JDK 17; ~5-10 min for a state-sized extract), from the
-   **repo root** so the relative paths in `config.yml` resolve:
+1. **Routing graph** — import with `tools/gh/graphhopper-web-11.0.jar`, copy
+   `data/graph-cache` into `app/src/main/assets/graph-cache`.
+2. **Basemap tiles** — `tools/tiles/build-tiles.sh` (Planetiler, needs JDK 21).
+3. **Style glyphs & sprites** — `tools/style/fetch-style-assets.sh`.
+4. **Geocoder index** — `./gradlew :geocoder-tool:run` writes
+   `app/src/main/assets/geocoder/geocoder.dat`.
 
-   ```
-   JAVA_HOME=/opt/homebrew/opt/openjdk@17
-   $JAVA_HOME/bin/java -Xmx12g -jar tools/gh/graphhopper-web-11.0.jar import tools/gh/config.yml
-   ```
+Exact commands, version pins, and hard constraints live in [AGENTS.md](AGENTS.md).
 
-3. Copy the result into the app assets:
+## Attribution & licenses
 
-   ```
-   cp -R data/graph-cache app/src/main/assets/graph-cache
-   ```
-
-4. `./gradlew assembleDebug`. On first launch the app copies the graph from
-   assets to `{filesDir}/gh-cache` and then loads it with mmap — no import on
-   device, routing works immediately.
-5. Without `assets/graph-cache` the app shows a clear "Graph data not found" error.
-
-Graph files are stored uncompressed in assets; the APK is large by design.
-
-Sanity-check a rebuilt graph by serving it and routing (binds port **8080**):
-
-```
-$JAVA_HOME/bin/java -jar tools/gh/graphhopper-web-11.0.jar server tools/gh/config.yml
-curl "http://localhost:8080/route?point=-27.4679,153.0281&point=-16.9203,145.7710&profile=motorcycle"
-```
-
-## Routing profile and the canonical custom model
-
-GraphHopper is configured with profile name `motorcycle` (see `tools/gh/config.yml`
-and `routing/GraphHopperRouter.kt`). The import reads
-`custom_model_files: [motorcycle.json]`, which GraphHopper 11 resolves to the
-**JAR's built-in** model (`/com/graphhopper/custom_models/motorcycle.json` classpath
-resource) — it does not read `tools/gh/motorcycle.json` from disk, and a filesystem
-file with that name would abort the import ("already used for built-in profiles").
-
-`tools/gh/motorcycle.json` is the checked-in **canonical reference copy** of that
-built-in model and must stay identical to it. Everything that implements the model
-must change together with it:
-
-- `tools/gh/motorcycle.json` — canonical model (reference copy of the built-in)
-- `GraphHopperRouter.motorcycleProfile()` — runtime profile; its content string is
-  hashed into the graph's stored profile version (`motorcycle|198752012`), so it
-  must stay bit-for-bit identical to the import-time profile
-- `tools/gh/GenerateWeighting.java` — desktop mirror used to dump the app's
-  pre-compiled weighting helper
-- `app/src/main/java/com/graphhopper/routing/weighting/custom/MotorcycleWeightingHelper.java`
-  — the Janino-generated helper shipped as plain Java (ART cannot load Janino bytecode)
-- `MotorcycleWeightingFactory.kt` — max-speed math mirroring the speed statements
-
-`./tools/gh/generate-weighting.sh` verifies the first three agree before dumping the
-helper source. Graph version and profile must match between the import tool and
-`graphhopper-core` in `gradle/libs.versions.toml` (11.0).
-
-## Geocoding index
-
-The offline search index is prebuilt and shipped in APK assets, mirroring the
-graph pipeline. Build it with `:geocoder-tool` before `assembleDebug` (see
-AGENTS.md, "Geocoding data pipeline"). The generated `geocoder.dat` is
-intentionally gitignored, and the Android build fails clearly if it is absent
-instead of silently producing an APK without place search.
-
-## License note
-
-GraphHopper core is Apache-2.0 licensed. This app embeds the library for
-offline routing only; no GraphHopper Directions API or other hosted service
-is contacted at runtime.
+- Map data and style: © OpenMapTiles.org © OpenStreetMap contributors
+  (shown in-app; required by their licenses).
+- Noto fonts: SIL OFL 1.1. OSM Bright sprites: CC BY 4.0.
+- GraphHopper core: Apache-2.0, embedded for offline routing only — no hosted
+  GraphHopper service is contacted.
