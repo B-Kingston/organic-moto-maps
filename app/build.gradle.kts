@@ -37,8 +37,10 @@ android {
         applicationId = "com.organicmoto.maps"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Packaging-time overrides for the local F-Droid test repo
+        // (tools/fdroid-repo/publish.sh); defaults keep normal builds intact.
+        versionCode = findProperty("moto.versionCode")?.toString()?.toIntOrNull() ?: 1
+        versionName = findProperty("moto.versionName")?.toString() ?: "0.1.0"
         buildConfigField("String", "GEOCODER_SHA256", "\"$geocoderSha256\"")
     }
 

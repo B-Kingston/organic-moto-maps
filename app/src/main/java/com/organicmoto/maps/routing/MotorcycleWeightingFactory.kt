@@ -6,6 +6,7 @@ import com.graphhopper.routing.WeightingFactory
 import com.graphhopper.routing.ev.BooleanEncodedValue
 import com.graphhopper.routing.ev.DecimalEncodedValue
 import com.graphhopper.routing.ev.EncodedValueLookup
+import com.graphhopper.routing.ev.Surface
 import com.graphhopper.routing.ev.TurnRestriction
 import com.graphhopper.routing.util.EncodingManager
 import com.graphhopper.routing.weighting.DefaultTurnCostProvider
@@ -31,16 +32,11 @@ import com.graphhopper.util.TurnCostsConfig
  * [CustomWeighting.Parameters] from the pre-compiled [MotorcycleWeightingHelper]
  * instead.
  *
- * The factory also implements the `moto_blend` route slider (request hint
- * [MOTO_BLEND], value in [0,1], default 1.0): a value below 1.0 returns a
- * [BlendedWeighting] that linearly blends the motorcycle [CustomWeighting]
- * with [FastestWeighting]. Both use the model's effective motorcycle speeds;
- * Fastest omits only its scenic road priorities and distance influence. At
- * t = 1.0 — and during graph load, where
- * the hints PMap is empty — the pure CustomWeighting is returned exactly as
- * before, so the stored graph and its baked-in profile hash are untouched.
- * The caller must set `ch.disable` for t < 1: the CH solver ignores request
- * hints and always uses the weighting baked into the CH graph at import time.
+ * The factory also implements the `moto_complexity` rotary control (request
+ * hint [MOTO_COMPLEXITY], value >= 0). Zero is Fastest and larger values keep
+ * strengthening custom-model and geometry-derived curve preferences. Graph
+ * loading has no hint and returns pure [CustomWeighting], preserving the stored
+ * profile. Dial requests carry the hint and always require flexible routing.
  *
  * Any other profile is delegated to the default factory: non-custom weightings
  * are safe (they do not involve Janino), while custom weightings on other
@@ -125,19 +121,16 @@ class MotorcycleWeightingFactory(
             TurnCostProvider.NO_TURN_COST_PROVIDER
         }
 
-        // Route-blend slider: t in [0,1] via the moto_blend request hint,
-        // default 1.0. At t >= 1.0 return the pure CustomWeighting exactly as
-        // before (this is also the path taken during graph load, where the
-        // hints PMap is empty). For t < 1.0 blend in FastestWeighting;
-        // GraphHopperRouter must also set Parameters.CH.DISABLE, because the
-        // CH solver uses the weighting baked into the CH graph at import time
-        // and ignores request hints entirely — without it the slider would
-        // silently do nothing.
-        val blend = hints.getDouble(MOTO_BLEND, 1.0).coerceIn(0.0, 1.0)
-        if (blend >= 1.0) return CustomWeighting(turnCostProvider, preparedModel.parameters)
+        // Graph load has no dial hint and must receive the exact pure custom
+        // weighting that was used to import CH. GraphHopperRouter includes the
+        // hint on every user route, including complexity 1.
+        if (!hints.has(MOTO_COMPLEXITY))
+            return CustomWeighting(turnCostProvider, preparedModel.parameters)
+        val complexity = hints.getDouble(MOTO_COMPLEXITY, 0.0).coerceAtLeast(0.0)
 
         val carAccessEnc: BooleanEncodedValue = encodingManager.getBooleanEncodedValue("car_access")
-        return BlendedWeighting(
+        val surfaceEnc = encodingManager.getEnumEncodedValue(Surface.KEY, Surface::class.java)
+        return ComplexityWeighting(
             CustomWeighting(turnCostProvider, preparedModel.parameters),
             FastestWeighting(
                 preparedModel.helper::getSpeed,
@@ -145,8 +138,10 @@ class MotorcycleWeightingFactory(
                 turnCostProvider,
                 carAccessEnc,
             ),
-            blend,
+            complexity,
             carAccessEnc,
+            surfaceEnc,
+            hints.getBool(BLOCK_UNPAVED, false),
         )
     }
 
