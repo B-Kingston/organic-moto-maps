@@ -133,7 +133,7 @@ class SqlSavedRouteStore(context: Context) : SavedRouteStore {
             null,
             null,
         ).use {
-            check(it.moveToFirst()) {
+            require(it.moveToFirst()) {
                 "Cannot comment on route ${comment.routeId}: no such saved route"
             }
         }

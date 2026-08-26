@@ -87,7 +87,11 @@ private val END_MARKER = Color(0xFF303030)
  */
 @Composable
 fun RouteMiniMap(geometry: String, modifier: Modifier = Modifier) {
-    val points = remember(geometry) { PolylineCodec.decode(geometry) }
+    // A corrupt/truncated stored polyline must not throw during composition
+    // and tear down the whole saved-routes sheet; render it as an empty banner.
+    val points = remember(geometry) {
+        runCatching { PolylineCodec.decode(geometry) }.getOrDefault(emptyList())
+    }
     Canvas(modifier = modifier) {
         drawRect(color = BANNER_BACKGROUND)
         if (points.isEmpty()) return@Canvas

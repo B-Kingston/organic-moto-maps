@@ -33,7 +33,8 @@ internal const val BLOCK_UNPAVED = "block_unpaved"
 /**
  * Weighting for the unbounded motorcycle ride-complexity dial.
  *
- * Complexity 0 is pure fastest. Positive values add two non-negative costs:
+ * Complexity 0 is pure fastest over the motorcycle model's accessible roads.
+ * Positive values add two non-negative costs:
  * the fixed motorcycle custom-model penalty and a straight-road penalty derived
  * from each edge's actual OSM geometry. The result is
  * `w_fastest + complexity * (w_custom - w_fastest + w_curvePenalty)`, so the
@@ -58,8 +59,9 @@ internal const val BLOCK_UNPAVED = "block_unpaved"
  * filter — its directed edge filter only checks `!inSubnetwork` and
  * `Double.isFinite(weighting.calcEdgeWeight(...))` — so the weighting itself
  * must return [Double.POSITIVE_INFINITY] for edges where `car_access` is
- * false. Reading the EV on virtual edges is safe: the QueryGraph forwards EV
- * reads to the original edge.
+ * false AND for edges the custom model prices at priority 0 (high track
+ * grades, private roads). Reading the EVs on virtual edges is safe: the
+ * QueryGraph forwards EV reads to the original edge.
  *
  * [calcEdgeMillis] always reports travel time from the fastest component.
  * Fastest and custom use the same motorcycle-model speed mapping; only their
@@ -96,11 +98,16 @@ class ComplexityWeighting(
         } else {
             0.0
         }
-        // Avoid `0 * Infinity` at Fastest. At every positive complexity an
-        // infinite custom weight must stay blocked.
-        if (complexity == 0.0) return wFastest + reusePenalty
         val wCustom = custom.calcEdgeWeight(edgeState, reverse)
+        // The custom model's priority-0 edges (no car access, high track
+        // grades, private roads) are hard blocks at EVERY dial position; the
+        // dial only scales the soft preference above that floor. Skipping
+        // this check at Fastest let detent 0 route over roads every positive
+        // detent forbids.
         if (!wCustom.isFinite()) return Double.POSITIVE_INFINITY
+        // Avoid `0 * Infinity`: the soft custom preference joins the blend
+        // only at positive complexity.
+        if (complexity == 0.0) return wFastest + reusePenalty
         val customPenalty = (wCustom - wFastest).coerceAtLeast(0.0)
         val curvePenalty = wFastest * STRAIGHT_ROAD_PENALTY * straightness(edgeState)
         return wFastest + complexity * (customPenalty + curvePenalty) + reusePenalty

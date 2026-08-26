@@ -125,6 +125,31 @@ class SavedRouteRepositoryTest {
         assertTrue(repository.comments(routeId).isEmpty())
     }
 
+    @Test
+    fun `deleting an unknown route is a no-op`() = runTest {
+        val saved = repository.save(draft())
+        store.deleteRoute(999_999L)
+        assertEquals(listOf(saved.id), store.summaries().map { it.route.id })
+    }
+
+    @Test
+    fun `store preserves comment text verbatim`() = runTest {
+        val routeId = repository.save(draft()).id
+        val raw = "  keep this text  "
+        store.insertComment(SavedRouteComment(0L, routeId, raw, 123L))
+        assertEquals(raw, store.comments(routeId).single().text)
+    }
+
+    @Test
+    fun `two saves create independent rows`() = runTest {
+        val first = repository.save(draft(fromName = "First"))
+        val second = repository.save(draft(fromName = "Second"))
+        assertTrue(first.id > 0L)
+        assertTrue(second.id > 0L)
+        assertTrue(first.id != second.id)
+        assertEquals(setOf("First", "Second"), repository.summaries().map { it.route.fromName }.toSet())
+    }
+
     private fun draft(
         fromName: String = "Brisbane",
         toName: String = "Gold Coast",

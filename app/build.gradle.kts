@@ -108,6 +108,8 @@ dependencies {
     implementation(libs.slf4j.android)
 
     implementation(platform(libs.compose.bom))
+    androidTestImplementation(platform(libs.compose.bom))
+    debugImplementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
@@ -123,4 +125,11 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    // Espresso 3.5 reflectively calls InputManager.getInstance(), removed on API 35.
+    // Pin the API-35-compatible release for Compose and AndroidX test rules.
+    androidTestImplementation(libs.androidx.test.espresso)
+    debugImplementation(libs.compose.ui.test.manifest)
+    androidTestImplementation(libs.androidx.test.rules)
+    testImplementation(libs.org.json)
 }

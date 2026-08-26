@@ -40,7 +40,11 @@ data class GeocodeResult(
  * cancelled (e.g. a newer keystroke restarted the search), the running search
  * aborts instead of grinding to completion on the IO pool.
  */
-class SearchEngine(private val index: GeocoderIndex) {
+class SearchEngine(
+    private val index: GeocoderIndex,
+    private val clockMs: () -> Long = { SystemClock.elapsedRealtime() },
+    private val logTiming: (String) -> Unit = { Log.d(TAG, it) },
+) {
 
     /**
      * Searches [query], returning up to [limit] results ranked near (pivotLat, pivotLon).
@@ -54,14 +58,13 @@ class SearchEngine(private val index: GeocoderIndex) {
         pivotLon: Double = 146.725,
         limit: Int = 8,
     ): List<GeocodeResult> {
-        val started = SystemClock.elapsedRealtime()
+        val started = clockMs()
         val job = currentCoroutineContext()[Job]
         val results = searchInternal(query, pivotLat, pivotLon, limit) {
             job == null || job.isActive
         }
-        Log.d(
-            TAG,
-            "Search returned ${results.size} result(s) in ${SystemClock.elapsedRealtime() - started} ms",
+        logTiming(
+            "Search returned ${results.size} result(s) in ${clockMs() - started} ms",
         )
         return results
     }

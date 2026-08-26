@@ -98,6 +98,55 @@ class PolylineCodecTest {
         }
     }
 
+    @Test
+    fun `round-trips coordinates next to the antimeridian`() {
+        val points = listOf(
+            GeoPoint(0.0, 179.99999),
+            GeoPoint(0.00001, -179.99999),
+            GeoPoint(-0.00001, 179.99995),
+        )
+        val decoded = PolylineCodec.decode(PolylineCodec.encode(points))
+        assertEquals(points.size, decoded.size)
+        points.zip(decoded).forEach { (expected, actual) ->
+            assertTrue(abs(expected.lat - actual.lat) <= QUANTISATION_LIMIT)
+            assertTrue(abs(expected.lon - actual.lon) <= QUANTISATION_LIMIT)
+        }
+    }
+
+    @Test
+    fun `round-trips latitude and longitude boundaries on the encoding grid`() {
+        val points = listOf(
+            GeoPoint(-90.0, -180.0),
+            GeoPoint(90.0, 180.0),
+            GeoPoint(0.0, 0.0),
+        )
+        val decoded = PolylineCodec.decode(PolylineCodec.encode(points))
+        assertEquals(points.size, decoded.size)
+        points.zip(decoded).forEach { (expected, actual) ->
+            assertEquals(expected.lat, actual.lat, 0.0)
+            assertEquals(expected.lon, actual.lon, 0.0)
+        }
+    }
+
+    @Test
+    fun `round-trips seeded random geometries within quantisation`() {
+        val random = Random(7)
+        repeat(200) {
+            val points = List(random.nextInt(1, 40)) {
+                GeoPoint(
+                    -90.0 + random.nextDouble() * 180.0,
+                    -180.0 + random.nextDouble() * 360.0,
+                )
+            }
+            val decoded = PolylineCodec.decode(PolylineCodec.encode(points))
+            assertEquals(points.size, decoded.size)
+            points.zip(decoded).forEach { (expected, actual) ->
+                assertTrue(abs(expected.lat - actual.lat) <= QUANTISATION_LIMIT)
+                assertTrue(abs(expected.lon - actual.lon) <= QUANTISATION_LIMIT)
+            }
+        }
+    }
+
     private companion object {
         /** One quantum is 5e-6 degrees; allow a hair more for binary rounding. */
         const val QUANTISATION_LIMIT = 5.1e-6

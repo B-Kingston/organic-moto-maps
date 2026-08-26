@@ -39,7 +39,15 @@ internal object RouteSimilarity {
             total += minDistanceMeters(point, candidate, candidateVertexCap)
             count++
         }
-        return if (count == 0) Double.MAX_VALUE else total / count
+        if (count == 0) return Double.MAX_VALUE
+        val forwardEndpoints =
+            haversineMeters(reference.first(), candidate.first()) +
+                haversineMeters(reference.last(), candidate.last())
+        val reverseEndpoints =
+            haversineMeters(reference.first(), candidate.last()) +
+                haversineMeters(reference.last(), candidate.first())
+        val directionPenalty = if (reverseEndpoints < forwardEndpoints) forwardEndpoints else 0.0
+        return total / count + directionPenalty
     }
 
     /**

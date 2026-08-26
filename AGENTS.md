@@ -8,15 +8,23 @@ Offline-first motorcycle routing app. Kotlin + Compose + MapLibre (map) + GraphH
 JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew assembleDebug
 ```
 
-- `JAVA_HOME` is mandatory: the keg-only JDK 17 at `/opt/homebrew/opt/openjdk@17` is the only compatible JDK. Plain `gradle` is Gradle 9.7 on JDK 26 and breaks AGP 8.7.3; always use `./gradlew` (wrapper = Gradle 8.13).
+- `JAVA_HOME` is mandatory. Use `/opt/homebrew/opt/openjdk@17`. Plain `gradle` uses Gradle 9.7 on JDK 26 and breaks this build. Always use `./gradlew` (wrapper = Gradle 9.5.0, AGP = 9.3.1, Kotlin = 2.2.10).
 - Output: `app/build/outputs/apk/debug/app-debug.apk`; size depends on generated graph and tile assets (~400 MB with the current Queensland archive).
 - `local.properties` (gitignored) points `sdk.dir` at `~/Library/Android/sdk`.
 - `minSdk = 26` is a hard floor: GraphHopper's jar fails dexing below it. Do not lower.
-- Tests exist for the route-storage layer only: `./gradlew :app:testDebugUnitTest`
-  (JVM: codec, mini-map projection, similarity, repository contract) and
-  `./gradlew :app:connectedDebugAndroidTest` (real SQLite on the emulator; needs a booted AVD).
-  Instrumented test methods must NOT use backtick-spaced names — D8 rejects them at minSdk 26.
-  No lint, no CI. A successful build plus these suites is the verification.
+- `tools/test/ci.sh` is the light CI tier. It runs `tools/test/preflight.sh`, every JVM suite, and `assembleDebug`. It does not need an emulator.
+- `tools/test/run-all.sh` is the manual full trigger. It runs the light tier, pre-warms the graph, tiles, and geocoder, proves routing and map rendering in airplane mode, then runs every instrumented suite with seeded fuzzing. It needs a booted AVD.
+- Direct JVM command: `JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew :app:testDebugUnitTest :geocoder-tool:test`.
+- Direct Android command: `JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew :app:connectedDebugAndroidTest`. Run one class with `-Pandroid.testInstrumentationRunnerArguments.class=...`. Run fuzz with `-Pandroid.testInstrumentationRunnerArguments.fuzzSeeds=42,1337 -Pandroid.testInstrumentationRunnerArguments.fuzzSteps=120`.
+- Core Android suites: `RouteCorpusTest`, `GraphCopyTest`, `OfflineMapSmokeTest`, `CarouselMapConsistencyTest`, `SqlSavedRouteStoreTest`, and `GeocoderOnDeviceTest`.
+- Compose UI suites: `PlannerPanelTest`, `ComplexityDialTest`, `SaveBubbleTest`, `SavedRoutesSheetTest`, `SearchDebounceTest`, `LifecycleRecreationTest`, `AccessibilityTest`, `FontScaleTest`, and `SavedRouteFlowTest`.
+- Fuzz suites: `FuzzCampaignTest`, `FuzzReplayTest`, `FuzzMinimizerTest`, `MemoryStressTest`, and `PerfSmokeTest`. The full trigger uses two seeds and 120 steps.
+- Airplane-mode proof: `adb shell cmd connectivity airplane-mode enable`; run `OfflineMapSmokeTest` and `RouteCorpusTest`; then run `adb shell cmd connectivity airplane-mode disable`. `run-all.sh` restores airplane mode on failure.
+- `tools/test/process-death.sh` is a manual pre-release check. It kills and relaunches the app, then prints the restored fields and dial level.
+- Instrumented test methods must use plain camelCase names. Backtick-spaced names fail D8 at minSdk 26. No lint task exists.
+- `RouteSearchCoordinator`, `GeocodeController`, and the keys in `UiSemantics.kt` are deliberate test seams. Keep their state transitions and observable values stable when the related feature changes.
+
+The test suite is permanent repository infrastructure. It is not a one-off deliverable. Every new feature, UI element, routing, geocoder, storage, or generated-data pipeline change must add or update tests at the same rigor. Pure logic needs JVM invariant or property tests in the matching package. Android-bound behavior needs instrumented tests. Route-visible changes need a corpus entry and recalibration. New composables and controls need content descriptions, 48 dp targets, planner coverage, accessibility coverage, and fuzz-oracle coverage. Weighting or custom-model changes need MotorcycleProfileTest and ComplexityWeightingTest updates together. Storage schema changes need both store-contract suites and repository truthfulness tests.
 
 ## Route storage (saved rides)
 

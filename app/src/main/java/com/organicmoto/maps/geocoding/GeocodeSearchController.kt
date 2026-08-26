@@ -13,7 +13,7 @@ private const val TAG = "OrganicMoto.GeocodeCtrl"
  * is loaded lazily on the first search and cached for the app process lifetime;
  * all searches run on [Dispatchers.IO].
  */
-class GeocodeSearchController(context: Context) {
+class GeocodeSearchController(context: Context) : GeocodeController {
 
     private val appContext = context.applicationContext
     private val lock = Any()
@@ -26,7 +26,7 @@ class GeocodeSearchController(context: Context) {
      * queries. The first call can take a few seconds while the index is copied
      * out of assets and memory-mapped; subsequent calls are fast.
      */
-    suspend fun search(query: String, limit: Int = 8): List<GeocodeResult> {
+    override suspend fun search(query: String, limit: Int): List<GeocodeResult> {
         if (query.isBlank()) return emptyList()
         return withContext(Dispatchers.IO) {
             val loaded = index ?: synchronized(lock) {

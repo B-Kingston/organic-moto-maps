@@ -1,6 +1,7 @@
 package com.organicmoto.maps
 
 import android.text.format.DateUtils
+import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -29,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -57,11 +59,17 @@ import androidx.compose.ui.unit.sp
 import com.organicmoto.maps.storage.SavedRoute
 import com.organicmoto.maps.storage.SavedRouteComment
 import com.organicmoto.maps.storage.SavedRouteSummary
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 private val TEXT_PRIMARY = Color(0xFF303030)
 private val TEXT_SECONDARY = Color(0xFF8A000000)
+
+/** Upper bound for one comment; pasted multi-MB text can ANR the cursor. */
+private const val MAX_COMMENT_CHARS = 500
 private val ACCENT_BLUE = Color(0xFF249CF2)
+private const val TAG_SAVED = "OrganicMoto.SavedRoutes"
 
 /**
  * The route-storage menu: a bottom sheet listing every saved ride with its
@@ -79,19 +87,23 @@ fun SavedRoutesSheet(
     commentsProvider: suspend (routeId: Long) -> List<SavedRouteComment>,
     onAddComment: suspend (routeId: Long, text: String) -> Unit,
     onLoadRoute: (SavedRoute) -> Unit,
-    onDeleteRoute: (SavedRoute) -> Unit,
+    onDeleteRoute: suspend (SavedRoute) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var summaries by remember { mutableStateOf<List<SavedRouteSummary>?>(null) }
     var pendingDelete by remember { mutableStateOf<SavedRoute?>(null) }
     val scope = rememberCoroutineScope()
+    // Serialized refresh: cancel-and-relaunch so an out-of-order query
+    // completion can never overwrite newer state with a stale snapshot.
+    var refreshJob by remember { mutableStateOf<Job?>(null) }
 
     fun refreshSummaries() {
-        scope.launch { summaries = summariesProvider() }
+        refreshJob?.cancel()
+        refreshJob = scope.launch { summaries = summariesProvider() }
     }
 
     LaunchedEffect(Unit) {
-        summaries = summariesProvider()
+        refreshSummaries()
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -100,13 +112,28 @@ fun SavedRoutesSheet(
                 .fillMaxWidth()
                 .navigationBarsPadding()
         ) {
-            Text(
-                text = "Saved routes",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = TEXT_PRIMARY,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Saved routes",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TEXT_PRIMARY,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
+                )
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Close saved routes"
+                    },
+                ) {
+                    Text("Close")
+                }
+            }
             when (val list = summaries) {
                 null -> Box(
                     contentAlignment = Alignment.Center,
@@ -150,8 +177,19 @@ fun SavedRoutesSheet(
             confirmButton = {
                 Button(onClick = {
                     pendingDelete = null
-                    onDeleteRoute(route)
-                    refreshSummaries()
+                    // Await the delete, then refresh: a fire-and-forget delete
+                    // racing the refresh could leave the deleted row listed.
+                    scope.launch {
+                        try {
+                            onDeleteRoute(route)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e(TAG_SAVED, "Deleting saved route failed", e)
+                        } finally {
+                            refreshSummaries()
+                        }
+                    }
                 }) { Text("Delete") }
             },
             dismissButton = {
@@ -210,13 +248,26 @@ private fun SavedRouteItem(
         if (expanded && comments == null) comments = commentsProvider(route.id)
     }
 
+    var submittingComment by remember { mutableStateOf(false) }
     fun submitDraft() {
-        val text = draft.trim()
-        if (text.isEmpty()) return
+        val text = draft.trim().take(MAX_COMMENT_CHARS)
+        if (text.isEmpty() || submittingComment) return
+        submittingComment = true
         scope.launch {
-            onAddComment(route.id, text)
-            draft = ""
-            comments = commentsProvider(route.id)
+            try {
+                onAddComment(route.id, text)
+                // Clear only when the field still holds what was submitted;
+                // text typed during the insert stays for the next send.
+                if (draft.trim() == text) draft = ""
+                comments = commentsProvider(route.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Keep the draft so the note is not lost; the badge count
+                // only changes after a confirmed insert.
+            } finally {
+                submittingComment = false
+            }
         }
     }
 
@@ -224,6 +275,9 @@ private fun SavedRouteItem(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onLoad)
+            .semantics {
+                contentDescription = "Saved route: ${route.fromName} to ${route.toName}"
+            }
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {
@@ -265,17 +319,26 @@ private fun SavedRouteItem(
             Column(horizontalAlignment = Alignment.End) {
                 Box(
                     Modifier
-                        .size(32.dp)
+                        .minimumInteractiveComponentSize()
+                        .size(48.dp)
+                        .clickable(onClick = onDelete)
                         .semantics { contentDescription = "Delete saved route" },
+                    contentAlignment = Alignment.Center,
                 ) {
-                    IconButton(onDelete)
+                    TrashIcon()
                 }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) { expanded = !expanded },
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { expanded = !expanded }
+                        .semantics {
+                            contentDescription =
+                                "Comments for saved route: ${route.fromName} to ${route.toName}"
+                        },
                 ) {
                     CommentBubbleIcon(tint = TEXT_SECONDARY)
                     Spacer(Modifier.width(3.dp))
@@ -323,17 +386,18 @@ private fun SavedRouteItem(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = draft,
-                        onValueChange = { draft = it },
+                        onValueChange = { draft = it.take(MAX_COMMENT_CHARS) },
                         placeholder = { Text("Add a comment", style = MaterialTheme.typography.bodySmall) },
                         textStyle = MaterialTheme.typography.bodySmall,
                         singleLine = true,
                         modifier = Modifier.weight(1f),
                     )
                     Spacer(Modifier.width(8.dp))
-                    val enabled = draft.isNotBlank()
+                    val enabled = draft.isNotBlank() && !submittingComment
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
+                            .minimumInteractiveComponentSize()
                             .size(36.dp)
                             .clip(CircleShape)
                             .background(if (enabled) Color(0xFFEAF4FE) else Color(0xFFF0F0F0))
@@ -349,22 +413,5 @@ private fun SavedRouteItem(
                 }
             }
         }
-    }
-}
-
-/** Compact icon button wrapper keeping the trash action at 32 dp. */
-@Composable
-private fun IconButton(onClick: () -> Unit) {
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(32.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            ),
-    ) {
-        TrashIcon()
     }
 }

@@ -23,6 +23,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,6 +52,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.organicmoto.maps.geocoding.GeocodeResult
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import com.organicmoto.maps.geocoding.GeocodeController
 import com.organicmoto.maps.geocoding.GeocodeSearchController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -106,7 +110,7 @@ fun GeocodeSearchField(
     value: String,
     onValueChange: (String) -> Unit,
     onResultPicked: (GeocodeResult) -> Unit,
-    controller: GeocodeSearchController,
+    controller: GeocodeController,
     modifier: Modifier = Modifier,
     placeholder: String? = null,
 ) {
@@ -173,6 +177,7 @@ fun GeocodeSearchField(
             placeholder = placeholder?.let { p -> { Text(p) } },
             singleLine = true,
             modifier = Modifier
+                .semantics { contentDescription = label }
                 .fillMaxWidth()
                 .onFocusChanged { focused ->
                     val wasFocused = hasFocus
@@ -243,7 +248,7 @@ fun RoutePlanSearchField(
     value: String,
     onValueChange: (String) -> Unit,
     onResultPicked: (GeocodeResult) -> Unit,
-    controller: GeocodeSearchController,
+    controller: GeocodeController,
     searchState: RouteFieldSearchState,
     modifier: Modifier = Modifier,
 ) {
@@ -314,6 +319,7 @@ fun RoutePlanSearchField(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
+                    .semantics { contentDescription = label }
                     .padding(horizontal = 8.dp)
                     .onFocusChanged { focused ->
                         val wasFocused = searchState.hasFocus
@@ -425,6 +431,8 @@ private fun ResultRow(result: GeocodeResult, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .pointerInput(Unit) { detectTapGestures(onTap = { onClick() }) }
+            .minimumInteractiveComponentSize()
+            .semantics { contentDescription = result.name }
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
         Text(

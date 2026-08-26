@@ -1,0 +1,9 @@
+{
+  "seed": 42,
+  "actions": [
+    {"type": "TypeText", "target": "FROM_FIELD", "value": "-27.4698,153.0251"},
+    {"type": "TypeText", "target": "TO_FIELD", "value": "-27.3353,152.7720"},
+    {"type": "TapStart"},
+    {"type": "RotateKnob", "detents": 1}
+  ]
+}

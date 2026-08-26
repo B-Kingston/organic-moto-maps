@@ -5,8 +5,8 @@ import com.graphhopper.util.shapes.GHPoint
 object PointParser {
 
     fun parse(input: String): GHPoint {
-        val parts = input.trim().split(",")
-        require(parts.size == 2) { "Expected \"lat,lon\" but got \"$input\"" }
+        val parts = input.trim().split(Regex("[,\\s]+"))
+        require(parts.size == 2) { "Expected \"lat,lon\" (or \"lat lon\") but got \"$input\"" }
         val lat = parts[0].trim().toDoubleOrNull()
             ?: throw IllegalArgumentException("Invalid latitude in \"$input\"")
         val lon = parts[1].trim().toDoubleOrNull()

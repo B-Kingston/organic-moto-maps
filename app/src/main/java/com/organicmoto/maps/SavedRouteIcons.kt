@@ -1,6 +1,7 @@
 package com.organicmoto.maps
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -24,7 +25,7 @@ private val ICON_TINT = Color(0xFF616161)
 /** Classic bookmark ribbon; [filled] swaps the saved state to solid. */
 @Composable
 fun BookmarkIcon(filled: Boolean, tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
+    Canvas(Modifier.size(20.dp).then(modifier)) {
         val width = size.width
         val height = size.height
         val path = Path().apply {
@@ -50,7 +51,7 @@ fun BookmarkIcon(filled: Boolean, tint: Color = ICON_TINT, modifier: Modifier = 
 /** Waste-basket: lid line, hanging handle, tapered body. */
 @Composable
 fun TrashIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
+    Canvas(Modifier.size(20.dp).then(modifier)) {
         val width = size.width
         val height = size.height
         val lidY = height * 0.26f
@@ -91,7 +92,7 @@ fun TrashIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
 /** Round-cap check mark, used for confirmations and comment submission. */
 @Composable
 fun CheckIcon(tint: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
+    Canvas(Modifier.size(20.dp).then(modifier)) {
         val width = size.width
         val height = size.height
         drawLine(
@@ -114,7 +115,7 @@ fun CheckIcon(tint: Color, modifier: Modifier = Modifier) {
 /** Small speech bubble for comment-count badges. */
 @Composable
 fun CommentBubbleIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
+    Canvas(Modifier.size(16.dp).then(modifier)) {
         val width = size.width
         val height = size.height
         val path = Path().apply {
@@ -138,7 +139,7 @@ fun CommentBubbleIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
 /** Downward chevron; callers rotate the modifier for the expanded state. */
 @Composable
 fun ChevronIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
+    Canvas(Modifier.size(16.dp).then(modifier)) {
         val width = size.width
         val height = size.height
         drawLine(

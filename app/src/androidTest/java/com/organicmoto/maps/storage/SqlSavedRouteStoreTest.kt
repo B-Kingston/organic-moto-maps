@@ -70,9 +70,32 @@ class SqlSavedRouteStoreTest {
 
     @Test
     fun insertingCommentOnUnknownRouteFails() {
-        assertThrows(IllegalStateException::class.java) {
+        assertThrows(IllegalArgumentException::class.java) {
             store.insertComment(SavedRouteComment(0L, routeId = 4242L, "orphan", CREATED_AT))
         }
+    }
+
+    @Test
+    fun deleteUnknownRouteIsNoOp() {
+        val id = store.insertRoute(savedRoute())
+        store.deleteRoute(id + 1000L)
+        assertEquals(listOf(id), store.summaries().map { it.route.id })
+    }
+
+    @Test
+    fun commentTextIsStoredVerbatim() {
+        val routeId = store.insertRoute(savedRoute())
+        val raw = "  keep this text  "
+        store.insertComment(SavedRouteComment(0L, routeId, raw, CREATED_AT))
+        assertEquals(raw, store.comments(routeId).single().text)
+    }
+
+    @Test
+    fun twoSavesProduceTwoIndependentRows() {
+        val first = store.insertRoute(savedRoute(fromName = "First"))
+        val second = store.insertRoute(savedRoute(fromName = "Second"))
+        assertTrue(first != second)
+        assertEquals(setOf("First", "Second"), store.summaries().map { it.route.fromName }.toSet())
     }
 
     @Test

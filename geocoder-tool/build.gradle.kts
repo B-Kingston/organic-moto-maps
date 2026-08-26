@@ -36,4 +36,5 @@ tasks.named<JavaExec>("run") {
 dependencies {
     implementation(libs.osmosis)
     implementation(libs.osmosis.core)
+    testImplementation(libs.junit4)
 }

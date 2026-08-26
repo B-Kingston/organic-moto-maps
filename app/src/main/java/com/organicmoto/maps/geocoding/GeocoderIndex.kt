@@ -169,7 +169,9 @@ class GeocoderIndex private constructor() {
         checkRead(b, o, 2)
         val len = b.getShort(o).toInt() and 0xFFFF
         checkRead(b, o, 2 + len + 8)
-        return b.getInt(o + 2 + len + 4)
+        val count = b.getInt(o + 2 + len + 4)
+        checkPostingRange(b, count, b.getInt(o + 2 + len))
+        return count
     }
 
     // --- internals -------------------------------------------------------------
@@ -235,9 +237,25 @@ class GeocoderIndex private constructor() {
         return Triple(bytes, relOffset, count)
     }
 
+    private fun checkPostingRange(b: ByteBuffer, count: Int, relOffset: Int) {
+        if (count < 0 || relOffset < 0) {
+            throw IllegalStateException(
+                "corrupt geocoder index: invalid posting range offset=$relOffset count=$count",
+            )
+        }
+        val start = state.postingsOffset.toLong() + relOffset.toLong()
+        val capacity = b.capacity().toLong()
+        if (start > capacity || count.toLong() > capacity - start) {
+            throw IllegalStateException(
+                "corrupt geocoder index: posting range offset=$relOffset count=$count exceeds file size ${b.capacity()}",
+            )
+        }
+    }
+
     private fun decodePostings(relOffset: Int, count: Int): IntArray {
-        val out = IntArray(count)
         val b = buf()
+        checkPostingRange(b, count, relOffset)
+        val out = IntArray(count)
         var o = state.postingsOffset + relOffset
         var prev = 0
         for (i in 0 until count) {
@@ -421,7 +439,7 @@ class GeocoderIndex private constructor() {
             )
         }
 
-        private fun parse(buf: ByteBuffer): GeocoderIndex {
+        internal fun parse(buf: ByteBuffer): GeocoderIndex {
             if (buf.capacity() < HEADER_SIZE) {
                 throw IllegalStateException("geocoder index too small: ${buf.capacity()} bytes")
             }
