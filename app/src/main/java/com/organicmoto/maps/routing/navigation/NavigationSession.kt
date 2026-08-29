@@ -46,6 +46,14 @@ data class NavigationSnapshot(
     val remainingTimeS: Double,
     /** Route completion percent, monotonic across reroutes. */
     val completionPercent: Int,
+    /**
+     * Live motorsport-style pace delta in seconds against the plan: actual
+     * elapsed riding time minus the model time the plan budgeted for the
+     * distance covered so far. Positive = slower than plan (losing time),
+     * negative = ahead of plan. NaN until enough movement exists to measure,
+     * and frozen while stationary or rebuilding.
+     */
+    val paceDeltaS: Double,
     /** Next turn, or null when none remains. */
     val turn: TurnInfo?,
 ) {
@@ -90,14 +98,20 @@ class NavigationSession(
     private val settings: Settings = Settings(),
 ) {
     data class Settings(
+        /** Below this speed (m/s) the off-route counter grows by 1, not 2. */
+        val minSpeedForFastMissMps: Double = 3.0 / 3.6,
         /** Snap tolerance in metres; fixes farther than this miss the route. */
         val matchingThresholdM: Double = 50.0,
+        /** Below this speed (m/s) the pace delta stops updating (GPS/stop noise). */
+        val deltaIdleSpeedMps: Double = 1.0,
+        /** EMA smoothing weight of a fresh sample in the pace delta (0..1). */
+        val deltaEmaAlpha: Double = 0.25,
+        /** Movement distance that must accrue before the delta publishes. */
+        val deltaMinDistanceM: Double = 150.0,
         /** GPS accuracy inflates the snap tolerance up to this cap (metres). */
         val maxAccuracyInflationM: Double = 30.0,
         /** Forward projection window in segments. */
         val projectionWindowSegments: Int = 40,
-        /** Below this speed (m/s) the off-route counter grows by 1, not 2. */
-        val minSpeedForFastMissMps: Double = 3.0 / 3.6,
         /** Finish tolerance in metres. */
         val finishToleranceM: Double = 20.0,
         /** Minimum displayed ETA in seconds; below this the ETA floors. */
@@ -109,6 +123,15 @@ class NavigationSession(
 
     private var track: RouteTrack? = null
     private var matcher: PolylineMatcher? = null
+
+    // Pace-delta bookkeeping: elapsed wall time vs the plan's model time for
+    // the same distance. Only moving samples update it; EMA smooths GPS noise.
+    private var deltaWallClockS: Double = 0.0
+    private var deltaModelS: Double = 0.0
+    private var lastDeltaFixTimestampMs: Long = Long.MIN_VALUE
+    private var lastDeltaOffsetM: Double = 0.0
+    private var paceDeltaS: Double = Double.NaN
+    private var lastDeltaBankedOffsetM: Double = 0.0
     private var state = NavigationState.Idle
     private var moveAwayCounter = 0
     private var lastMissDistanceM = 0.0
@@ -133,6 +156,7 @@ class NavigationSession(
         lastGoodLat = Double.NaN
         lastGoodLon = Double.NaN
         state = NavigationState.NotStarted
+        resetPaceDelta()
         resetSnapshot()
         publish()
     }
@@ -149,6 +173,7 @@ class NavigationSession(
             remainingDistanceM = 0.0,
             remainingTimeS = 0.0,
             completionPercent = 0,
+            paceDeltaS = Double.NaN,
             turn = null,
         )
     }
@@ -163,6 +188,7 @@ class NavigationSession(
         track = null
         matcher = null
         state = NavigationState.Idle
+        resetPaceDelta()
         resetSnapshot()
         publish()
     }
@@ -174,6 +200,10 @@ class NavigationSession(
     fun applyRebuiltRoute(track: RouteTrack, coveredDistanceM: Double) {
         passedDistanceOnSupersededRoutesM += coveredDistanceM
         lastCompletionPercent = 0 // recompute fresh; the banked distance keeps it monotonic
+        // The reroute itself is not the rider's fault: keep the live pace
+        // delta, only resync the offset book to the fresh track (offsets
+        // restart at 0 there; the last timestamp carries over fine).
+        lastDeltaOffsetM = 0.0
         startRoute(track)
         state = NavigationState.OnRoute
         publish()
@@ -230,6 +260,7 @@ class NavigationSession(
         val (lat, lon) = activeMatcher.projectedPosition()
         lastGoodLat = lat
         lastGoodLon = lon
+        updatePaceDelta(fix, activeTrack, offset)
 
         // Adopt the route segment bearing when matched: stable arrow at stops.
         val bearing = activeMatcher.matchedSegmentBearingDeg()
@@ -243,6 +274,62 @@ class NavigationSession(
         state = NavigationState.OnRoute
         publishTurnAndMetrics(fix, activeTrack, offset, lat, lon, bearing)
     }
+
+    /**
+     * Accumulates the motorsport pace delta. For every moving fix, wall-clock
+     * time since the last sample is charged against the model time the plan
+     * budgeted for the distance advanced in the same interval. The raw delta
+     * (elapsed - planned) is EMA-smoothed; stationary fixes and rebuild
+     * freezes contribute nothing, so the number only reflects riding pace.
+     */
+    private fun updatePaceDelta(fix: GpsFix, activeTrack: RouteTrack, offset: Double) {
+        val moving = fix.speedMps >= settings.deltaIdleSpeedMps
+        val previousOffsetM = lastDeltaOffsetM
+        lastDeltaOffsetM = offset
+        if (!moving) {
+            // Parked: wall clock runs but the plan also assumed a stop here?
+            // No — the plan never budgets stops, so freeze both books and
+            // simply resume the comparison when the rider moves again.
+            lastDeltaFixTimestampMs = fix.timestampMs
+            return
+        }
+        if (lastDeltaFixTimestampMs == Long.MIN_VALUE) {
+            lastDeltaFixTimestampMs = fix.timestampMs
+            return
+        }
+        val dtS = (fix.timestampMs - lastDeltaFixTimestampMs) / 1000.0
+        lastDeltaFixTimestampMs = fix.timestampMs
+        if (dtS <= 0.0 || dtS > MAX_DELTA_GAP_S) {
+            // Clock glitch or long gap (e.g. rebuild freeze): resync silently.
+            return
+        }
+        val dOffset = offset - previousOffsetM
+        if (dOffset <= 0.0) return // backwards projection or standstill jitter
+        deltaWallClockS += dtS
+        val segTime = activeTrack.timeForDistanceM(dOffset)
+        deltaModelS += if (segTime.isNaN()) dtS else segTime
+
+        val covered = deltaWallClockSampledM + dOffset
+        deltaWallClockSampledM = covered
+        if (covered < settings.deltaMinDistanceM) return
+
+        val raw = deltaWallClockS - deltaModelS
+        paceDeltaS = if (paceDeltaS.isNaN()) raw else paceDeltaS + settings.deltaEmaAlpha * (raw - paceDeltaS)
+    }
+
+    /** Metres of movement accumulated while sampling the pace delta. */
+    private var deltaWallClockSampledM: Double = 0.0
+
+    private fun resetPaceDelta() {
+        deltaWallClockS = 0.0
+        deltaModelS = 0.0
+        deltaWallClockSampledM = 0.0
+        lastDeltaFixTimestampMs = Long.MIN_VALUE
+        lastDeltaOffsetM = 0.0
+        paceDeltaS = Double.NaN
+    }
+
+
 
     private fun onMissed(fix: GpsFix, activeMatcher: PolylineMatcher) {
         // Reference is the last projection on the route (the matched point,
@@ -327,6 +414,7 @@ class NavigationSession(
             remainingDistanceM = remainingDistance,
             remainingTimeS = kotlin.math.max(settings.minimumEtaS, remainingTime),
             completionPercent = completionPercent(offset, activeTrack),
+            paceDeltaS = paceDeltaS,
             turn = turn,
         )
     }
@@ -357,7 +445,8 @@ class NavigationSession(
     }
 
     companion object {
-        /** Organic Maps' kOnRouteMissedCount. */
+        /** Gaps longer than this (s) do not accumulate into the delta. */
+        const val MAX_DELTA_GAP_S = 30.0
         const val ON_ROUTE_MISSED_COUNT = 10
 
         /** Organic Maps' kRunawayDistanceSensitivityMeters. */
@@ -376,6 +465,7 @@ class NavigationSession(
             remainingDistanceM = 0.0,
             remainingTimeS = 0.0,
             completionPercent = 0,
+            paceDeltaS = Double.NaN,
             turn = null,
         )
     }

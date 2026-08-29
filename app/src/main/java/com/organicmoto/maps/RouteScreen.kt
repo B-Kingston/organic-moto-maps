@@ -44,6 +44,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.organicmoto.maps.map.hideNavPosition
 import com.organicmoto.maps.map.updateNavPosition
+import com.organicmoto.maps.routing.navigation.GpsFix
+import com.organicmoto.maps.routing.navigation.GpsFixSource
 import com.organicmoto.maps.routing.navigation.NavigationState
 import com.organicmoto.maps.routing.navigation.RebuildRequest
 import androidx.compose.foundation.pager.rememberPagerState
@@ -363,6 +365,19 @@ fun RouteScreen() {
         map.addOnMapClickListener(listener)
         onDispose { map.removeOnMapClickListener(listener) }
     }
+    // Always-on map tracking: a bare fix stream (no guidance engine) that
+    // keeps the position dot visible whenever permission is granted. The
+    var trackedFix by remember { mutableStateOf<GpsFix?>(null) }
+    LaunchedEffect(locationPermissionGranted) {
+        if (!locationPermissionGranted) {
+            trackedFix = null
+            return@LaunchedEffect
+        }
+        GpsFixSource.fixes(context.applicationContext).collect { trackedFix = it }
+    }
+    DisposableEffect(Unit) {
+        onDispose { trackedFix = null }
+    }
 
     var styleJson by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
@@ -600,6 +615,19 @@ fun RouteScreen() {
                 CameraUpdateFactory.newLatLngZoom(LatLng(snap.lat, snap.lon), zoom),
                 600,
             )
+        }
+    }
+    // Always-on tracking render: when guidance is idle the position dot
+    // still follows the raw tracked fix (GPS bearing when available). During
+    // guidance the snapshot effect below owns the dot.
+    LaunchedEffect(trackedFix, guidanceRequested, navSnapshot) {
+        if (guidanceRequested && navSnapshot.state != NavigationState.Idle) return@LaunchedEffect
+        val map = mapRef.value ?: return@LaunchedEffect
+        val fix = trackedFix
+        if (fix == null || fix.lat.isNaN() || fix.lon.isNaN()) {
+            map.hideNavPosition()
+        } else {
+            map.updateNavPosition(fix.lat, fix.lon, fix.bearingDeg)
         }
     }
 

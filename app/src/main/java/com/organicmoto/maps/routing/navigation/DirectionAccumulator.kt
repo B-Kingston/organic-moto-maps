@@ -2,7 +2,6 @@ package com.organicmoto.maps.routing.navigation
 
 /**
  * A single GPS fix reduced to what the guidance engine consumes.
- * Plain data so JVM tests can drive the whole engine without Android.
  */
 data class GpsFix(
     val lat: Double,
@@ -13,6 +12,7 @@ data class GpsFix(
     val accuracyM: Double = Double.NaN,
     /** Fix timestamp in milliseconds; used for extrapolation eligibility. */
     val timestampMs: Long,
+    val bearingDeg: Double = Double.NaN,
 ) {
     val hasSpeed: Boolean get() = speedMps >= 0.0
     val hasAccuracy: Boolean get() = !accuracyM.isNaN()

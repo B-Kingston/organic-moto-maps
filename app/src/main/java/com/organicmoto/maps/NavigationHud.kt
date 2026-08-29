@@ -51,7 +51,8 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
                 contentDescription = "Navigation guidance: " +
                     "${NavigationHudFormat.turnDescription(snapshot.turn)}, " +
                     "${NavigationHudFormat.speedKmh(snapshot.speedMps)} kilometres per hour, " +
-                    "${NavigationHudFormat.etaText(snapshot.remainingTimeS)} remaining"
+                    "${NavigationHudFormat.etaText(snapshot.remainingTimeS)} remaining, " +
+                    "pace delta ${NavigationHudFormat.deltaText(snapshot.paceDeltaS)}"
             },
     ) {
         Row(
@@ -62,6 +63,10 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
         ) {
             TurnCell(snapshot.turn, Modifier.weight(1.4f))
             Spacer(Modifier.width(12.dp))
+            DeltaCell(
+                deltaS = snapshot.paceDeltaS,
+                modifier = Modifier.weight(1f),
+            )
             MetricCell(
                 value = NavigationHudFormat.speedKmh(snapshot.speedMps),
                 label = "km/h",
@@ -113,6 +118,35 @@ private fun MetricCell(value: String, label: String, modifier: Modifier = Modifi
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = value, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
         Text(text = label, style = MaterialTheme.typography.labelSmall, color = Color(0xB3FFFFFF))
+    }
+}
+
+/**
+ * Motorsport-style live pace delta: green when ahead of the plan, red when
+ * behind, dashes until the engine has measured enough movement. The value is
+ * a smoothed total (not per-second jitter) so it reads like a timing screen.
+ */
+@Composable
+private fun DeltaCell(deltaS: Double, modifier: Modifier = Modifier) {
+    val known = !deltaS.isNaN()
+    val color = when {
+        !known -> Color(0xB3FFFFFF)
+        deltaS <= 0.0 -> Color(0xFF3DDC84) // ahead: green
+        else -> Color(0xFFFF5252)          // behind: red
+    }
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = NavigationHudFormat.deltaText(deltaS),
+            fontSize = 20.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = color,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+        )
+        Text(
+            text = if (known && deltaS > 0.0) "lost" else "gained",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xB3FFFFFF),
+        )
     }
 }
 
@@ -168,6 +202,7 @@ private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
     drawPath(head, paint, style = stroke)
 }
 
+
 /** Pure formatting helpers, JVM-testable. */
 object NavigationHudFormat {
     fun speedKmh(speedMps: Double): String =
@@ -199,5 +234,18 @@ object NavigationHudFormat {
         turn.sign > 0 -> "turn right in ${distanceText(turn.distanceM)}"
         turn.sign < 0 -> "turn left in ${distanceText(turn.distanceM)}"
         else -> "continue ahead"
+    }
+
+    /**
+     * Motorsport delta format: "+12.3 s" / "-1.0 s" / "0.0 s"; dashes until
+     * the engine has measured. The sign carries the direction, the label
+     * ("gained"/"lost") disambiguates for accessibility.
+     */
+    fun deltaText(deltaS: Double): String = when {
+        deltaS.isNaN() -> "—"
+        else -> {
+            val sign = if (deltaS > 0.05) "+" else if (deltaS < -0.05) "-" else ""
+            "$sign%.1f s".format(java.util.Locale.US, abs(deltaS))
+        }
     }
 }

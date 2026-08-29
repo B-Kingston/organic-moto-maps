@@ -62,6 +62,18 @@ class RouteTrack(
         return totalTimeS - (base + fraction * (next - base))
     }
 
+    /**
+     * Model time in seconds the plan budgets for travelling [distanceM],
+     * using the route's average model pace. Deliberately coarse: it feeds a
+     * smoothed live delta, not a per-segment replay. NaN when unusable.
+     */
+    fun timeForDistanceM(distanceM: Double): Double {
+        if (distanceM.isNaN() || distanceM <= 0.0) return Double.NaN
+        val avgPace = totalDistanceM / totalTimeS.coerceAtLeast(1e-6)
+        if (avgPace <= 0.0 || avgPace.isNaN() || avgPace.isInfinite()) return Double.NaN
+        return distanceM / avgPace
+    }
+
     /** Remaining distance in metres from fractional offset [offsetM]. */
     fun remainingDistanceM(offsetM: Double): Double = (totalDistanceM - offsetM).coerceAtLeast(0.0)
 
