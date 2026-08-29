@@ -1167,9 +1167,13 @@ private val RIDE_CONTROLS_HEIGHT = 112.dp + ROUTE_STATUS_HEIGHT
 /** Reserved carousel slot; equals the pager height in RouteCarouselBar. */
 private val CAROUSEL_SLOT_HEIGHT = ROUTE_CARD_HEIGHT + 12.dp
 
-/** Carousel + divider + two field rows + two dividers + ride controls + START row (2 + 40 + 10). */
+/** Carousel + divider + ride controls + START row (2 + 40 + 10), planning mode. */
 private val PANEL_CONTENT_HEIGHT = CAROUSEL_SLOT_HEIGHT + RIDE_CONTROLS_HEIGHT +
     SEARCH_FIELD_ROW_HEIGHT * 2 + 52.dp + 3.dp
+
+/** Ride mode hides the two planner field rows, so the panel shrinks by them. */
+private val RIDE_PANEL_CONTENT_HEIGHT = PANEL_CONTENT_HEIGHT -
+    SEARCH_FIELD_ROW_HEIGHT * 2 - 3.dp
 
 /**
  * Thin horizontal bar on top of the route-planning panel: one card per
@@ -1383,7 +1387,7 @@ private fun RoutePlanPanel(
         Column(
             Modifier
                 .fillMaxWidth()
-                .heightIn(min = PANEL_CONTENT_HEIGHT)
+                .heightIn(min = if (guidanceActive) RIDE_PANEL_CONTENT_HEIGHT else PANEL_CONTENT_HEIGHT)
         ) {
             // In ride mode the planner fields hide: the rider does not edit
             // the plan mid-ride, and the map gets the freed screen space.
