@@ -794,6 +794,7 @@ private fun InfiniteComplexityKnob(
     value: Float,
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: (Float) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val latestValue by rememberUpdatedState(value)
     val latestOnValueChange by rememberUpdatedState(onValueChange)
@@ -821,7 +822,7 @@ private fun InfiniteComplexityKnob(
         }
     }
     Canvas(
-        modifier = Modifier
+        modifier = modifier
             .size(92.dp)
             .semantics {
                 contentDescription = "Ride complexity level ${value.roundToInt()}"
@@ -1470,26 +1471,27 @@ private fun RoutePlanPanel(
                                     value = complexity,
                                     onValueChange = onComplexityChange,
                                     onValueChangeFinished = onComplexityChangeFinished,
+                                    modifier = Modifier.align(Alignment.Center),
                                 )
-                                IconButton(
-                                    onClick = onOpenSavedRoutes,
-                                    modifier = Modifier
-                                        .align(Alignment.TopStart)
-                                        .size(48.dp)
-                                        .minimumInteractiveComponentSize()
-                                        .semantics { contentDescription = "Saved routes" },
-                                ) {
-                                    BookmarkIcon(filled = false)
-                                }
                                 IconButton(
                                     onClick = onRouteSettings,
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
-                                        .size(48.dp)
+                                        .size(40.dp)
                                         .minimumInteractiveComponentSize()
                                         .semantics { contentDescription = "Route settings" },
                                 ) {
                                     SettingsCogIcon()
+                                }
+                                IconButton(
+                                    onClick = onOpenSavedRoutes,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .size(40.dp)
+                                        .minimumInteractiveComponentSize()
+                                        .semantics { contentDescription = "Saved routes" },
+                                ) {
+                                    BookmarkIcon(filled = false)
                                 }
                             }
                         }
