@@ -176,7 +176,7 @@ pull_internal_reports perf.json "$REPORT_DIR"
 # recent previous entry. Delete that file to re-baseline after a deliberate
 # slowdown (e.g. graph rebuild).
 if [[ -s "$REPORT_DIR/perf.json" ]]; then
-    DRIFT_FACTORS='{"coldRouteMs":2.5,"warmRouteMs":1.75,"geocoderLoadMs":2.0,"queryMs":2.0}'
+    DRIFT_FACTORS='{"coldRouteMs":2.5,"warmRouteMs":1.75,"curveRouteMs":1.75,"geocoderLoadMs":2.0,"queryMs":2.0}'
     python3 - "$REPORT_DIR/perf.json" "$PERF_HISTORY" "$DRIFT_FACTORS" <<'PY'
 import json
 import sys

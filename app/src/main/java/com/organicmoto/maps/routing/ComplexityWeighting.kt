@@ -7,12 +7,15 @@ import com.graphhopper.routing.weighting.TurnCostProvider
 import com.graphhopper.routing.weighting.Weighting
 import com.graphhopper.util.EdgeIteratorState
 import com.graphhopper.util.FetchMode
+import com.graphhopper.util.PointList
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.roundToLong
+import kotlin.math.sqrt
 
 /**
  * Request-hint key for the unbounded ride-complexity dial. 0 is Fastest,
@@ -109,7 +112,7 @@ class ComplexityWeighting(
         // only at positive complexity.
         if (complexity == 0.0) return wFastest + reusePenalty
         val customPenalty = (wCustom - wFastest).coerceAtLeast(0.0)
-        val curvePenalty = wFastest * STRAIGHT_ROAD_PENALTY * straightness(edgeState)
+        val curvePenalty = wFastest * STRAIGHT_ROAD_PENALTY * curvePenaltyFactor(edgeState)
         return wFastest + complexity * (customPenalty + curvePenalty) + reusePenalty
     }
 
@@ -130,32 +133,15 @@ class ComplexityWeighting(
     override fun hasTurnCosts(): Boolean = fastest.hasTurnCosts() || custom.hasTurnCosts()
 
     /**
-     * 1 for a straight edge, approaching 0 as its geometry accumulates bends.
-     * About 180 degrees of heading change per kilometre counts as fully curvy.
+     * The radius score adds corner tightness without discarding the existing
+     * sustained-bend signal that keeps broad, curved roads competitive.
      */
-    private fun straightness(edgeState: EdgeIteratorState): Double {
-        val points = edgeState.fetchWayGeometry(FetchMode.ALL)
-        if (points.size() < 3) return 1.0
-        var previousHeading: Double? = null
-        var totalTurn = 0.0
-        for (index in 1 until points.size()) {
-            val lat1 = Math.toRadians(points.getLat(index - 1))
-            val lat2 = Math.toRadians(points.getLat(index))
-            val deltaLon = Math.toRadians(points.getLon(index) - points.getLon(index - 1))
-            val x = deltaLon * cos((lat1 + lat2) / 2.0)
-            val y = lat2 - lat1
-            if (abs(x) + abs(y) < 1e-12) continue
-            val heading = atan2(y, x)
-            previousHeading?.let {
-                var turn = abs(heading - it)
-                if (turn > PI) turn = 2.0 * PI - turn
-                totalTurn += turn
-            }
-            previousHeading = heading
-        }
-        val distanceKm = max(edgeState.distance / 1_000.0, 0.05)
-        val curveScore = (totalTurn / distanceKm / PI).coerceIn(0.0, 1.0)
-        return 1.0 - curveScore
+    private fun curvePenaltyFactor(edgeState: EdgeIteratorState): Double {
+        val exposure = combinedCurveExposure(
+            edgeState.fetchWayGeometry(FetchMode.ALL),
+            edgeState.distance,
+        )
+        return 1.0 - exposure
     }
 
     // Must match Weighting.isValidName's regex [|_a-z]+.
@@ -182,6 +168,116 @@ class ComplexityWeighting(
         )
     }
 }
+
+/**
+ * Returns a length-weighted curve exposure in the range 0..1.
+ *
+ * Each three-point window defines a circumcircle. Its radius classifies the
+ * two adjacent segments. A segment shared by two windows uses the tighter
+ * radius, as a tight turn commonly meets a longer straight segment. Curves
+ * below 30 m radius get full exposure. Curves from 30 m through 175 m get
+ * progressively smaller fixed weights. Straighter geometry gets zero.
+ *
+ * Very short adjacent segments do not define a curve. This removes isolated
+ * OSM digitizing jiggles before they can outweigh sustained road geometry.
+ */
+internal fun radiusCurveExposure(points: PointList): Double =
+    curveExposure(points, Double.NaN)
+
+private fun combinedCurveExposure(points: PointList, edgeDistanceMeters: Double): Double =
+    curveExposure(points, edgeDistanceMeters)
+
+private fun curveExposure(points: PointList, edgeDistanceMeters: Double): Double {
+    if (points.size() < 3) return 0.0
+
+    val longitudeScale = cos(
+        Math.toRadians((points.getLat(0) + points.getLat(points.size() - 1)) / 2.0),
+    )
+
+    fun projectedX(first: Int, second: Int): Double {
+        var deltaLongitude = points.getLon(second) - points.getLon(first)
+        if (deltaLongitude > 180.0) deltaLongitude -= 360.0
+        if (deltaLongitude < -180.0) deltaLongitude += 360.0
+        return deltaLongitude * longitudeScale
+    }
+
+    fun projectedY(first: Int, second: Int): Double =
+        points.getLat(second) - points.getLat(first)
+
+    fun distance(first: Int, second: Int): Double =
+        hypot(projectedX(first, second), projectedY(first, second)) * METERS_PER_DEGREE
+
+    fun triangleWeight(start: Int, first: Double, second: Double): Double {
+        if (first < MIN_CURVE_SEGMENT_METERS || second < MIN_CURVE_SEGMENT_METERS) return 0.0
+        val chord = distance(start, start + 2)
+        if (chord <= 0.0) return 0.0
+        val denominatorSquared =
+            (first + second + chord) *
+                (second + chord - first) *
+                (chord + first - second) *
+                (first + second - chord)
+        if (!denominatorSquared.isFinite() || denominatorSquared <= MIN_AREA_TERM) return 0.0
+        val radius = first * second * chord / sqrt(denominatorSquared)
+        return when {
+            radius < 30.0 -> 2.0
+            radius < 60.0 -> 1.6
+            radius < 100.0 -> 1.3
+            radius < 175.0 -> 1.0
+            else -> 0.0
+        }
+    }
+
+    val includeHeading = edgeDistanceMeters.isFinite()
+    var previousHeading = Double.NaN
+    var totalTurn = 0.0
+    fun addHeading(segmentStart: Int) {
+        if (!includeHeading) return
+        val x = projectedX(segmentStart, segmentStart + 1)
+        val y = projectedY(segmentStart, segmentStart + 1)
+        if (abs(x) + abs(y) < 1e-12) return
+        val heading = atan2(y, x)
+        if (previousHeading.isFinite()) {
+            var turn = abs(heading - previousHeading)
+            if (turn > PI) turn = 2.0 * PI - turn
+            totalTurn += turn
+        }
+        previousHeading = heading
+    }
+
+    val firstLength = distance(0, 1)
+    var secondLength = distance(1, 2)
+    var previousWeight = triangleWeight(0, firstLength, secondLength)
+    var totalLength = firstLength + secondLength
+    var weightedCurvature = firstLength * previousWeight
+    addHeading(0)
+    addHeading(1)
+
+    for (triangleStart in 1 until points.size() - 2) {
+        val nextLength = distance(triangleStart + 1, triangleStart + 2)
+        val nextWeight = triangleWeight(triangleStart, secondLength, nextLength)
+        weightedCurvature += secondLength * maxOf(previousWeight, nextWeight)
+        totalLength += nextLength
+        secondLength = nextLength
+        previousWeight = nextWeight
+        addHeading(triangleStart + 1)
+    }
+    weightedCurvature += secondLength * previousWeight
+
+    val radiusExposure = if (totalLength <= 0.0) {
+        0.0
+    } else {
+        (weightedCurvature / (totalLength * MAX_CURVE_WEIGHT)).coerceIn(0.0, 1.0)
+    }
+    if (!includeHeading) return radiusExposure
+    val distanceKm = max(edgeDistanceMeters / 1_000.0, 0.05)
+    val headingExposure = (totalTurn / distanceKm / PI).coerceIn(0.0, 1.0)
+    return maxOf(radiusExposure, headingExposure)
+}
+
+private const val MIN_CURVE_SEGMENT_METERS = 5.0
+private const val MIN_AREA_TERM = 1e-6
+private const val MAX_CURVE_WEIGHT = 2.0
+private const val METERS_PER_DEGREE = 111_195.0
 
 /**
  * Travel-time weighting used by the Fastest stop of the complexity dial.

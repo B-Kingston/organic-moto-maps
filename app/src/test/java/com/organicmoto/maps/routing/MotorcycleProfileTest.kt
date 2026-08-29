@@ -26,6 +26,9 @@ class MotorcycleProfileTest {
         // Profile.setCustomModel stores the resolved model under this hint.
         // GraphHopper needs that value to load the imported graph.
         assertNotNull(profile.customModel)
+        // Radius scoring is request-time geometry logic. It must not change
+        // the imported profile or its stored graph hash.
+        assertFalse(hints.has(MOTO_COMPLEXITY))
     }
 
     @Test

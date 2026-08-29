@@ -581,14 +581,25 @@ fun RouteScreen() {
         onDispose { navigationController.stop() }
     }
 
-    // Draw the guidance position dot from the engine snapshot.
+    // Follow the rider while guidance runs: the camera re-centres on the
+    // snapped position and eases out as speed rises so the view ahead stays
+    // readable at pace. Zoom only changes on band crossings, so the map does
+    // not pulse on every fix.
     LaunchedEffect(navSnapshot) {
         val map = mapRef.value ?: return@LaunchedEffect
         val snap = navSnapshot
         if (snap.state == NavigationState.Idle || snap.lat.isNaN()) {
             map.hideNavPosition()
-        } else {
-            map.updateNavPosition(snap.lat, snap.lon, snap.bearingDeg)
+            return@LaunchedEffect
+        }
+
+        map.updateNavPosition(snap.lat, snap.lon, snap.bearingDeg)
+        if (guidanceRequested) {
+            val zoom = guidanceZoomFor(if (snap.speedMps.isNaN()) 0.0 else snap.speedMps)
+            map.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(LatLng(snap.lat, snap.lon), zoom),
+                600,
+            )
         }
     }
 
@@ -743,6 +754,20 @@ fun RouteScreen() {
             onDismiss = { savedRoutesOpen = false },
         )
     }
+}
+
+/**
+ * Camera zoom for the current riding speed, in discrete bands so the map
+ * eases out as the rider speeds up and back in when they slow down. The
+ * thresholds are deliberate: below 7 m/s (~25 km/h) riders read street
+ * detail; above 31 m/s (~110 km/h) a highway corridor fits the screen.
+ */
+internal fun guidanceZoomFor(speedMps: Double): Double = when {
+    speedMps < 7.0 -> 16.5
+    speedMps < 14.0 -> 15.5
+    speedMps < 22.0 -> 14.5
+    speedMps < 31.0 -> 13.5
+    else -> 12.5
 }
 
 /** Two resolved points within ~11 m count as the same place: routing them
@@ -1359,63 +1384,43 @@ private fun RoutePlanPanel(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = PANEL_CONTENT_HEIGHT)
-                // One combined bottom inset: nav-bar height while the
-                // keyboard is closed, keyboard height while it is open (the
-                // IME inset already spans the nav-bar area). The panel
-                // bottom always sits exactly on whatever is below it — no
-                // gap above the keyboard, no dead strip above the nav bar.
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
         ) {
-            // Carousel slot, always reserved: route cards appear here on
-            // success without moving the fields below.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(CAROUSEL_SLOT_HEIGHT)
-            ) {
-                (state as? RouteUiState.Success)?.takeIf { it.result.routes.isNotEmpty() }?.let { success ->
-                    RouteCarouselBar(
-                        routes = success.result.routes,
-                        selectedIndex = success.selectedIndex,
-                        onSelectRoute = onSelectRoute,
-                        onSaveRoute = onSaveRoute,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+            // In ride mode the planner fields hide: the rider does not edit
+            // the plan mid-ride, and the map gets the freed screen space.
+            if (!guidanceActive) {
+                RoutePlanSearchField(
+                    label = "From",
+                    hint = "Route from",
+                    icon = { StartDotIcon() },
+                    value = fromText,
+                    onValueChange = onFromChange,
+                    onResultPicked = onFromPicked,
+                    controller = geocodeController,
+                    searchState = fromSearch,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                HorizontalDivider(
+                    color = Color(0xFF1E000000),
+                    thickness = 1.dp,
+                    modifier = Modifier.padding(start = 40.dp)
+                )
+                RoutePlanSearchField(
+                    label = "To",
+                    hint = "Route to",
+                    icon = { FinishFlagIcon() },
+                    value = toText,
+                    onValueChange = onToChange,
+                    onResultPicked = onToPicked,
+                    controller = geocodeController,
+                    searchState = toSearch,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                HorizontalDivider(
+                    color = Color(0xFF1E000000),
+                    thickness = 1.dp,
+                    modifier = Modifier.padding(start = 40.dp)
+                )
             }
-            HorizontalDivider(color = Color(0x1E000000), thickness = 1.dp)
-            RoutePlanSearchField(
-                label = "From",
-                hint = "Route from",
-                icon = { StartDotIcon() },
-                value = fromText,
-                onValueChange = onFromChange,
-                onResultPicked = onFromPicked,
-                controller = geocodeController,
-                searchState = fromSearch,
-                modifier = Modifier.fillMaxWidth()
-            )
-            HorizontalDivider(
-                color = Color(0xFF1E000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(start = 40.dp)
-            )
-            RoutePlanSearchField(
-                label = "To",
-                hint = "Route to",
-                icon = { FinishFlagIcon() },
-                value = toText,
-                onValueChange = onToChange,
-                onResultPicked = onToPicked,
-                controller = geocodeController,
-                searchState = toSearch,
-                modifier = Modifier.fillMaxWidth()
-            )
-            HorizontalDivider(
-                color = Color(0xFF1E000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(start = 40.dp)
-            )
             // Fixed ride-controls region: while a field is searching, its
             // suggestions replace the knob and status rows inside this box;
             // nothing outside the box ever moves.

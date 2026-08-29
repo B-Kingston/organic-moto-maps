@@ -25,7 +25,7 @@ class RouteCorpusTest {
             listOf(0, 1, 2, 4).forEach { detent ->
                 val result = router.route(entry.from, entry.to, detent.toDouble())
                 assertTrue("${entry.name} returned no routes", result.routes.isNotEmpty())
-                result.routes.forEach { path ->
+                result.routes.forEachIndexed { routeIndex, path ->
                     assertTrue("${entry.name} has too few points", path.points.size() >= 2)
                     assertTrue("${entry.name} has no distance", path.distance > 0.0)
                     assertTrue("${entry.name} has no duration", path.time > 0L)
@@ -37,8 +37,16 @@ class RouteCorpusTest {
                     assertTrue(RouteSimilarity.haversineMeters(points.first(), entry.from.toGeoPoint()) <= 5_000.0)
                     assertTrue(RouteSimilarity.haversineMeters(points.last(), entry.to.toGeoPoint()) <= 5_000.0)
                     assertRoundTrip(points)
-                    assertTrue(path.distance / 1_000.0 in entry.baselineKm * 0.5..entry.baselineKm * 2.5)
-                    assertTrue(path.time / 3_600_000.0 in entry.baselineHours * 0.4..entry.baselineHours * 4.0)
+                    val distanceKm = path.distance / 1_000.0
+                    assertTrue(
+                        "${entry.name} detent $detent route $routeIndex distance ${distanceKm}km",
+                        distanceKm in entry.baselineKm * 0.5..entry.baselineKm * 2.5,
+                    )
+                    val durationHours = path.time / 3_600_000.0
+                    assertTrue(
+                        "${entry.name} detent $detent route $routeIndex duration ${durationHours}h",
+                        durationHours in entry.baselineHours * 0.4..entry.baselineHours * 4.0,
+                    )
                 }
             }
         }

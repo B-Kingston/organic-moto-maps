@@ -93,17 +93,21 @@ class ComplexityWeightingTest {
     }
 
     @Test
-    fun straightAndFullyCurvedGeometryProduceExpectedCurveTerms() {
+    fun straightAndTightRadiusGeometryProduceExpectedCurveTerms() {
         val fixture = fixture()
         val fastest = FakeWeighting(edgeWeight = 4.0, millis = 4321L, minWeight = 0.75)
         val custom = FakeWeighting(edgeWeight = 4.0)
         val straight = fixture.edge(
-            distance = 1_000.0,
-            geometry = listOf(0.0 to 0.5),
+            distance = 60.0,
+            geometry = listOf(0.0 to 0.00027),
         )
         val curved = fixture.edge(
-            distance = 1_000.0,
-            geometry = listOf(0.0 to 0.0045, 0.0045 to 0.0045, 0.0045 to 0.0),
+            distance = 120.0,
+            geometry = listOf(
+                0.0 to 0.00027,
+                0.00027 to 0.00027,
+                0.00027 to 0.00054,
+            ),
         )
         val weighting = weighting(fixture, custom, fastest, complexity = 1.0)
         assertEquals(10.0, weighting.calcEdgeWeight(straight, false), 1e-9)
@@ -113,34 +117,56 @@ class ComplexityWeightingTest {
     }
 
     @Test
-    fun reversingGeometryKeepsTheSameTurnMagnitude() {
-        val fixture = fixture()
-        val original = fixture.edge(
-            distance = 1_000.0,
-            geometry = listOf(0.0 to 0.0045, 0.0045 to 0.0045, 0.0045 to 0.0),
-        )
-        val reversedGeometry = fixture.edge(
-            distance = 1_000.0,
-            geometry = listOf(0.0045 to 0.0, 0.0045 to 0.0045, 0.0 to 0.0045),
-        )
-        val weighting = weighting(
-            fixture,
-            custom = FakeWeighting(edgeWeight = 4.0),
-            fastest = FakeWeighting(edgeWeight = 4.0),
-            complexity = 3.0,
-        )
-        assertEquals(
-            weighting.calcEdgeWeight(original, false),
-            weighting.calcEdgeWeight(reversedGeometry, false),
-            1e-6,
-        )
+    fun circumradiusBucketsWeightTighterCurvesMoreStrongly() {
+        val straight = pointListMeters(0.0 to 0.0, 100.0 to 0.0, 200.0 to 0.0)
+        val broad = pointListMeters(0.0 to 0.0, 150.0 to 0.0, 150.0 to 150.0)
+        val medium = pointListMeters(0.0 to 0.0, 100.0 to 0.0, 100.0 to 100.0)
+        val sharp = pointListMeters(0.0 to 0.0, 50.0 to 0.0, 50.0 to 50.0)
+        val tight = pointListMeters(0.0 to 0.0, 30.0 to 0.0, 30.0 to 30.0)
 
-        val duplicate = fixture.edge(
-            distance = 1_000.0,
-            geometry = listOf(0.0 to 0.5, 0.0 to 0.5, 0.0 to 0.5),
-        )
-        assertTrue(weighting.calcEdgeWeight(duplicate, false).isFinite())
+        assertEquals(0.0, radiusCurveExposure(straight), 0.0)
+        assertEquals(0.5, radiusCurveExposure(broad), 1e-6)
+        assertEquals(0.65, radiusCurveExposure(medium), 1e-6)
+        assertEquals(0.8, radiusCurveExposure(sharp), 1e-6)
+        assertEquals(1.0, radiusCurveExposure(tight), 1e-6)
     }
+
+    @Test
+    fun aSharedSegmentUsesTheTighterAdjacentRadius() {
+        val geometry = pointListMeters(
+            0.0 to 200.0,
+            0.0 to 0.0,
+            30.0 to 0.0,
+            30.0 to 30.0,
+        )
+        assertEquals(320.0 / 520.0, radiusCurveExposure(geometry), 1e-5)
+    }
+
+    @Test
+    fun curveExposureIsDirectionIndependentAndRejectsShortJiggles() {
+        val curve = listOf(0.0 to 0.0, 30.0 to 0.0, 30.0 to 30.0, 60.0 to 30.0)
+        val forward = radiusCurveExposure(pointListMeters(*curve.toTypedArray()))
+        val reverse = radiusCurveExposure(pointListMeters(*curve.reversed().toTypedArray()))
+        assertEquals(forward, reverse, 1e-9)
+
+        val shortJiggle = pointListMeters(
+            0.0 to 0.0,
+            100.0 to 0.0,
+            102.0 to 2.0,
+            104.0 to 0.0,
+            204.0 to 0.0,
+        )
+        assertEquals(0.0, radiusCurveExposure(shortJiggle), 0.0)
+
+        val duplicate = pointListMeters(0.0 to 0.0, 100.0 to 0.0, 100.0 to 0.0)
+        assertTrue(radiusCurveExposure(duplicate).isFinite())
+        assertEquals(0.0, radiusCurveExposure(pointListMeters(0.0 to 0.0, 100.0 to 0.0)), 0.0)
+    }
+
+    private fun pointListMeters(vararg points: Pair<Double, Double>) =
+        PointList().apply {
+            points.forEach { (x, y) -> add(y / METERS_PER_DEGREE, x / METERS_PER_DEGREE) }
+        }
 
     private fun weighting(
         fixture: Fixture,
@@ -167,7 +193,7 @@ class ComplexityWeightingTest {
         val encodingManager = EncodingManager.start().add(access).add(surface).build()
         val graph = BaseGraph.Builder(encodingManager).create()
         graph.nodeAccess.setNode(0, 0.0, 0.0)
-        graph.nodeAccess.setNode(1, 0.0, 1.0)
+        graph.nodeAccess.setNode(1, 0.0, 0.00054)
         graph.nodeAccess.setNode(2, 1.0, 1.0)
         graph.nodeAccess.setNode(3, 1.0, 0.0)
         return Fixture(graph, access, surface)
@@ -183,7 +209,7 @@ class ComplexityWeightingTest {
             reverseAccess: Boolean = forwardAccess,
             surface: Surface = Surface.ASPHALT,
             distance: Double = 1_000.0,
-            geometry: List<Pair<Double, Double>> = listOf(0.0 to 0.5),
+            geometry: List<Pair<Double, Double>> = listOf(0.0 to 0.00027),
         ): EdgeIteratorState {
             val edge = graph.edge(0, 1)
                 .setDistance(distance)
@@ -207,5 +233,9 @@ class ComplexityWeightingTest {
         override fun calcTurnMillis(inEdge: Int, viaNode: Int, outEdge: Int): Long = 0L
         override fun hasTurnCosts(): Boolean = false
         override fun getName(): String = "fake"
+    }
+
+    private companion object {
+        const val METERS_PER_DEGREE = 111_320.0
     }
 }

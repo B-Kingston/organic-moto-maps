@@ -23,16 +23,16 @@ class PerfSmokeTest {
     private val repeatFactor = 3.0
 
     /**
-     * Intra-run self-consistency: every measured operation runs TWICE and the
-     * second pass must stay within [repeatFactor] of the first. This catches
-     * pathological mid-run slowdowns deterministically. Cross-run drift
-     * detection lives in tools/test/run-all.sh, because AGP wipes the app
-     * package (and its filesDir) after every connected run, so any on-device
-     * "previous run" state cannot survive.
+     * The warm route and geocoder query run twice. Their second pass must stay
+     * within [repeatFactor] of the first. The curve-weighted route runs once
+     * here and uses the durable cross-run drift check in tools/test/run-all.sh.
+     * AGP wipes the app package after each connected run, so on-device history
+     * cannot survive.
      */
     @Test(timeout = 900_000)
     fun coldWarmRouteAndGeocoderStayWithinCeilings() = runBlocking {
         val entry = ROUTE_CORPUS.first()
+        val curveEntry = ROUTE_CORPUS[1]
         File(context.filesDir, "gh-cache").deleteRecursively()
         val router = GraphHopperRouter(context)
         var coldResult: com.organicmoto.maps.routing.RouteResult
@@ -45,6 +45,10 @@ class PerfSmokeTest {
         val warmRouteMsRepeat = measureTimeMillis {
             router.route(entry.from, entry.to, 0.0)
         }
+        var curveResult: com.organicmoto.maps.routing.RouteResult
+        val curveRouteMs = measureTimeMillis {
+            curveResult = router.route(curveEntry.from, curveEntry.to, 1.0)
+        }
         val loadMs = measureTimeMillis { GeocoderIndex.load(context) }
         val controller = GeocodeSearchController(context)
         val queryMs = measureTimeMillis { controller.search("Brisbane") }
@@ -52,17 +56,20 @@ class PerfSmokeTest {
 
         assertTrue("cold route took ${coldRouteMs}ms", coldRouteMs <= 240_000L)
         assertTrue("warm route took ${warmRouteMs}ms", warmRouteMs <= 30_000L)
+        assertTrue("curve-weighted route took ${curveRouteMs}ms", curveRouteMs <= 120_000L)
         assertTrue("geocoder load took ${loadMs}ms", loadMs <= 60_000L)
         assertTrue("geocoder query took ${queryMs}ms", queryMs <= 3_000L)
         assertTrue(coldResult.routes.isNotEmpty())
+        assertTrue(curveResult.routes.isNotEmpty())
 
         assertSelfConsistent("warm route", warmRouteMs, warmRouteMsRepeat)
         assertSelfConsistent("geocoder query", queryMs, queryMsRepeat)
 
         File(context.filesDir, "perf.json").writeText(
             "{\"coldRouteMs\":$coldRouteMs,\"warmRouteMs\":$warmRouteMs," +
-                "\"warmRouteMsRepeat\":$warmRouteMsRepeat,\"geocoderLoadMs\":$loadMs," +
-                "\"queryMs\":$queryMs,\"queryMsRepeat\":$queryMsRepeat}\n",
+                "\"warmRouteMsRepeat\":$warmRouteMsRepeat,\"curveRouteMs\":$curveRouteMs," +
+                "\"geocoderLoadMs\":$loadMs,\"queryMs\":$queryMs," +
+                "\"queryMsRepeat\":$queryMsRepeat}\n",
         )
     }
 
