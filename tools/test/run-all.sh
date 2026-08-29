@@ -11,6 +11,9 @@ ADB="${ADB:-$HOME/Library/Android/sdk/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$HOME/Library/Android/sdk/emulator/emulator}"
 PACKAGE="com.organicmoto.maps"
 REPORT_DIR="build/test-report"
+# Cross-run perf baseline lives outside REPORT_DIR: the script wipes
+# build/test-report at startup, which would erase the history every run.
+PERF_HISTORY="build/perf.history.jsonl"
 
 fail() {
     printf 'ERROR: %s\n' "$1" >&2
@@ -165,6 +168,53 @@ pull_internal_reports() {
 
 pull_internal_reports fuzz "$REPORT_DIR/fuzz"
 pull_internal_reports perf.json "$REPORT_DIR"
+
+# Cross-run performance drift gate. The app package is wiped after every
+# connected task, so on-device history cannot survive a run; the durable
+# baseline therefore lives here, host-side. Each full trigger appends its
+# measured metrics to perf.history.jsonl and compares against the most
+# recent previous entry. Delete that file to re-baseline after a deliberate
+# slowdown (e.g. graph rebuild).
+if [[ -s "$REPORT_DIR/perf.json" ]]; then
+    DRIFT_FACTORS='{"coldRouteMs":2.5,"warmRouteMs":1.75,"geocoderLoadMs":2.0,"queryMs":2.0}'
+    python3 - "$REPORT_DIR/perf.json" "$PERF_HISTORY" "$DRIFT_FACTORS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+perf_path = Path(sys.argv[1])
+history_path = Path(sys.argv[2])
+factors = json.loads(sys.argv[3])
+
+current = json.loads(perf_path.read_text())
+history = [
+    json.loads(line)
+    for line in history_path.read_text().splitlines()
+    if line.strip()
+] if history_path.is_file() else []
+
+for key, factor in factors.items():
+    if not history or key not in history[-1] or key not in current:
+        continue
+    before = float(history[-1][key])
+    now = float(current[key])
+    budget = max(before * factor, before + 250.0)
+    if now > budget:
+        sys.exit(
+            f"PERF DRIFT: {key} regressed from {before:.0f}ms to {now:.0f}ms "
+            f"(budget {budget:.0f}ms). If intended (e.g. graph rebuild), "
+            f"delete {history_path} to re-baseline."
+        )
+
+entry = {
+    "timestampMs": __import__("time").time_ns() // 1_000_000,
+    **{key: current[key] for key in factors if key in current},
+}
+with history_path.open("a") as handle:
+    handle.write(json.dumps(entry) + "\n")
+print(f"OK: perf drift check against {len(history)} prior entr(y/ies); baseline appended.")
+PY
+fi
 
 if command -v jq >/dev/null 2>&1; then
     while IFS= read -r report; do

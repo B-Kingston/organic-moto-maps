@@ -11,6 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlin.math.abs
 
 @RunWith(AndroidJUnit4::class)
 class RouteCorpusTest {
@@ -103,6 +104,53 @@ class RouteCorpusTest {
             val candidates = routes.map { it.points.toGeoPoints() }
             assertEquals(expected, RouteSimilarity.bestMatchIndex(stored, candidates))
         }
+    }
+
+    /**
+     * Gold-baseline drift alert. Wide corpus bands only catch catastrophic
+     * rerouting; a quiet road-preference change that adds +40% distance stays
+     * green forever. These alert at ±15% against values measured on device
+     * and committed above. The GOLD_PROBE lines make recalibration trivial:
+     * run once, replace the golds with the printed numbers.
+     */
+    @Test(timeout = 900_000)
+    fun fastestRoutesMatchCommittedGoldBaselines() {
+        val router = GraphHopperRouter(context)
+        val missing = mutableListOf<String>()
+        // Every committed gold must be exercised. Entries without golds (the
+        // deliberate degenerate cases in ROUTE_CORPUS) are skipped, so future
+        // corpus additions stay covered without touching this loop.
+        ROUTE_CORPUS.filter { it.goldDistanceMeters != null || it.goldDurationMillis != null }.forEach { entry ->
+            val result = router.route(entry.from, entry.to, 0.0)
+            val path = result.routes.first()
+            println(
+                "GOLD_PROBE ${entry.name}: distance_meters=${path.distance}, " +
+                    "duration_ms=${path.time}, routes=${result.routes.size}",
+            )
+            val goldDistance = entry.goldDistanceMeters
+            val goldDuration = entry.goldDurationMillis
+            if (goldDistance == null || goldDuration == null) {
+                missing += entry.name
+                return@forEach
+            }
+            assertWithinAlertBand(entry.name, "distance", path.distance, goldDistance)
+            assertWithinAlertBand(entry.name, "duration", path.time.toDouble(), goldDuration.toDouble())
+        }
+        assertTrue(
+            "corpus entries still lack committed gold baselines: $missing. " +
+                "Run this suite once on an emulator and fill RouteCorpusEntry golds from the GOLD_PROBE lines.",
+            missing.isEmpty(),
+        )
+    }
+
+    private fun assertWithinAlertBand(entry: String, label: String, actual: Double, gold: Double) {
+        val relative = abs(actual - gold) / gold
+        assertTrue(
+            "$entry $label drifted from its gold baseline: actual=$actual gold=$gold " +
+                "(%.1f%% > 15%%). If OSM data or weighting changed deliberately, ".format(relative * 100.0) +
+                "re-run calibrationProbe and update ROUTE_CORPUS golds.",
+            relative <= 0.15,
+        )
     }
 
     @Ignore("Re-run after graph rebuilds to recalibrate corpus baselines")

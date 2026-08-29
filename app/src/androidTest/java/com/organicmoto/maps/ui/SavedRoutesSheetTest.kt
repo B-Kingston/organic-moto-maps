@@ -39,6 +39,10 @@ class SavedRoutesSheetTest {
             composeRule.onAllNodes(hasText("test note")).fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("Add a comment").assertExists()
+        // Prove the draft was really cleared: hint presence alone would also
+        // match a node that kept its text.
+        val draft = composeRule.onNodeWithText("Add a comment").fetchSemanticsNode()
+        assertEquals("", draft.config[SemanticsProperties.EditableText].text)
     }
 
     @Test

@@ -39,13 +39,28 @@ class AccessibilityTest {
         assertTargetAtLeast48Dp("Route settings")
         val start = composeRule.onNodeWithText("START")
         start.assertHasClickAction()
-        assertTrue(start.fetchSemanticsNode().boundsInRoot.width >= 48f * composeRule.density.density)
+        val minimum = 48f * composeRule.density.density
+        val startBounds = start.fetchSemanticsNode().boundsInRoot
+        assertTrue("START width ${startBounds.width} < $minimum", startBounds.width >= minimum)
+        assertTrue("START height ${startBounds.height} < $minimum", startBounds.height >= minimum)
     }
 
     @Test
     fun settingsAndRouteCardsExposeLabels() {
         composeRule.onNodeWithContentDescription("Route settings").performClick()
-        composeRule.onNodeWithContentDescription("Maximum shared roads 70 percent").assertExists()
+        // The dialog must expose its road-share control, but the exact percent
+        // is persisted across runs — match the label shape, not a literal value.
+        val roadShareLabels = composeRule.onAllNodes(
+            hasContentDescription("Maximum shared roads", substring = true),
+        ).fetchSemanticsNodes()
+        assertTrue(
+            "expected a 'Maximum shared roads N percent' content description",
+            roadShareLabels.any { node ->
+                node.config.getOrElse(
+                    androidx.compose.ui.semantics.SemanticsProperties.ContentDescription,
+                ) { emptyList() }.any { it.matches(Regex("Maximum shared roads \\d+ percent")) }
+            },
+        )
         composeRule.onNodeWithContentDescription("Block unpaved roads").assertExists()
         composeRule.onNodeWithText("CANCEL").performClick()
 

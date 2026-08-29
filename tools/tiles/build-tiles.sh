@@ -16,6 +16,10 @@ cd "$REPO_ROOT"
 
 PLANETILER_VERSION="0.10.2"
 PLANETILER_URL="https://github.com/onthegomap/planetiler/releases/download/v${PLANETILER_VERSION}/planetiler.jar"
+# Supply-chain pin, same policy as the GraphHopper import jar: a compromised
+# release or MITM on the retry path must not inject code into the machine
+# that builds the shipped graph/tiles/geocoder. Bump together with the version.
+PLANETILER_JAR_SHA256="f310bd0413e2e4512b27f4046d418664e8e1d3bf31603c2a70e23de06c167e4d"
 PLANETILER_JAR="tools/tiles/planetiler.jar"
 
 # Tile generator v0.10.2 is built for JDK 21. The Android/Gradle build still uses JDK 17.
@@ -49,6 +53,8 @@ if [ ! -f "$PLANETILER_JAR" ]; then
     echo "Downloading planetiler $PLANETILER_VERSION..."
     curl -fL --retry 3 -o "$PLANETILER_JAR" "$PLANETILER_URL"
 fi
+echo "$PLANETILER_JAR_SHA256  $PLANETILER_JAR" | shasum -a 256 -c - >/dev/null \
+    || { echo "Planetiler jar checksum mismatch: delete $PLANETILER_JAR and re-run" >&2; exit 1; }
 
 mkdir -p data/tiles "$ASSET_DIR"
 

@@ -22,16 +22,21 @@ class MemoryStressTest {
     @Test(timeout = 900_000)
     fun repeatedRoutingStorageAndSearchStayWithinHeapBudget() = runBlocking {
         val runtime = Runtime.getRuntime()
-        System.gc()
-        val baseline = usedHeap(runtime)
         val router = GraphHopperRouter(context)
+        // Warm-up OUTSIDE the measured window: one-shot costs (graph mmap,
+        // first-dial routing paths, JIT) must not pollute the baseline or
+        // they would masquerade as leaks.
+        synchronized(GRAPH_CACHE_COPY_LOCK) {
+            router.route(ROUTE_CORPUS.first().from, ROUTE_CORPUS.first().to, 1.0)
+        }
+        val baseline = stableUsedHeap(runtime)
+
         synchronized(GRAPH_CACHE_COPY_LOCK) {
             repeat(15) { index ->
                 router.route(ROUTE_CORPUS.first().from, ROUTE_CORPUS.first().to, 1.0)
-                if ((index + 1) % 5 == 0) System.gc()
             }
         }
-        val afterRouting = usedHeap(runtime)
+        val afterRouting = stableUsedHeap(runtime)
         assertTrue("routing heap grew by ${afterRouting - baseline} bytes", afterRouting - baseline < 96L * 1024 * 1024)
 
         val repository = SavedRouteRepository(context)
@@ -51,12 +56,30 @@ class MemoryStressTest {
                 },
             )
         }
-        System.gc()
-        val finalHeap = usedHeap(runtime)
+        val finalHeap = stableUsedHeap(runtime)
         assertTrue("final heap grew by ${finalHeap - baseline} bytes", finalHeap - baseline < 96L * 1024 * 1024)
     }
 
     private fun usedHeap(runtime: Runtime): Long = runtime.totalMemory() - runtime.freeMemory()
+
+    /**
+     * A single System.gc() call leaves surviving soft-references and
+     * in-flight allocations anywhere between two samples; taking the minimum
+     * across three GC rounds measures steady-state retention, not timing luck.
+     */
+    private fun stableUsedHeap(runtime: Runtime): Long {
+        var smallest = usedHeap(runtime)
+        repeat(3) {
+            System.gc()
+            try {
+                Thread.sleep(30)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            smallest = minOf(smallest, usedHeap(runtime))
+        }
+        return smallest
+    }
 
     private fun draft(index: Int) = SavedRouteDraft(
         fromName = "Brisbane $index",

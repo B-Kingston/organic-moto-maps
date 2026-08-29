@@ -15,6 +15,7 @@ import com.organicmoto.maps.MapRouteCountKey
 import com.organicmoto.maps.RouteCountKey
 import com.organicmoto.maps.RouteUiStateKey
 import com.organicmoto.maps.SelectedRouteKey
+import com.organicmoto.maps.ui.KnobRobot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -29,6 +30,23 @@ class CarouselMapConsistencyTest {
 
     @Test(timeout = 300_000)
     fun selectedCardAndFocusedMapRouteStayInSync() {
+        // Same pre-flight gate the fuzz campaign uses: tolerate slow cold
+        // launches before driving the panel.
+        composeRule.waitUntil(30_000) {
+            composeRule.onAllNodes(SemanticsMatcher.keyIsDefined(RouteUiStateKey))
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        // Rotate the dial BEFORE any typing: focused planner fields swap the
+        // ride-controls content for their search suggestions, so reaching for
+        // the knob after typing races field/search state. Dial-first keeps
+        // every interaction on a settled, search-free panel. Detent 0 only
+        // ever produces the primary candidate, so alternative sync would be
+        // tested conditionally without these clicks; this corridor is the
+        // corpus's alternativesExpected entry and must surface a distinct
+        // second candidate at detent 2.
+        KnobRobot.performDetentClicks(composeRule, 2)
+        KnobRobot.waitForLevel(composeRule, 2) // knob must be at detent 2 before submitting
         composeRule.onNodeWithContentDescription("From").performTextInput("-27.4698,153.0251")
         composeRule.onNodeWithContentDescription("To").performTextInput("-27.3353,152.7720")
         composeRule.onNodeWithText("START").performClick()
@@ -37,17 +55,24 @@ class CarouselMapConsistencyTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        composeRule.waitUntil(30_000) {
+            composeRule.onAllNodes(hasContentDescription("Route 2:", substring = true))
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        assertTrue(
+            "detent-2 search on the alternatives corridor must produce a second candidate",
+            rootNode().config[RouteCountKey] >= 2,
+        )
 
         assertSelectionMatchesMap()
         val before = rootNode().config[SelectedRouteKey]
-        val alternatives = composeRule.onAllNodes(hasContentDescription("Route 2:", substring = true))
-            .fetchSemanticsNodes()
-        if (alternatives.isNotEmpty()) {
-            composeRule.onNode(hasContentDescription("Route 2:", substring = true)).performClick()
-            composeRule.waitUntil(30_000) { rootNode().config[SelectedRouteKey] != before }
-            assertSelectionMatchesMap()
-        }
-        assertTrue(rootNode().config[RouteCountKey] >= 1)
+        assertEquals(0, before)
+        composeRule.onNode(hasContentDescription("Route 2:", substring = true)).performClick()
+        composeRule.waitUntil(30_000) { rootNode().config[SelectedRouteKey] != before }
+        assertSelectionMatchesMap()
+        // Selecting the "Route 2" card must land exactly on alternative index 1.
+        assertEquals(1, rootNode().config[SelectedRouteKey])
     }
 
     private fun assertSelectionMatchesMap() {

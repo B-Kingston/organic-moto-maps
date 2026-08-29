@@ -1,0 +1,143 @@
+name: light-ci
+
+# The light verification tier (tools/test/ci.sh) on a hosted runner.
+#
+# The generated assets (routing graph, PMTiles basemap, geocoder index,
+# glyphs/sprites) are gitignored, so this workflow regenerates them from the
+# pinned pipeline before invoking tools/test/ci.sh — whose preflight step
+# then validates every artifact exactly like it does locally.
+#
+# Determinism note: the OSM extract and the GraphHopper jar are cached by
+# key. When the data should be refreshed (e.g. after a graph re-import),
+# bump CACHE_SEED below — that forces one full rebuild and re-caches.
+#
+# The instrumented/emulator tier stays manual per AGENTS.md
+# (tools/test/run-all.sh on a machine with an AVD).
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+
+env:
+  # Keep in lockstep with `graphhopper` in gradle/libs.versions.toml (stored
+  # graph format is version-bound). Used for the jar URL and cache path below.
+  GRAPHHOPPER_VERSION: "11.0"
+  GRAPHHOPPER_JAR_SHA256: b59c024afe172ec6ec85b6327006c3138ec58c7d0bcd26253d0e42853f613def
+  CACHE_SEED: v1
+
+jobs:
+  light-tier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 17 for Gradle/AGP + the GraphHopper import; JDK 21 only for
+      # Planetiler (see tools/tiles/build-tiles.sh). GitHub exposes both as
+      # JAVA_HOME_{17,21}_X64 regardless of which setup-java ran last.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle caches and wrapper
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Restore generated data (OSM extract, graph, tiles, geocoder)
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data
+            tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
+            app/src/main/assets/graph-cache
+            app/src/main/assets/geocoder
+            app/src/main/assets/tiles
+
+      - name: Download OSM extract and GraphHopper import jar
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data tools/gh
+          curl -fL --retry 3 --retry-delay 5 \
+            -o data/queensland.osm.pbf \
+            https://download.geofabrik.de/australia-oceania/australia/queensland-latest.osm.pbf
+          # Verify the download is really a PBF: shallow paths return their
+          # HTML index with HTTP 200 (see AGENTS.md).
+          python3 - <<'PY'
+          import sys
+          with open('data/queensland.osm.pbf', 'rb') as f:
+              blob = f.read(4)
+          # PBF's first blob is the OSMHeader BlobHeader: a 4-byte big-endian
+          # length field, so the first byte is always 0x00. An HTML index
+          # (shallow Geofabrik paths return HTTP 200) starts with '<' and is
+          # rejected here (see AGENTS.md).
+          assert blob[:1] == b'\x00', blob
+          print('queensland.osm.pbf looks like a PBF:', blob.hex())
+          PY
+          curl -fL --retry 3 --retry-delay 5 \
+            -o tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar \
+            https://github.com/graphhopper/graphhopper/releases/download/${{ env.GRAPHHOPPER_VERSION }}/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
+      - name: Verify GraphHopper jar checksum
+        run: |
+          echo "${{ env.GRAPHHOPPER_JAR_SHA256 }}  tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" | sha256sum -c -
+
+
+      - name: Import routing graph (GraphHopper, JDK 17)
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        run: |
+          "$JAVA_HOME_17_X64/bin/java" -Xmx12g -jar "tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" import tools/gh/config.yml
+          cp -R data/graph-cache app/src/main/assets/graph-cache
+
+      # On a cache hit the tiles and geocoder index are restored straight into
+      # app/src/main/assets/; the graph lives under data/ (the import copies it
+      # there), so stage it back into the asset dir the app reads.
+      - name: Stage cached graph into the APK asset dir
+        if: steps.data-cache.outputs.cache-hit == 'true'
+        run: cp -R data/graph-cache app/src/main/assets/graph-cache
+
+      - name: Build offline geocoder index
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        run: |
+          JAVA_HOME="$JAVA_HOME_17_X64" ./gradlew :geocoder-tool:run \
+            --args="data/queensland.osm.pbf app/src/main/assets/geocoder"
+
+      - name: Fetch glyph and sprite style assets
+        run: tools/style/fetch-style-assets.sh
+
+      - name: Light CI tier (preflight + JVM suites + assembleDebug)
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          tools/test/ci.sh
+
+      - name: Upload unit-test XML reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvm-test-results
+          path: |
+            app/build/test-results/**/*.xml
+            geocoder-tool/build/test-results/**/*.xml
+          if-no-files-found: ignore
+
+      - name: Upload preflight log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-log
+          path: build/test-report/
+          if-no-files-found: ignore

@@ -19,32 +19,68 @@ class PerfSmokeTest {
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
+    /** Intra-run self-consistency budget: second repeat must stay within. */
+    private val repeatFactor = 3.0
+
+    /**
+     * Intra-run self-consistency: every measured operation runs TWICE and the
+     * second pass must stay within [repeatFactor] of the first. This catches
+     * pathological mid-run slowdowns deterministically. Cross-run drift
+     * detection lives in tools/test/run-all.sh, because AGP wipes the app
+     * package (and its filesDir) after every connected run, so any on-device
+     * "previous run" state cannot survive.
+     */
     @Test(timeout = 900_000)
     fun coldWarmRouteAndGeocoderStayWithinCeilings() = runBlocking {
         val entry = ROUTE_CORPUS.first()
         File(context.filesDir, "gh-cache").deleteRecursively()
         val router = GraphHopperRouter(context)
-        var coldRouteMs = 0L
-        val coldResult: com.organicmoto.maps.routing.RouteResult
-        coldRouteMs = measureTimeMillis {
+        var coldResult: com.organicmoto.maps.routing.RouteResult
+        val coldRouteMs = measureTimeMillis {
             coldResult = router.route(entry.from, entry.to, 0.0)
         }
-        var warmRouteMs = 0L
-        warmRouteMs = measureTimeMillis {
+        val warmRouteMs = measureTimeMillis {
+            router.route(entry.from, entry.to, 0.0)
+        }
+        val warmRouteMsRepeat = measureTimeMillis {
             router.route(entry.from, entry.to, 0.0)
         }
         val loadMs = measureTimeMillis { GeocoderIndex.load(context) }
         val controller = GeocodeSearchController(context)
-        var queryMs = 0L
-        queryMs = measureTimeMillis { controller.search("Brisbane") }
+        val queryMs = measureTimeMillis { controller.search("Brisbane") }
+        val queryMsRepeat = measureTimeMillis { controller.search("Brisbane") }
+
         assertTrue("cold route took ${coldRouteMs}ms", coldRouteMs <= 240_000L)
         assertTrue("warm route took ${warmRouteMs}ms", warmRouteMs <= 30_000L)
         assertTrue("geocoder load took ${loadMs}ms", loadMs <= 60_000L)
         assertTrue("geocoder query took ${queryMs}ms", queryMs <= 3_000L)
         assertTrue(coldResult.routes.isNotEmpty())
+
+        assertSelfConsistent("warm route", warmRouteMs, warmRouteMsRepeat)
+        assertSelfConsistent("geocoder query", queryMs, queryMsRepeat)
+
         File(context.filesDir, "perf.json").writeText(
             "{\"coldRouteMs\":$coldRouteMs,\"warmRouteMs\":$warmRouteMs," +
-                "\"geocoderLoadMs\":$loadMs,\"queryMs\":$queryMs}\n",
+                "\"warmRouteMsRepeat\":$warmRouteMsRepeat,\"geocoderLoadMs\":$loadMs," +
+                "\"queryMs\":$queryMs,\"queryMsRepeat\":$queryMsRepeat}\n",
         )
     }
+
+    private fun assertSelfConsistent(label: String, firstMs: Long, secondMs: Long) {
+        val budget = max(firstMs * repeatFactor, firstMs + 250.0)
+        assertTrue(
+            "$label regressed between repeats: ${firstMs}ms -> ${secondMs}ms " +
+                "(allowed up to ${"%.0f".format(budget)}ms)",
+            secondMs <= budget,
+        )
+    }
+
+    /**
+     * Absolute ceilings alone are smoke bounds, not regression bounds.
+     * Intra-run self-consistency (see [assertSelfConsistent]) covers mid-run
+     * degradation; tools/test/run-all.sh additionally compares this run
+     * against build/perf.history.jsonl for cross-run drift. run-all.sh owns
+     * the cross-run drift factors (DRIFT_FACTORS there); the +250 ms floor
+     * and intra-run factor here cover only this suite's own repeat check.
+     */
 }

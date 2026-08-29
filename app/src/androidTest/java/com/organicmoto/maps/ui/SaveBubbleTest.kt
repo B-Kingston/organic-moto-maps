@@ -9,6 +9,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.organicmoto.maps.CONFIRM_LINGER_MS
 import com.organicmoto.maps.SaveRouteBubble
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -41,7 +42,7 @@ class SaveBubbleTest {
         composeRule.waitUntil(2_000) {
             composeRule.onAllNodes(hasText("Saved")).fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.mainClock.advanceTimeBy(900)
+        composeRule.mainClock.advanceTimeBy(CONFIRM_LINGER_MS)
         composeRule.waitForIdle()
         assertTrue(dismissed)
         composeRule.onNodeWithText("Saved").assertDoesNotExist()

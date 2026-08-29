@@ -27,6 +27,13 @@ class FuzzCampaignTest {
             .map(String::toLong)
         val steps = (arguments.getString("fuzzSteps") ?: "60").toInt().coerceAtLeast(1)
         val failFast = (arguments.getString("fuzzFailFast") ?: "false").toBoolean()
+        // Soft warnings are advisory until they persist across a large share of
+        // a campaign, which usually means the oracle caught a real degradation.
+        // A single-step hit stays non-fatal (races legitimately occur); when
+        // one distinct warning exceeds this share of steps it escalates to a
+        // hard failure. Set fuzzWarnFraction=0 to disable escalation.
+        val warnFraction = (arguments.getString("fuzzWarnFraction") ?: "0.25").toDouble()
+        val warnBudget = if (warnFraction <= 0.0) Int.MAX_VALUE else maxOf(1, kotlin.math.ceil(steps * warnFraction).toInt())
         val reports = mutableListOf<String>()
         val hardFailures = mutableListOf<String>()
         val executor = executor()
@@ -48,6 +55,7 @@ class FuzzCampaignTest {
             var loadingGeneration: Int? = null
             var runError: String? = null
             val softWarnings = mutableListOf<String>()
+            val warningCounts = HashMap<String, Int>()
 
             repeat(steps) { step ->
                 val state = try {
@@ -87,10 +95,17 @@ class FuzzCampaignTest {
                 val after = runCatching { extractor.extract() }.getOrNull() ?: state
                 hardFailures += oracles.hardFailures(after, loadingSteps, loadingGeneration)
                     .map { "seed=$seed step=$step $it" }
-                softWarnings += oracles.softWarnings(after)
-                    .map { "seed=$seed step=$step $it" }
+                oracles.softWarnings(after).forEach { warning ->
+                    softWarnings += "seed=$seed step=$step $warning"
+                    warningCounts[warning] = (warningCounts[warning] ?: 0) + 1
+                }
                 coverage.record(after, action)
                 if (failFast && hardFailures.any { it.startsWith("seed=$seed") }) return@repeat
+            }
+            warningCounts.filterValues { it > warnBudget }.forEach { (warning, count) ->
+                hardFailures +=
+                    "seed=$seed PersistentSoftWarning: \"$warning\" fired on $count of " +
+                        "$steps steps (budget $warnBudget); persistent soft signals are treated as failures"
             }
             val report = FailureRecorder.record(
                 context = InstrumentationRegistry.getInstrumentation().targetContext,
@@ -131,14 +146,28 @@ class FuzzCampaignTest {
         },
     )
     private fun waitForScreen() {
-        composeRule.waitUntil(30_000) {
-            runCatching {
+        // Gentle polling instead of rule.waitUntil: compose-idle sync can
+        // force measure/layout inside a live map draw pass and crash with
+        // framework-level IAE (seen in fuzz campaigns on Pixel_10_Pro AVD).
+        // A timeout IS a failure: an app that never reaches the route screen
+        // (hang, nav dead-end, crash-recovery loop) must surface as a hard
+        // failure, not silently let the campaign run against stale state.
+        val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val present = runCatching {
                 composeRule.onAllNodes(
                     androidx.compose.ui.test.SemanticsMatcher.keyIsDefined(com.organicmoto.maps.RouteUiStateKey),
                 ).fetchSemanticsNodes().isNotEmpty()
             }.getOrDefault(false)
+            if (present) return
+            try {
+                Thread.sleep(150)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
         }
-        composeRule.waitForIdle()
+        error("RouteUiStateKey node did not appear within 30s")
     }
 
     private fun actionWeights(): Map<Class<out FuzzAction>, Int> = mapOf(

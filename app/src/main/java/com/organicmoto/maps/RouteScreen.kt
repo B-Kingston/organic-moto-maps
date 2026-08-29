@@ -1415,7 +1415,8 @@ private fun RoutePlanPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)
-                    .heightIn(min = 36.dp)
+                    // AccessibilityTest enforces the 48 dp touch-target floor.
+                    .heightIn(min = 48.dp)
             ) {
                 Text("START", fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }

@@ -48,8 +48,12 @@ private val FAILED_RED = Color(0xFFC5221F)
 /** Distance from the anchor card's top edge up to the bubble's bottom edge. */
 private val BUBBLE_LIFT = 58.dp
 
-/** How long the "Saved" confirmation lingers before the bubble dismisses itself. */
-private const val CONFIRM_LINGER_MS = 900L
+/**
+ * How long the "Saved" confirmation lingers before the bubble dismisses
+ * itself. Internal (not private) because SaveBubbleTest advances the compose
+ * clock past exactly this value — change it in one place and both stay honest.
+ */
+internal const val CONFIRM_LINGER_MS = 900L
 
 /** Bubble lifecycle: prompt → saving → saved (auto-dismiss) or failed (retry). */
 private enum class SaveState { PROMPT, SAVING, SAVED, FAILED }

@@ -12,6 +12,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
 import com.organicmoto.maps.RoutePlanSearchField
 import com.organicmoto.maps.RoutePlanSearchResults
+import com.organicmoto.maps.SEARCH_DEBOUNCE_MS
 import com.organicmoto.maps.geocoding.GeocodeController
 import com.organicmoto.maps.geocoding.GeocodeResult
 import com.organicmoto.maps.geocoding.GeocodeResultType
@@ -137,7 +138,7 @@ class SearchDebounceTest {
         // Flush the value recomposition before advancing the virtual debounce
         // clock. This matters when autoAdvance is disabled.
         composeRule.mainClock.advanceTimeByFrame()
-        composeRule.mainClock.advanceTimeBy(301)
+        composeRule.mainClock.advanceTimeBy(SEARCH_DEBOUNCE_MS + 1)
         composeRule.mainClock.advanceTimeByFrame()
     }
 

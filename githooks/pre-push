@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Local stopgap gate until every contributor pushes through wired CI:
+# run the cheap emulator-free tier before anything leaves the machine.
+# Enable with:  git config core.hooksPath githooks
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+exec tools/test/ci.sh

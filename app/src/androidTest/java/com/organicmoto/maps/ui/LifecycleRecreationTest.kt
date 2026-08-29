@@ -3,17 +3,16 @@ package com.organicmoto.maps.ui
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.organicmoto.maps.MainActivity
 import com.organicmoto.maps.RouteUiStateKey
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,14 +24,26 @@ class LifecycleRecreationTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test(timeout = 300_000)
-    fun editableFieldsSurviveLoadingButRouteStateResets() {
+    fun editableFieldsSurviveSubmissionRecreation() {
         enterCoordinates()
         composeRule.onNodeWithText("START").performClick()
+        // Honest pre-recreate guard: the submission must have been observed
+        // leaving idle (loading or success) so this really exercises
+        // recreation during/independent of async routing — not a silent
+        // recreation-before-submit.
+        composeRule.waitUntil(30_000) {
+            currentState() != "idle"
+        }
+        val observedState = currentState()
+        assertTrue(
+            "expected loading or success before recreation, saw $observedState",
+            observedState == "loading" || observedState == "success",
+        )
         composeRule.activityRule.scenario.recreate()
         composeRule.waitForIdle()
         assertEquals("-27.4698,153.0251", fieldText("From"))
         assertEquals("-27.3353,152.7720", fieldText("To"))
-        waitForState("idle")
+        UiTestWaits.waitForState(composeRule, "idle")
         composeRule.onNodeWithText("START").assertIsEnabled()
     }
 
@@ -40,18 +51,14 @@ class LifecycleRecreationTest {
     fun fieldsAndComplexitySurviveSuccessRecreation() {
         enterCoordinates()
         composeRule.onNodeWithText("START").performClick()
-        waitForState("success")
-        dragOneClockwiseClick()
-        composeRule.waitUntil(10_000) {
-            composeRule.onAllNodes(
-                androidx.compose.ui.test.hasContentDescription("Ride complexity level 1"),
-            ).fetchSemanticsNodes().isNotEmpty()
-        }
+        UiTestWaits.waitForState(composeRule, "success")
+        KnobRobot.performDetentClicks(composeRule, 1)
+        KnobRobot.waitForLevel(composeRule, 1)
         composeRule.activityRule.scenario.recreate()
         composeRule.waitForIdle()
         assertEquals("-27.4698,153.0251", fieldText("From"))
         assertEquals("-27.3353,152.7720", fieldText("To"))
-        waitForState("idle")
+        UiTestWaits.waitForState(composeRule, "idle")
         composeRule.onNodeWithContentDescription("Ride complexity level 1").assertExists()
     }
 
@@ -70,6 +77,11 @@ class LifecycleRecreationTest {
         composeRule.onNodeWithText("Route settings").assertDoesNotExist()
     }
 
+    private fun currentState(): String =
+        composeRule.onNode(SemanticsMatcher.keyIsDefined(RouteUiStateKey))
+            .fetchSemanticsNode()
+            .config[RouteUiStateKey]
+
     private fun enterCoordinates() {
         composeRule.onNodeWithContentDescription("From").performTextInput("-27.4698,153.0251")
         composeRule.onNodeWithContentDescription("To").performTextInput("-27.3353,152.7720")
@@ -81,37 +93,4 @@ class LifecycleRecreationTest {
             .config[SemanticsProperties.EditableText]
             .text
 
-    private fun waitForState(state: String) {
-        composeRule.waitUntil(300_000) {
-            composeRule.onAllNodes(SemanticsMatcher.expectValue(RouteUiStateKey, state))
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-    }
-
-    private fun dragOneClockwiseClick() {
-        val knob = composeRule.onNode(
-            androidx.compose.ui.test.hasContentDescription("Ride complexity level", substring = true),
-        )
-        val bounds = knob.fetchSemanticsNode().boundsInRoot
-        knob.performTouchInput {
-            val center = androidx.compose.ui.geometry.Offset(bounds.width / 2f, bounds.height / 2f)
-            val radius = bounds.width.coerceAtMost(bounds.height) * 0.45f
-            val startAngle = Math.PI / 2.0
-            down(center + androidx.compose.ui.geometry.Offset(
-                (radius * kotlin.math.cos(startAngle)).toFloat(),
-                (radius * kotlin.math.sin(startAngle)).toFloat(),
-            ))
-            advanceEventTime(20)
-            repeat(8) { step ->
-                val angle = startAngle + (step + 1) * Math.PI / 32.0
-                moveTo(center + androidx.compose.ui.geometry.Offset(
-                    (radius * kotlin.math.cos(angle)).toFloat(),
-                    (radius * kotlin.math.sin(angle)).toFloat(),
-                ))
-                advanceEventTime(20)
-            }
-            up()
-        }
-    }
 }

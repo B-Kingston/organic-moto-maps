@@ -108,24 +108,9 @@ class FuzzExecutor(
     }
 
     private fun rotateKnob(detents: Int) {
-        val matcher = hasContentDescription("Ride complexity level", substring = true)
-        if (!present(matcher) || detents == 0) return
-        val interaction = rule.onNode(matcher)
-        val bounds = interaction.fetchSemanticsNode().boundsInRoot
-        interaction.performTouchInput {
-            val center = Offset(bounds.width / 2f, bounds.height / 2f)
-            val radius = bounds.width.coerceAtMost(bounds.height) * 0.45f
-            val direction = if (detents >= 0) 1 else -1
-            val startAngle = Math.PI / 2.0
-            down(center + polar(radius, startAngle))
-            advanceEventTime(20)
-            repeat(abs(detents) * 8) { step ->
-                val angle = startAngle + direction * (step + 1) * Math.PI / 32.0
-                moveTo(center + polar(radius, angle))
-                advanceEventTime(20)
-            }
-            up()
-        }
+        // Delegated: one continuous drag crossing N clicks, identical physics
+        // with the planner-panel suites via KnobRobot.
+        com.organicmoto.maps.ui.KnobRobot.performContinuousDrag(rule, detents)
     }
 
     private fun targetMatcher(target: UiTarget): SemanticsMatcher? = when (target) {

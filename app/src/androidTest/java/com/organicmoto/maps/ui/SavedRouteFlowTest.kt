@@ -11,7 +11,6 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.organicmoto.maps.MainActivity
-import com.organicmoto.maps.RouteUiStateKey
 import com.organicmoto.maps.storage.SAVED_ROUTES_DB_NAME
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -37,7 +36,7 @@ class SavedRouteFlowTest {
         val to = "-27.3353,152.7720"
         enterCoordinates(from, to)
         composeRule.onNodeWithText("START").performClick()
-        waitForState("success")
+        UiTestWaits.waitForState(composeRule, "success")
 
         composeRule.onNode(hasContentDescription("Route 1:", substring = true))
             .performTouchInput { longClick() }
@@ -76,7 +75,7 @@ class SavedRouteFlowTest {
             "Saved route: $from to $to",
             useUnmergedTree = true,
         ).performClick()
-        waitForState("success")
+        UiTestWaits.waitForState(composeRule, "success")
         assertEquals(from, fieldText("From"))
         assertEquals(to, fieldText("To"))
         composeRule.onNodeWithContentDescription("Ride complexity level 0").assertExists()
@@ -118,11 +117,4 @@ class SavedRouteFlowTest {
             .config[androidx.compose.ui.semantics.SemanticsProperties.EditableText]
             .text
 
-    private fun waitForState(state: String) {
-        composeRule.waitUntil(300_000) {
-            composeRule.onAllNodes(androidx.compose.ui.test.SemanticsMatcher.expectValue(RouteUiStateKey, state))
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-    }
 }

@@ -62,6 +62,54 @@ class StyleAndSpritesIntegrityTest {
         }
     }
 
+    /**
+     * The install step in tools/style/fetch-style-assets.sh already fails when
+     * a listed icon is missing from sprite.json, but nothing stopped someone
+     * from editing sprite.json afterwards and regressing an icon silently
+     * (a green light tier with blank POI icons at runtime). Reproduce the
+     * pipeline's invariant here: every icon name in data/style/icon-names.txt
+     * must exist in the shipped sprite sheet, and every literal icon-image
+     * string inside style.json must be one of those names.
+     */
+    @Test
+    fun referencedIconNamesAllExistInTheSpriteSheet() {
+        val root = repoRoot()
+        val requiredIcons = root.resolve("data/style/icon-names.txt")
+            .readLines()
+            .map(String::trim)
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+        assertTrue("icon-names.txt must list at least one icon", requiredIcons.isNotEmpty())
+        assertEquals(
+            "icon-names.txt must not contain duplicates",
+            requiredIcons.size,
+            requiredIcons.toSet().size,
+        )
+
+        val spriteKeys = JSONObject(
+            root.resolve("app/src/main/assets/sprites/sprite.json").readText(),
+        ).let { json ->
+            json.keys().asSequence().toSet()
+        }
+        val missing = requiredIcons.filterNot { it in spriteKeys }
+        assertTrue(
+            "icons missing from sprite.json: $missing; run tools/style/fetch-style-assets.sh",
+            missing.isEmpty(),
+        )
+
+        // Literal icon-image references in style.json (not "{icon}" token
+        // forms driven by feature properties) must also resolve.
+        val style = JSONObject(root.resolve("app/src/main/assets/style.json").readText())
+        val literals = mutableListOf<String>()
+        collectValuesForKey(style, "icon-image").forEach { value ->
+            if (value is String && !value.contains('{')) literals += value
+        }
+        val unresolvedLiterals = literals.filterNot { it in spriteKeys }
+        assertTrue(
+            "style.json references icons absent from sprite.json: $unresolvedLiterals",
+            unresolvedLiterals.isEmpty(),
+        )
+    }
+
     private fun collectStrings(value: Any?, key: String?, output: MutableList<String>) {
         when (value) {
             is JSONObject -> value.keys().forEach { childKey ->

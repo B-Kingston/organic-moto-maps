@@ -69,22 +69,20 @@ class PlannerPanelTest {
         composeRule.onNodeWithContentDescription("From").performTextInput("-27.4698,153.0251")
         composeRule.onNodeWithContentDescription("To").performTextInput("-27.3353,152.7720")
         composeRule.onNodeWithText("START").performClick()
-        var observedLoading = false
         var observedSuccess = false
         composeRule.waitUntil(300_000) {
             val states = composeRule.onAllNodes(
                 SemanticsMatcher.keyIsDefined(RouteUiStateKey),
             ).fetchSemanticsNodes()
-            observedLoading = observedLoading || states.any {
-                it.config[RouteUiStateKey] == "loading"
-            }
-            observedSuccess = observedSuccess || states.any {
+            val success = states.any {
                 it.config[RouteUiStateKey] == "success"
             }
+            observedSuccess = observedSuccess || success
             observedSuccess
         }
-        // A warm in-process route can pass through Loading between frames.
-        assertTrue(observedSuccess || observedLoading)
+        // The waitUntil above can only exit when a success frame is observed,
+        // so asserting anything weaker here would be unreachable-false.
+        assertTrue(observedSuccess)
         val successBounds = composeRule.onNodeWithText("START").fetchSemanticsNode().boundsInRoot
         assertEquals(idleBounds.left, successBounds.left, 1f)
         assertEquals(idleBounds.right, successBounds.right, 1f)

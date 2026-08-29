@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +46,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -61,7 +64,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 private const val TAG = "OrganicMoto.SearchField"
-private const val SEARCH_DEBOUNCE_MS = 300L
+/**
+ * Debounce window for the offline search-as-you-type fields. Internal (not
+ * private) because SearchDebounceTest advances its virtual clock past exactly
+ * this value — change it in one place and both stay honest.
+ */
+internal const val SEARCH_DEBOUNCE_MS = 300L
 private const val MAX_DROPDOWN_ROWS = 6
 
 /** Max dropdown height before the result list scrolls (keeps the overlay from sprawling). */
@@ -316,6 +324,13 @@ fun RoutePlanSearchField(
                 ),
                 cursorBrush = SolidColor(Color(0xFF249CF2)),
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    // Commit the typed text and drop focus: dismissing the IME
+                    // must also leave search-suggestion mode so the ride
+                    // controls (dial/status) come back without any race.
+                    onDone = { focusManager.clearFocus() }
+                ),
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
