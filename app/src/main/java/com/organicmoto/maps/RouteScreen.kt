@@ -40,6 +40,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.organicmoto.maps.map.hideNavPosition
+import com.organicmoto.maps.map.updateNavPosition
+import com.organicmoto.maps.routing.navigation.NavigationState
+import com.organicmoto.maps.routing.navigation.RebuildRequest
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
@@ -312,6 +318,24 @@ fun RouteScreen() {
     // changes, so a stale reroute can never target edited-away points.
     var activePlan by remember { mutableStateOf<Pair<GHPoint, GHPoint>?>(null) }
     val geocodeController = remember { GeocodeSearchController(context.applicationContext) }
+    // Guidance: pure engine + Android glue. One controller per screen.
+    NavigationContext.appContext = context.applicationContext
+    val navigationController = remember { NavigationController(scope) }
+    val navSnapshot by navigationController.snapshot.collectAsState()
+    var guidanceRequested by remember { mutableStateOf(false) }
+    var locationPermissionGranted by remember {
+        mutableStateOf(
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        locationPermissionGranted = granted
+        Log.i(TAG, "Location permission " + if (granted) "granted" else "denied")
+    }
     val mapRef = remember { mutableStateOf<MapLibreMap?>(null) }
     // Saved-route storage: repository over device SQLite plus the menu flag.
     val savedRouteRepository = remember { SavedRouteRepository(context.applicationContext) }
@@ -524,6 +548,50 @@ fun RouteScreen() {
         )
     }
 
+    // Guidance rebuild: reroute from the engine's last good position using
+    // the SAME coordinator as planning, so generation/cancellation rules hold.
+    val latestSubmitRoute by rememberUpdatedState(::submitRoute)
+    remember(navigationController) {
+        navigationController.setRebuildHandler { request: RebuildRequest ->
+            val plan = activePlan
+            if (plan == null) {
+                Log.w(TAG, "Rebuild skipped: no active plan")
+                return@setRebuildHandler
+            }
+            val rebuildFrom = GHPoint(request.lat, request.lon)
+            // Route from the last good position to the ORIGINAL destination.
+            latestSubmitRoute(rebuildFrom, plan.second, complexity, maxRoadShare, blockUnpaved, null)
+        }
+    }
+
+    // Start guidance once a route exists and permission is granted; stop when
+    // the plan is invalidated or the route disappears.
+    LaunchedEffect(routeResult, selectedIndex, guidanceRequested, locationPermissionGranted) {
+        if (!guidanceRequested || !locationPermissionGranted) {
+            navigationController.stop()
+            mapRef.value?.hideNavPosition()
+            return@LaunchedEffect
+        }
+        val path = routeResult?.routes?.getOrNull(selectedIndex)
+        if (path != null) {
+            navigationController.start(path)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { navigationController.stop() }
+    }
+
+    // Draw the guidance position dot from the engine snapshot.
+    LaunchedEffect(navSnapshot) {
+        val map = mapRef.value ?: return@LaunchedEffect
+        val snap = navSnapshot
+        if (snap.state == NavigationState.Idle || snap.lat.isNaN()) {
+            map.hideNavPosition()
+        } else {
+            map.updateNavPosition(snap.lat, snap.lon, snap.bearingDeg)
+        }
+    }
+
     // Map above, panel below: the map is exactly the region the route menu
     // does not cover, so the two never overlap and the menu cannot slide
     // around over the map.
@@ -548,6 +616,12 @@ fun RouteScreen() {
                 }
         ) {
             AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+            if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
+                NavigationHud(
+                    snapshot = navSnapshot,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
             Text(
                 text = "© OpenMapTiles.org © OpenStreetMap contributors · Noto (OFL) · icons CC BY 4.0",
                 color = Color.Black,
@@ -598,6 +672,19 @@ fun RouteScreen() {
             onRouteSettings = { routeSettingsOpen = true },
             onOpenSavedRoutes = { savedRoutesOpen = true },
             onSaveRoute = ::saveProposedRoute,
+            onToggleGuidance = {
+                if (guidanceRequested) {
+                    guidanceRequested = false
+                } else {
+                    if (!locationPermissionGranted) {
+                        permissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                    }
+                    guidanceRequested = true
+                }
+                Log.i(TAG, "Guidance toggled: $guidanceRequested")
+            },
+            guidanceActive = guidanceRequested,
+            guidanceAvailable = locationPermissionGranted,
             onComplexityChangeFinished = { finalComplexity ->
                 // Re-route only when the knob is released, not for every
                 // drag event. Use the gesture's final value directly so a
@@ -1255,6 +1342,9 @@ private fun RoutePlanPanel(
     onRouteSettings: () -> Unit,
     onOpenSavedRoutes: () -> Unit,
     onSaveRoute: suspend (ResponsePath) -> Boolean,
+    onToggleGuidance: () -> Unit,
+    guidanceActive: Boolean,
+    guidanceAvailable: Boolean,
 ) {
     val focusManager = LocalFocusManager.current
     val fromSearch = rememberRouteFieldSearchState()
@@ -1400,13 +1490,16 @@ private fun RoutePlanPanel(
             }
             Button(
                 onClick = {
-                    // Dismiss any inline results and the keyboard before routing.
                     focusManager.clearFocus()
-                    onRoute()
+                    if (state is RouteUiState.Success) {
+                        onToggleGuidance()
+                    } else {
+                        onRoute()
+                    }
                 },
                 enabled = state !is RouteUiState.Loading,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF249CF2),
+                    containerColor = if (guidanceActive) Color(0xFF0D2137) else Color(0xFF249CF2),
                     contentColor = Color.White,
                     disabledContainerColor = Color(0xFF9ECDF5),
                     disabledContentColor = Color(0xFFE0E0E0)
@@ -1416,8 +1509,19 @@ private fun RoutePlanPanel(
                     .fillMaxWidth()
                     .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)
                     .heightIn(min = 36.dp)
+                    .semantics {
+                        contentDescription = if (guidanceActive) "Stop navigation" else "Start route"
+                    }
             ) {
-                Text("START", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    when {
+                        guidanceActive -> "STOP GUIDANCE"
+                        state is RouteUiState.Success -> "RIDE"
+                        else -> "START"
+                    },
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                )
             }
         }
     }
