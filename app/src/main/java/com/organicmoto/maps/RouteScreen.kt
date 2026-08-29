@@ -1466,7 +1466,10 @@ private fun RoutePlanPanel(
                                     color = Color(0xFF8A000000)
                                 )
                             }
-                            Box(Modifier.size(width = 108.dp, height = 100.dp)) {
+                            // 164 dp wide so the 48 dp corner buttons sit
+                            // clear of the 92 dp knob circle: the buttons'
+                            // inner corners stay outside the knob ring.
+                            Box(Modifier.size(width = 164.dp, height = 100.dp)) {
                                 InfiniteComplexityKnob(
                                     value = complexity,
                                     onValueChange = onComplexityChange,
@@ -1477,8 +1480,7 @@ private fun RoutePlanPanel(
                                     onClick = onRouteSettings,
                                     modifier = Modifier
                                         .align(Alignment.TopEnd)
-                                        .size(40.dp)
-                                        .minimumInteractiveComponentSize()
+                                        .size(48.dp)
                                         .semantics { contentDescription = "Route settings" },
                                 ) {
                                     SettingsCogIcon()
@@ -1487,8 +1489,7 @@ private fun RoutePlanPanel(
                                     onClick = onOpenSavedRoutes,
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
-                                        .size(40.dp)
-                                        .minimumInteractiveComponentSize()
+                                        .size(48.dp)
                                         .semantics { contentDescription = "Saved routes" },
                                 ) {
                                     BookmarkIcon(filled = false)
