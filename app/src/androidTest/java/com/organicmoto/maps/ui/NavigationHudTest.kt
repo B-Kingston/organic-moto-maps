@@ -15,9 +15,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Guidance action-button flow on the real screen: a routed plan switches the
- * action to RIDE; tapping it enters guidance (STOP GUIDANCE); tapping again
- * returns to RIDE.
+ * Guidance flow on the real screen: a routed plan switches the action to
+ * RIDE; tapping it enters ride mode (top HUD, bottom data bar with the red
+ * END button); tapping END cancels navigation and returns to the planner
+ * (START), so a new route can be searched immediately.
  */
 @RunWith(AndroidJUnit4::class)
 class NavigationHudTest {
@@ -49,11 +50,16 @@ class NavigationHudTest {
     }
 
     @Test
-    fun togglingGuidanceShowsStopThenReturnsToRide() {
+    fun endButtonCancelsGuidanceAndReturnsToPlanner() {
         routeSomethingValid()
         composeRule.onNodeWithText("RIDE").performClick()
-        composeRule.onNodeWithText("STOP GUIDANCE").assertIsDisplayed()
-        composeRule.onNodeWithText("STOP GUIDANCE").performClick()
-        composeRule.onNodeWithText("RIDE").assertIsDisplayed()
+        composeRule.onNodeWithText("END").assertIsDisplayed()
+        composeRule.onNodeWithText("END").performClick()
+        composeRule.onNodeWithText("START").assertIsDisplayed()
+    }
+
+    @Test
+    fun centreOnMeButtonIsAvailable() {
+        composeRule.onNodeWithContentDescription("Centre on me").assertIsDisplayed()
     }
 }

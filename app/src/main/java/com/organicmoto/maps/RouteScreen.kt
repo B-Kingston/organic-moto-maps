@@ -711,7 +711,7 @@ fun RouteScreen() {
             if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
                 NavigationHud(
                     snapshot = navSnapshot,
-                    modifier = Modifier.align(Alignment.TopCenter),
+                    modifier = Modifier.align(Alignment.TopStart),
                 )
             }
             Text(
@@ -724,12 +724,50 @@ fun RouteScreen() {
                     .background(Color.White.copy(alpha = 0.78f), RoundedCornerShape(2.dp))
                     .padding(horizontal = 4.dp, vertical = 1.dp)
             )
+            CentreOnMeButton(
+                visible = true,
+                onClick = {
+                    val fix = trackedFix
+                    val lat: Double; val lon: Double
+                    if (guidanceRequested && !navSnapshot.lat.isNaN()) {
+                        lat = navSnapshot.lat; lon = navSnapshot.lon
+                    } else if (fix != null && !fix.lat.isNaN()) {
+                        lat = fix.lat; lon = fix.lon
+                    } else {
+                        return@CentreOnMeButton
+                    }
+                    mapRef.value?.animateCamera(
+                        CameraUpdateFactory.newLatLngZoom(
+                            LatLng(lat, lon),
+                            mapRef.value?.cameraPosition?.zoom ?: 14.0,
+                        ),
+                        400,
+                    )
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 8.dp, bottom = 8.dp)
+            )
+            if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
+                NavigationDataBar(
+                    snapshot = navSnapshot,
+                    onEnd = {
+                        guidanceRequested = false
+                        // Return to planning: without this the button stays
+                        // RIDE (state is still Success) and can never start
+                        // a new route search.
+                        coordinator.reset()
+                        Log.i(TAG, "Guidance ended via END button")
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
             ZoomPill(
                 onZoomIn = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
                 onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 8.dp, bottom = 8.dp)
+                    .padding(end = 8.dp, bottom = 64.dp)
             )
         }
         RoutePlanPanel(
@@ -1477,44 +1515,45 @@ private fun RoutePlanPanel(
         Column(
             Modifier
                 .fillMaxWidth()
-                .heightIn(min = if (guidanceActive) RIDE_PANEL_CONTENT_HEIGHT else PANEL_CONTENT_HEIGHT)
+                .heightIn(min = if (guidanceActive) 0.dp else PANEL_CONTENT_HEIGHT)
         ) {
-            // In ride mode the planner fields hide: the rider does not edit
-            // the plan mid-ride, and the map gets the freed screen space.
-            if (!guidanceActive) {
-                RoutePlanSearchField(
-                    label = "From",
-                    hint = "Route from",
-                    icon = { StartDotIcon() },
-                    value = fromText,
-                    onValueChange = onFromChange,
-                    onResultPicked = onFromPicked,
-                    controller = geocodeController,
-                    searchState = fromSearch,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                HorizontalDivider(
-                    color = Color(0xFF1E000000),
-                    thickness = 1.dp,
-                    modifier = Modifier.padding(start = 40.dp)
-                )
-                RoutePlanSearchField(
-                    label = "To",
-                    hint = "Route to",
-                    icon = { FinishFlagIcon() },
-                    value = toText,
-                    onValueChange = onToChange,
-                    onResultPicked = onToPicked,
-                    controller = geocodeController,
-                    searchState = toSearch,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                HorizontalDivider(
-                    color = Color(0xFF1E000000),
-                    thickness = 1.dp,
-                    modifier = Modifier.padding(start = 40.dp)
-                )
-            }
+            // In ride mode the whole planner UI hides: the top HUD carries the
+            // next turn and the NavigationDataBar carries speed, ETA, distance,
+            // pace delta, and the END button. The rider cannot edit the plan
+            // mid-ride, and the map gets the freed screen space.
+            if (guidanceActive) return@Column
+            RoutePlanSearchField(
+                label = "From",
+                hint = "Route from",
+                icon = { StartDotIcon() },
+                value = fromText,
+                onValueChange = onFromChange,
+                onResultPicked = onFromPicked,
+                controller = geocodeController,
+                searchState = fromSearch,
+                modifier = Modifier.fillMaxWidth()
+            )
+            HorizontalDivider(
+                color = Color(0xFF1E000000),
+                thickness = 1.dp,
+                modifier = Modifier.padding(start = 40.dp)
+            )
+            RoutePlanSearchField(
+                label = "To",
+                hint = "Route to",
+                icon = { FinishFlagIcon() },
+                value = toText,
+                onValueChange = onToChange,
+                onResultPicked = onToPicked,
+                controller = geocodeController,
+                searchState = toSearch,
+                modifier = Modifier.fillMaxWidth()
+            )
+            HorizontalDivider(
+                color = Color(0xFF1E000000),
+                thickness = 1.dp,
+                modifier = Modifier.padding(start = 40.dp)
+            )
             // Fixed ride-controls region: while a field is searching, its
             // suggestions replace the knob and status rows inside this box;
             // nothing outside the box ever moves.
@@ -1720,6 +1759,43 @@ private fun ZoomPill(
                 .background(Color(0xFF1E000000))
         )
         ZoomPillCell(plus = false, onClick = onZoomOut)
+    }
+}
+
+/**
+ * 48 dp round white button that re-centres the camera on the rider's
+ * position dot. Sits at the bottom-right of the map, below the zoom pill.
+ */
+@Composable
+private fun CentreOnMeButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color.White)
+            .semantics { contentDescription = "Centre on me" }
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.size(24.dp)) {
+            // Crosshair: dot ring plus four ticks, like the repo's other
+            // hand-drawn map icons.
+            val stroke = 2.dp.toPx()
+            val color = Color(0xFF249CF2)
+            drawCircle(color = color, radius = 5.dp.toPx(), style = Stroke(stroke))
+            drawCircle(color = color, radius = 1.8.dp.toPx())
+            val tick = 4.dp.toPx()
+            val edge = 11.dp.toPx()
+            drawLine(color, Offset(center.x, center.y - edge - tick), Offset(center.x, center.y - edge), stroke, StrokeCap.Round)
+            drawLine(color, Offset(center.x, center.y + edge), Offset(center.x, center.y + edge + tick), stroke, StrokeCap.Round)
+            drawLine(color, Offset(center.x - edge - tick, center.y), Offset(center.x - edge, center.y), stroke, StrokeCap.Round)
+            drawLine(color, Offset(center.x + edge, center.y), Offset(center.x + edge + tick, center.y), stroke, StrokeCap.Round)
+        }
     }
 }
 

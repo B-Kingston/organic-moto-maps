@@ -2,6 +2,7 @@ package com.organicmoto.maps
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -34,24 +37,76 @@ import com.organicmoto.maps.routing.navigation.NavigationSnapshot
 import kotlin.math.abs
 
 /**
- * Top-of-map guidance HUD, shown while a route is being followed: next-turn
- * arrow with distance, current speed, remaining time (ETA), and remaining
- * distance. Layout follows the repo's hand-drawn style: Canvas icons, plain
- * Surface, no image assets.
+ * Compact top-left guidance card, shown while a route is being followed:
+ * next-turn arrow over the distance to it, on a dark rounded card floating
+ * over the map. The riding metrics (speed, ETA, remaining distance, pace
+ * delta) live in [NavigationDataBar] at the bottom of the screen. Layout
+ * follows the repo's hand-drawn style: Canvas icons, plain Surface, no
+ * image assets.
  */
 @Composable
 fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
     Surface(
+        color = Color(0xFF1C1C1E),
+        shape = RoundedCornerShape(18.dp),
+        shadowElevation = 6.dp,
+        modifier = modifier
+            .statusBarsPadding()
+            .padding(start = 12.dp, top = 8.dp)
+            .semantics {
+                contentDescription = "Navigation guidance: " +
+                    NavigationHudFormat.turnDescription(snapshot.turn)
+            },
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
+                drawTurnArrow(snapshot.turn?.sign, size.width, size.height)
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = snapshot.turn?.let { NavigationHudFormat.distanceText(it.distanceM) } ?: "—",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+            )
+            if (!snapshot.turn?.streetName.isNullOrBlank()) {
+                Text(
+                    text = snapshot.turn!!.streetName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xB3FFFFFF),
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Bottom-of-screen guidance bar that replaces the planner controls in ride
+ * mode: live speed, ETA, remaining distance, and pace delta on the left, and
+ * a red END button on the right that cancels navigation. Dark blue so the
+ * white metric text stays readable over the map.
+ */
+@Composable
+fun NavigationDataBar(
+    snapshot: NavigationSnapshot,
+    onEnd: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
         color = Color(0xFF0D2137),
-        shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         shadowElevation = 6.dp,
         modifier = modifier
             .fillMaxWidth()
             .semantics {
-                contentDescription = "Navigation guidance: " +
-                    "${NavigationHudFormat.turnDescription(snapshot.turn)}, " +
+                contentDescription = "Ride data: " +
                     "${NavigationHudFormat.speedKmh(snapshot.speedMps)} kilometres per hour, " +
                     "${NavigationHudFormat.etaText(snapshot.remainingTimeS)} remaining, " +
+                    "${NavigationHudFormat.distanceText(snapshot.remainingDistanceM)} left, " +
                     "pace delta ${NavigationHudFormat.deltaText(snapshot.paceDeltaS)}"
             },
     ) {
@@ -61,8 +116,6 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            TurnCell(snapshot.turn, Modifier.weight(1.4f))
-            Spacer(Modifier.width(12.dp))
             DeltaCell(
                 deltaS = snapshot.paceDeltaS,
                 modifier = Modifier.weight(1f),
@@ -82,35 +135,22 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
                 label = "left",
                 modifier = Modifier.weight(1.2f),
             )
-        }
-    }
-}
-
-@Composable
-private fun TurnCell(turn: NavigationSnapshot.TurnInfo?, modifier: Modifier = Modifier) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
-        Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
-            drawTurnArrow(turn?.sign, size.width, size.height)
-        }
-        Spacer(Modifier.width(8.dp))
-        Column {
-            Text(
-                text = turn?.let { NavigationHudFormat.distanceText(it.distanceM) } ?: "—",
-                fontSize = 22.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White,
-            )
-            if (!turn?.streetName.isNullOrBlank()) {
-                Text(
-                    text = turn!!.streetName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xB3FFFFFF),
-                    maxLines = 1,
-                )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = onEnd,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFD32F2F),
+                    contentColor = Color.White,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.semantics { contentDescription = "End navigation" },
+            ) {
+                Text("END", fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }
         }
     }
 }
+
 
 
 @Composable

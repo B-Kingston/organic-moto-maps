@@ -95,6 +95,13 @@ class RouteSearchCoordinator(
         if (_state.value is RouteUiState.Loading) _state.value = RouteUiState.Idle
     }
 
+    /** Drops the displayed plan entirely: back to a blank Idle state. */
+    fun reset() {
+        generation++
+        job?.cancel()
+        _state.value = RouteUiState.Idle
+    }
+
     fun publishError(gen: Int, message: String) {
         // Resolution errors do not bump generation. A matching in-flight
         // search can still complete, as in the original route screen.
