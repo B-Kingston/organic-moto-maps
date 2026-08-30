@@ -158,3 +158,26 @@ fun ChevronIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
         )
     }
 }
+
+/** Arrow entering a tray: the GPX-file import glyph. */
+@Composable
+fun ImportIcon(tint: Color = ICON_TINT, modifier: Modifier = Modifier) {
+    Canvas(Modifier.size(20.dp).then(modifier)) {
+        val stroke = 2.dp.toPx()
+        val w = size.width
+        val h = size.height
+        // Tray: two floor corners plus short up-strokes at each side.
+        val trayY = h * 0.82f
+        val trayHalf = w * 0.32f
+        drawLine(tint, Offset(center.x - trayHalf, trayY), Offset(center.x - trayHalf, trayY - h * 0.14f), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(center.x - trayHalf, trayY), Offset(center.x + trayHalf, trayY), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(center.x + trayHalf, trayY), Offset(center.x + trayHalf, trayY - h * 0.14f), stroke, StrokeCap.Round)
+        // Downward arrow into the tray.
+        val shaftTop = h * 0.10f
+        val shaftBottom = h * 0.58f
+        drawLine(tint, Offset(center.x, shaftTop), Offset(center.x, shaftBottom), stroke, StrokeCap.Round)
+        val head = w * 0.17f
+        drawLine(tint, Offset(center.x - head, shaftBottom - head), Offset(center.x, shaftBottom), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(center.x + head, shaftBottom - head), Offset(center.x, shaftBottom), stroke, StrokeCap.Round)
+    }
+}

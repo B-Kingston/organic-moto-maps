@@ -108,7 +108,7 @@ dependencies {
     implementation(libs.slf4j.android)
 
     implementation(platform(libs.compose.bom))
-    androidTestImplementation(platform(libs.compose.bom))
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
     debugImplementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)

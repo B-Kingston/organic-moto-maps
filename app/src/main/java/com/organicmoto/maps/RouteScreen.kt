@@ -112,12 +112,14 @@ import com.organicmoto.maps.map.routeColorHex
 import com.organicmoto.maps.routing.GraphHopperRouter
 import com.organicmoto.maps.routing.PointParser
 import com.organicmoto.maps.storage.GeoPoint
+import com.organicmoto.maps.storage.GpxParser
 import com.organicmoto.maps.storage.PolylineCodec
 import com.organicmoto.maps.storage.RouteSimilarity
 import com.organicmoto.maps.storage.SavedRoute
 import com.organicmoto.maps.storage.SavedRouteDraft
 import com.organicmoto.maps.storage.SavedRouteRepository
 import com.organicmoto.maps.storage.SavedRouteSummary
+import com.organicmoto.maps.storage.GpxGeometry
 import com.organicmoto.maps.tiles.OfflineTileStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -563,6 +565,57 @@ fun RouteScreen() {
         )
     }
 
+    /** Loads an imported GPX ride into the planner and routes it. */
+    fun loadGpxRoute(name: String, points: List<GeoPoint>) {
+        // A closed-loop GPX (start == end) routes to the loop antipode; the
+        // full track still steers candidate selection via preferredGeometry.
+        val (start, end) = GpxGeometry.routingEndpoints(points)
+        val from = GHPoint(start.lat, start.lon)
+        val to = GHPoint(end.lat, end.lon)
+        fromText = name
+        toText = ""
+        fromPoint = from
+        toPoint = to
+        submitRoute(
+            from,
+            to,
+            complexity,
+            maxRoadShare,
+            blockUnpaved,
+            preferredGeometry = PolylineCodec.encode(points),
+        )
+    }
+    // GPX import: pick a .gpx file from device storage, parse it off the UI
+    // thread, then load it exactly like a saved route — endpoints from the
+    // track ends, the thinned track as the preferred geometry so the router
+    // re-selects the candidate closest to the imported shape, and ride mode
+    // works through the normal RIDE button.
+    var gpxImportError by remember { mutableStateOf<String?>(null) }
+    val gpxPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            try {
+                val gpx = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { GpxParser.parse(it) }
+                } ?: throw GpxParser.GpxParseException("File could not be opened")
+                val thinned = withContext(Dispatchers.Default) { GpxGeometry.thin(gpx.points) }
+                val name = gpx.name ?: "Imported GPX"
+                Log.i(TAG, "GPX imported: \"$name\", ${gpx.points.size} points, " +
+                    "${GpxGeometry.lengthMeters(gpx.points)} m, thinned to ${thinned.size}")
+                gpxImportError = null
+                loadGpxRoute(name, thinned)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "GPX import failed", e)
+                gpxImportError = e.message ?: "GPX import failed"
+            }
+        }
+    }
+
+
     // Guidance rebuild: reroute from the engine's last good position using
     // the SAME coordinator as planning, so generation/cancellation rules hold.
     val latestSubmitRoute by rememberUpdatedState(::submitRoute)
@@ -710,6 +763,13 @@ fun RouteScreen() {
             onComplexityChange = { complexity = it },
             onRouteSettings = { routeSettingsOpen = true },
             onOpenSavedRoutes = { savedRoutesOpen = true },
+            onImportGpx = {
+                gpxPicker.launch(
+                    arrayOf("application/gpx+xml", "application/gpx", "text/xml", "application/xml", "*/*")
+                )
+            },
+            gpxImportError = gpxImportError,
+            onDismissGpxError = { gpxImportError = null },
             onSaveRoute = ::saveProposedRoute,
             onToggleGuidance = {
                 if (guidanceRequested) {
@@ -1375,12 +1435,10 @@ private fun RouteCard(
 /**
  * Bottom route-planning panel styled after Organic Maps, with a FIXED frame:
  * the carousel slot, the 50 dp From/To rows, the ride-controls region and
- * the START row keep constant heights in every state, so the panel's top
- * edge and every control sit at one screen position. Suggestions render
- * inside the ride-controls region (replacing the knob + status rows while
- * typing) and the carousel slot stays reserved while no route exists, so
- * nothing outside the ride-controls region ever moves. The map viewport
- * ends where this panel begins.
+ * the START button. Fields collapse in ride mode. The panel is anchored to
+ * the bottom (no typing) and the carousel slot stays reserved while no route
+ * exists, so nothing outside the ride-controls region ever moves. The map
+ * viewport ends where this panel begins.
  */
 @Composable
 private fun RoutePlanPanel(
@@ -1402,6 +1460,9 @@ private fun RoutePlanPanel(
     onSaveRoute: suspend (ResponsePath) -> Boolean,
     onToggleGuidance: () -> Unit,
     guidanceActive: Boolean,
+    onImportGpx: () -> Unit,
+    gpxImportError: String?,
+    onDismissGpxError: () -> Unit,
     guidanceAvailable: Boolean,
 ) {
     val focusManager = LocalFocusManager.current
@@ -1498,6 +1559,15 @@ private fun RoutePlanPanel(
                             // clear of the 92 dp knob circle: the buttons'
                             // inner corners stay outside the knob ring.
                             Box(Modifier.size(width = 164.dp, height = 100.dp)) {
+                                IconButton(
+                                    onClick = onImportGpx,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .size(48.dp)
+                                        .semantics { contentDescription = "Import GPX route" },
+                                ) {
+                                    ImportIcon()
+                                }
                                 InfiniteComplexityKnob(
                                     value = complexity,
                                     onValueChange = onComplexityChange,
@@ -1560,6 +1630,17 @@ private fun RoutePlanPanel(
                 )
             }
         }
+    }
+
+    if (gpxImportError != null) {
+        AlertDialog(
+            onDismissRequest = onDismissGpxError,
+            title = { Text("Import failed") },
+            text = { Text(gpxImportError) },
+            confirmButton = {
+                TextButton(onClick = onDismissGpxError) { Text("OK") }
+            },
+        )
     }
 }
 
