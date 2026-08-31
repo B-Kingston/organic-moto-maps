@@ -79,6 +79,32 @@ class GeocoderIndexParseTest {
         assertEquals("Brisbane", doc.cityName)
     }
 
+    @Test
+    fun batchReverseGeocodePrefersNearbyPoiThenStreetAndLocality() {
+        val index = parse(
+            buildIndex(
+                docs = listOf(
+                    TestDoc("Lookout", GeocoderIndex.TYPE_POI, 0, 100, -270000000, 1530000000, -1, "Hilltown"),
+                    TestDoc("Range Road", GeocoderIndex.TYPE_STREET, 0, 100, -271000000, 1530000000, -1, "Hilltown"),
+                    TestDoc("Hilltown", GeocoderIndex.TYPE_LOCALITY, 0, 100, -272000000, 1530000000, -1, ""),
+                ),
+                terms = mapOf("place" to listOf(0, 1, 2)),
+            ),
+        )
+
+        val result = index.reverseGeocode(
+            listOf(
+                -27.0 to 153.0,
+                -27.1 to 153.0,
+                -27.2 to 153.0,
+            ),
+        )
+
+        assertEquals("Lookout", result[0]?.name)
+        assertEquals("Range Road", result[1]?.name)
+        assertEquals("Hilltown", result[2]?.name)
+    }
+
     private fun parse(bytes: ByteArray): GeocoderIndex =
         GeocoderIndex.parse(ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN))
 

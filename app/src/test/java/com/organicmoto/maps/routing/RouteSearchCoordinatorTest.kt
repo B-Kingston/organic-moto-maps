@@ -24,10 +24,12 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class RouteSearchCoordinatorTest {
 
     @Test
@@ -237,13 +239,39 @@ class RouteSearchCoordinatorTest {
         }
     }
 
-    private fun params(complexity: Double, preferredGeometry: String? = null) = RouteParams(
+    @Test
+    fun viaPointsAreForwardedToBackendForAnImportedPlan() = runTest {
+        val scope = TestScope(StandardTestDispatcher(testScheduler))
+        val via = GHPoint(-27.5, 152.5)
+        var received: List<GHPoint> = emptyList()
+        try {
+            val coordinator = RouteSearchCoordinator(
+                scope,
+                ioDispatcher = StandardTestDispatcher(testScheduler),
+            ) { params ->
+                received = params.viaPoints
+                RouteOutcome.Success(result(1), 0)
+            }
+            coordinator.submit(params(1.0, viaPoints = listOf(via)))
+            advanceUntilIdle()
+            assertEquals(listOf(via), received)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    private fun params(
+        complexity: Double,
+        preferredGeometry: String? = null,
+        viaPoints: List<GHPoint> = emptyList(),
+    ) = RouteParams(
         from = GHPoint(-27.0, 153.0),
         to = GHPoint(-28.0, 152.0),
         complexity = complexity,
         maxRoadShare = 0.70,
         blockUnpaved = false,
         preferredGeometry = preferredGeometry,
+        viaPoints = viaPoints,
     )
 
     private fun result(marker: Int): RouteResult = RouteResult(

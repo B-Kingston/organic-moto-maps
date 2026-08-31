@@ -17,7 +17,6 @@ class NavigationSessionTest {
             listOf(0, 2, 0),
             listOf("origin", "turn street", "finish"),
             listOf(10, 1, 9),
-            listOf(1000.0, 0.0, 900.0),
             listOf(60.0, 0.0, 54.0),
         )
     }
@@ -128,5 +127,37 @@ class NavigationSessionTest {
         session.stop()
         assertEquals(NavigationState.Idle, session.snapshot.value.state)
         assertNull(session.snapshot.value.turn)
+    }
+
+    @Test
+    fun `a new ride does not inherit completion from the previous ride`() {
+        val session = sessionWithTrack()
+        session.onFix(fix(0.0, 0.0009 * 10))
+        assertTrue(session.snapshot.value.completionPercent >= 50)
+
+        session.stop()
+        session.startRoute(track())
+        session.beginFollowing()
+        session.onFix(fix(0.0, 0.0))
+
+        assertEquals(0, session.snapshot.value.completionPercent)
+    }
+
+    @Test
+    fun `rebuild banks covered distance once and enters rebuilding state`() {
+        val session = sessionWithTrack()
+        session.onFix(fix(0.0, 0.0009 * 5))
+        repeat(6) { index ->
+            session.onFix(fix(0.01, 0.0009 * 5 + index * 0.0005, speed = 15.0, t = index * 1_000L))
+        }
+        assertEquals(NavigationState.NeedRebuild, session.snapshot.value.state)
+
+        val covered = session.currentRouteCoveredM()
+        session.markRebuilding()
+        assertEquals(NavigationState.Rebuilding, session.snapshot.value.state)
+        session.applyRebuiltRoute(track(), covered)
+        session.onFix(fix(0.0, 0.0009 * 5))
+
+        assertEquals(40, session.snapshot.value.completionPercent)
     }
 }

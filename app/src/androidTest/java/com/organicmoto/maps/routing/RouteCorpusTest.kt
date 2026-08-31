@@ -114,6 +114,31 @@ class RouteCorpusTest {
         }
     }
 
+    @Test(timeout = 300_000)
+    fun importedNambourLoopRoutesThroughEveryStop() {
+        // Stops from the supplied Furkot Nambour GPX. The old importer reduced
+        // this closed ride to one endpoint request and lost the loop.
+        val stops = listOf(
+            com.graphhopper.util.shapes.GHPoint(-26.625491, 152.958018), // Nambour
+            com.graphhopper.util.shapes.GHPoint(-26.954705, 152.777724), // Woodford
+            com.graphhopper.util.shapes.GHPoint(-27.195919, 152.824545), // Dayboro
+            com.graphhopper.util.shapes.GHPoint(-27.039270, 152.860723), // Wamuran
+            com.graphhopper.util.shapes.GHPoint(-26.625618, 152.958156), // return to Nambour
+        )
+        val path = GraphHopperRouter(context).route(
+            from = stops.first(),
+            to = stops.last(),
+            viaPoints = stops.drop(1).dropLast(1),
+        ).routes.single()
+        val routed = path.points.toGeoPoints()
+
+        assertTrue("imported loop should remain a full ride", path.distance > 100_000.0)
+        stops.forEach { stop ->
+            val nearest = routed.minOf { RouteSimilarity.haversineMeters(it, stop.toGeoPoint()) }
+            assertTrue("route missed imported stop $stop by ${nearest}m", nearest < 1_000.0)
+        }
+    }
+
     /**
      * Gold-baseline drift alert. Wide corpus bands only catch catastrophic
      * rerouting; a quiet road-preference change that adds +40% distance stays
@@ -169,7 +194,7 @@ class RouteCorpusTest {
             val fastest = router.route(entry.from, entry.to, 0.0)
             val alternatives = router.route(entry.from, entry.to, 2.0)
             println(
-                "${entry.name}: distance_meters=${fastest.routes.first().distance}, " +
+                "GOLD_PROBE ${entry.name}: distance_meters=${fastest.routes.first().distance}, " +
                     "duration_ms=${fastest.routes.first().time}, routes=${fastest.routes.size}, " +
                     "alternatives=${alternatives.routes.size >= 2}",
             )

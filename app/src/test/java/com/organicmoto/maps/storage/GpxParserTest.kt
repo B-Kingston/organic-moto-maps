@@ -29,6 +29,7 @@ class GpxParserTest {
         )
         assertEquals("Test ride", route.name)
         assertEquals(listOf(GeoPoint(-27.0, 152.5), GeoPoint(-27.1, 152.6)), route.points)
+        assertTrue(route.waypoints.isEmpty())
     }
 
     @Test
@@ -53,6 +54,7 @@ class GpxParserTest {
                </rte></gpx>"""
         )
         assertEquals(listOf(GeoPoint(2.0, 20.0), GeoPoint(2.5, 20.5)), rte.points)
+        assertEquals(rte.points, rte.waypoints)
 
         val wpt = parse(
             """<gpx version="1.1">
@@ -61,6 +63,31 @@ class GpxParserTest {
                </gpx>"""
         )
         assertEquals(listOf(GeoPoint(3.0, 30.0), GeoPoint(3.5, 30.5)), wpt.points)
+        assertEquals(wpt.points, wpt.waypoints)
+    }
+
+    @Test
+    fun preservesWaypointsAlongsideDetailedTrack() {
+        val route = parse(
+            """<gpx version="1.1">
+                 <wpt lat="0.0" lon="0.0"/><wpt lat="0.0" lon="1.0"/>
+                 <trk><trkseg><trkpt lat="0.0" lon="0.0"/><trkpt lat="0.0" lon="1.0"/></trkseg></trk>
+               </gpx>"""
+        )
+        assertEquals(2, route.points.size)
+        assertEquals(listOf(GeoPoint(0.0, 0.0), GeoPoint(0.0, 1.0)), route.waypoints)
+    }
+
+    @Test
+    fun parsesOnlyTheFirstRouteInAMultiRouteDocument() {
+        val route = parse(
+            """<gpx version="1.1">
+                 <rte><rtept lat="1.0" lon="1.0"/><rtept lat="1.1" lon="1.1"/></rte>
+                 <rte><rtept lat="2.0" lon="2.0"/><rtept lat="2.1" lon="2.1"/></rte>
+               </gpx>""",
+        )
+
+        assertEquals(listOf(GeoPoint(1.0, 1.0), GeoPoint(1.1, 1.1)), route.points)
     }
 
     @Test
@@ -70,6 +97,11 @@ class GpxParserTest {
         }
         assertThrows(GpxParser.GpxParseException::class.java) {
             parse("""<gpx version="1.1"></gpx>""")
+        }
+        assertThrows(GpxParser.GpxParseException::class.java) {
+            parse("""<routes><trk><trkseg>
+                <trkpt lat="1.0" lon="1.0"/><trkpt lat="2.0" lon="2.0"/>
+            </trkseg></trk></routes>""")
         }
     }
 
@@ -131,5 +163,57 @@ class GpxParserTest {
         val pts = listOf(GeoPoint(0.0, 0.0), GeoPoint(0.0, 1.0), GeoPoint(0.0, 2.0))
         val oneDegree = GpxGeometry.haversineMeters(GeoPoint(0.0, 0.0), GeoPoint(0.0, 1.0))
         assertEquals(oneDegree * 2, GpxGeometry.lengthMeters(pts), 1e-6)
+    }
+
+    @Test
+    fun routingPointsRetainClosedLoopAndIntermediateStops() {
+        val track = listOf(
+            GeoPoint(0.0, 0.0),
+            GeoPoint(0.0, 0.02),
+            GeoPoint(0.02, 0.02),
+            GeoPoint(0.02, 0.0),
+            GeoPoint(0.0, 0.0),
+        )
+        val stop = GeoPoint(0.0201, 0.0201)
+        val routed = GpxGeometry.routingPoints(track, listOf(stop), maxSpacingMeters = 1_000.0)
+
+        assertEquals(track.first(), routed.first())
+        assertEquals(track.last(), routed.last())
+        assertTrue(routed.contains(stop))
+        assertTrue(routed.size > 2)
+    }
+
+    @Test
+    fun routingPointSamplingIsBoundedForLongSparseTracks() {
+        val track = List(1_000) { i -> GeoPoint(0.0, i * 0.01) }
+        val routed = GpxGeometry.routingPoints(track, maxSpacingMeters = 100.0)
+
+        assertTrue(routed.size <= 250)
+        assertEquals(track.first(), routed.first())
+        assertEquals(track.last(), routed.last())
+    }
+
+    @Test
+    fun explicitWaypointsCannotBypassTheRoutingPointCap() {
+        val track = listOf(GeoPoint(0.0, 0.0), GeoPoint(0.0, 1.0))
+        val waypoints = List(1_000) { index -> GeoPoint(0.001, index / 1_000.0) }
+
+        val routed = GpxGeometry.routingPoints(track, waypoints, maxSpacingMeters = 100.0)
+
+        assertEquals(250, routed.size)
+        assertEquals(track.first(), routed.first())
+        assertEquals(track.last(), routed.last())
+    }
+
+    @Test
+    fun shortClosedLoopKeepsAnIntermediateShapingPoint() {
+        val start = GeoPoint(0.0, 0.0)
+        val turn = GeoPoint(0.0, 0.0005)
+        val routed = GpxGeometry.routingPoints(listOf(start, turn, start))
+
+        assertEquals(start, routed.first())
+        assertEquals(start, routed.last())
+        assertTrue(routed.any { it == turn })
+        assertTrue(routed.zipWithNext().none { (a, b) -> a == b })
     }
 }

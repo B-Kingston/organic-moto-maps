@@ -73,14 +73,6 @@ class MotorcycleWeightingFactory(
                     "the pre-compiled weighting helper only implements the motorcycle profile model"
             )
         val turnCostsConfig = profile.turnCostsConfig
-        if (turnCostsConfig != null && !turnCostsConfig.isAllowTurnPenaltyInRequest &&
-            queryCustomModel != null && queryCustomModel.turnPenalty.isNotEmpty()
-        )
-            throw IllegalArgumentException(
-                "The turn_penalty feature is not supported per request for ${profile.name}. " +
-                    "Set 'allow_turn_penalty_in_request' to true in the 'turn_costs' option in the config.yml."
-            )
-
         val mergedCustomModel = CustomModel.merge(profile.customModel, queryCustomModel)
         if (hints.has(Parameters.Routing.HEADING_PENALTY))
             mergedCustomModel.headingPenalty = hints.getDouble(

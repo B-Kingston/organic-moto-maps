@@ -76,31 +76,53 @@ object GpsFixSource {
             manager.requestLocationUpdates(provider, intervalMs, 0f, listener, Looper.getMainLooper())
         }
 
+        fun replaceRegistrations(gpsIntervalMs: Long) {
+            // LocationManager does not promise that a second request for the
+            // same listener replaces the first request's interval. Remove the
+            // complete listener registration before changing rate, otherwise
+            // the original 1 s GPS subscription can survive forever.
+            manager.removeUpdates(listener)
+            for (provider in providers) {
+                request(
+                    provider,
+                    if (provider == LocationManager.GPS_PROVIDER) gpsIntervalMs else MIN_INTERVAL_MS,
+                )
+            }
+        }
+
         fun armLowRate() {
             if (lowRate) return
-            lowRate = true
-            for (p in providers) {
+            try {
                 // GPS is the expensive provider: only it slows down. Network +
                 // passive keep the dot alive cheaply while parked.
-                request(p, if (p == LocationManager.GPS_PROVIDER) SLOW_INTERVAL_MS else MIN_INTERVAL_MS)
+                replaceRegistrations(SLOW_INTERVAL_MS)
+                lowRate = true
+                Log.d(TAG, "GPS rate: stationary pulse")
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not lower GPS update rate", e)
+                close(e)
             }
-            Log.d(TAG, "GPS rate: stationary pulse")
         }
 
         armHighRate = {
             if (!lowRate) {
                 lastMoveAtMs = System.currentTimeMillis()
             } else {
-                lowRate = false
-                lastMoveAtMs = System.currentTimeMillis()
-                for (p in providers) request(p, MIN_INTERVAL_MS)
-                Log.d(TAG, "GPS rate: full 1 s")
+                try {
+                    replaceRegistrations(MIN_INTERVAL_MS)
+                    lowRate = false
+                    lastMoveAtMs = System.currentTimeMillis()
+                    Log.d(TAG, "GPS rate: full 1 s")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not restore GPS update rate", e)
+                    close(e)
+                }
             }
         }
 
 
         try {
-            for (p in providers) request(p, MIN_INTERVAL_MS)
+            replaceRegistrations(MIN_INTERVAL_MS)
             // Seed immediately so the dot appears without waiting a second.
             providers.firstNotNullOfOrNull { runCatching { manager.getLastKnownLocation(it) }.getOrNull() }
                 ?.let { trySend(toFix(it)) }

@@ -23,18 +23,16 @@ object RouteTrackFactory {
         val signs = mutableListOf<Int>()
         val names = mutableListOf<String>()
         val pointCounts = mutableListOf<Int>()
-        val distances = mutableListOf<Double>()
         val times = mutableListOf<Double>()
         for (i in 0 until instructions.size) {
             val instruction = instructions[i]
             signs += instruction.sign
             names += instruction.name ?: ""
             pointCounts += instruction.points.size()
-            distances += instruction.distance
             times += instruction.time / 1000.0
         }
         return RouteTrack.fromPath(
-            latitudes, longitudes, signs, names, pointCounts, distances, times,
+            latitudes, longitudes, signs, names, pointCounts, times,
         )
     }
 }

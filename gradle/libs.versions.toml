@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.2"
+agp = "9.3.1"
 kotlin = "2.2.10"
 maplibre = "13.5.0"
 graphhopper = "11.0"
@@ -15,6 +15,7 @@ androidxTestRunner = "1.6.2"
 androidxTestRules = "1.6.1"
 orgJson = "20240303"
 androidxTestEspresso = "3.7.0"
+kxml = "2.3.0"
 
 [libraries]
 maplibre-android-sdk = { module = "org.maplibre.gl:android-sdk", version.ref = "maplibre" }
@@ -27,6 +28,7 @@ compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview"
 compose-material3 = { module = "androidx.compose.material3:material3" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 # Test tooling for the saved-route storage layer.
@@ -38,6 +40,7 @@ compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 androidx-test-rules = { module = "androidx.test:rules", version.ref = "androidxTestRules" }
 org-json = { module = "org.json:json", version.ref = "orgJson" }
 androidx-test-espresso = { module = "androidx.test.espresso:espresso-core", version.ref = "androidxTestEspresso" }
+kxml = { module = "net.sf.kxml:kxml2", version.ref = "kxml" }
 # NOTE: osmosis-osm-binary stopped at 0.48.3; since 0.49.x the PBF reader
 # (crosby.binary.osmosis.OsmosisReader, Sink API) ships in osmosis-pbf.
 osmosis = { module = "org.openstreetmap.osmosis:osmosis-pbf", version.ref = "osmosis" }

@@ -29,21 +29,29 @@ class GeocodeSearchController(context: Context) : GeocodeController {
     override suspend fun search(query: String, limit: Int): List<GeocodeResult> {
         if (query.isBlank()) return emptyList()
         return withContext(Dispatchers.IO) {
-            val loaded = index ?: synchronized(lock) {
-                index ?: run {
-                    Log.i(TAG, "First search — loading geocoder index")
-                    val started = SystemClock.elapsedRealtime()
-                    GeocoderIndex.load(appContext).also {
-                        index = it
-                        Log.i(
-                            TAG,
-                            "Geocoder index ready in ${SystemClock.elapsedRealtime() - started} ms: " +
-                                "${it.docCount} docs, ${it.termCount} terms, ${it.localityCount} localities"
-                        )
-                    }
-                }
+            SearchEngine(getOrLoadIndex()).search(query, limit = limit)
+        }
+    }
+
+    /** Batch reverse-geocodes GPX milestones without network access. */
+    suspend fun reverseGeocode(
+        points: List<Pair<Double, Double>>,
+    ): List<GeocoderIndex.ReverseGeocodeResult?> = withContext(Dispatchers.IO) {
+        getOrLoadIndex().reverseGeocode(points)
+    }
+
+    private fun getOrLoadIndex(): GeocoderIndex = index ?: synchronized(lock) {
+        index ?: run {
+            Log.i(TAG, "First search — loading geocoder index")
+            val started = SystemClock.elapsedRealtime()
+            GeocoderIndex.load(appContext).also {
+                index = it
+                Log.i(
+                    TAG,
+                    "Geocoder index ready in ${SystemClock.elapsedRealtime() - started} ms: " +
+                        "${it.docCount} docs, ${it.termCount} terms, ${it.localityCount} localities"
+                )
             }
-            SearchEngine(loaded).search(query, limit = limit)
         }
     }
 }

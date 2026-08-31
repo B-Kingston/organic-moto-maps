@@ -20,9 +20,8 @@ class PaceDeltaTest {
         val signs = IntArray(n) { if (it == 0) 0 else 0 }.toList()
         val names = List(n) { "seg$it" }
         val counts = List(n) { if (it == 0) n - 1 else 0 }
-        val distances = List(n) { if (it == 0) (n - 1) * 100.0 else 0.0 }
         val times = List(n) { if (it == 0) (n - 1) * 6.0 else 0.0 }
-        return RouteTrack.fromPath(latitudes, longitudes, signs, names, counts, distances, times)
+        return RouteTrack.fromPath(latitudes, longitudes, signs, names, counts, times)
     }
 
     private fun fix(lat: Double, speed: Double, t: Long) =
@@ -130,5 +129,23 @@ class PaceDeltaTest {
         session.onFix(fix(-27.0, speed = 100.0 / 6.0, t = 1_000))
         session.onFix(fix(-27.0009, speed = 100.0 / 6.0, t = 7_000))
         assertTrue(session.snapshot.value.paceDeltaS.isNaN())
+    }
+
+    @Test
+    fun `rebuild preserves measured pace but resyncs the fix clock`() {
+        val session = NavigationSession()
+        session.startRoute(track())
+        session.beginFollowing()
+        var time = 0L
+        for (index in 0..5) {
+            time += 12_000
+            session.onFix(fix(-27.0 - index * 0.0009, speed = 100.0 / 12.0, t = time))
+        }
+        val before = session.snapshot.value.paceDeltaS
+        assertFalse(before.isNaN())
+
+        session.applyRebuiltRoute(track(), session.currentRouteCoveredM())
+
+        assertEquals(before, session.snapshot.value.paceDeltaS, 0.0)
     }
 }

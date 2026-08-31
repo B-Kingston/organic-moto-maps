@@ -68,6 +68,7 @@ jobs:
             app/src/main/assets/graph-cache
             app/src/main/assets/geocoder
             app/src/main/assets/tiles
+          key: offline-${{ runner.os }}-${{ env.CACHE_SEED }}-gh${{ env.GRAPHHOPPER_VERSION }}-${{ hashFiles('tools/gh/config.yml', 'tools/gh/motorcycle.json', 'tools/tiles/build-tiles.sh', 'geocoder-tool/**') }}
 
       - name: Download OSM extract and GraphHopper import jar
         if: steps.data-cache.outputs.cache-hit != 'true'
@@ -79,15 +80,18 @@ jobs:
           # Verify the download is really a PBF: shallow paths return their
           # HTML index with HTTP 200 (see AGENTS.md).
           python3 - <<'PY'
-          import sys
+          import struct
           with open('data/queensland.osm.pbf', 'rb') as f:
-              blob = f.read(4)
-          # PBF's first blob is the OSMHeader BlobHeader: a 4-byte big-endian
-          # length field, so the first byte is always 0x00. An HTML index
-          # (shallow Geofabrik paths return HTTP 200) starts with '<' and is
-          # rejected here (see AGENTS.md).
-          assert blob[:1] == b'\x00', blob
-          print('queensland.osm.pbf looks like a PBF:', blob.hex())
+              prefix = f.read(4)
+              assert len(prefix) == 4, 'truncated PBF length prefix'
+              header_length = struct.unpack('>I', prefix)[0]
+              assert 1 <= header_length <= 64 * 1024, header_length
+              blob_header = f.read(header_length)
+          # The first BlobHeader must identify the required OSMHeader block.
+          # This rejects HTML and arbitrary binary files, not merely files
+          # whose first byte happens to be zero.
+          assert b'OSMHeader' in blob_header, blob_header[:80]
+          print('queensland.osm.pbf has a valid OSMHeader blob')
           PY
           curl -fL --retry 3 --retry-delay 5 \
             -o tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar \
@@ -103,12 +107,10 @@ jobs:
           "$JAVA_HOME_17_X64/bin/java" -Xmx12g -jar "tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" import tools/gh/config.yml
           cp -R data/graph-cache app/src/main/assets/graph-cache
 
-      # On a cache hit the tiles and geocoder index are restored straight into
-      # app/src/main/assets/; the graph lives under data/ (the import copies it
-      # there), so stage it back into the asset dir the app reads.
-      - name: Stage cached graph into the APK asset dir
-        if: steps.data-cache.outputs.cache-hit == 'true'
-        run: cp -R data/graph-cache app/src/main/assets/graph-cache
+      - name: Build offline vector tiles (Planetiler, JDK 21)
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        run: |
+          TILE_JAVA_HOME="$JAVA_HOME_21_X64" tools/tiles/build-tiles.sh data/queensland.osm.pbf
 
       - name: Build offline geocoder index
         if: steps.data-cache.outputs.cache-hit != 'true'

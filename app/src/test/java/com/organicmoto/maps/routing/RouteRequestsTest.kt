@@ -76,4 +76,24 @@ class RouteRequestsTest {
         assertEquals(setOf(3, 7), request.hints.getObject(MOTO_PREVIOUS_EDGES, emptySet<Int>()))
         assertTrue(request.hints.getBool(BLOCK_UNPAVED, false))
     }
+
+    @Test
+    fun viaPointRequestRoutesEveryLegWithoutAlternativeAlgorithm() {
+        val via = GHPoint(-27.5, 152.5)
+        val request = buildGhRequest(
+            from = GHPoint(-27.0, 153.0),
+            to = GHPoint(-28.0, 152.0),
+            detent = 2,
+            blockUnpaved = false,
+            maxRoadShare = 0.70,
+            attempt = 0,
+            previousEdgeIds = emptySet(),
+            viaPoints = listOf(via),
+        )
+
+        assertEquals(3, request.points.size)
+        assertEquals(via, request.points[1])
+        assertEquals(2.0, request.hints.getDouble(MOTO_COMPLEXITY, -1.0), 0.0)
+        assertNotEquals(Parameters.Algorithms.ALT_ROUTE, request.algorithm)
+    }
 }

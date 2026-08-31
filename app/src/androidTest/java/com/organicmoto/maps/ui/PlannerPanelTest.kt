@@ -83,7 +83,7 @@ class PlannerPanelTest {
         // The waitUntil above can only exit when a success frame is observed,
         // so asserting anything weaker here would be unreachable-false.
         assertTrue(observedSuccess)
-        val successBounds = composeRule.onNodeWithText("START").fetchSemanticsNode().boundsInRoot
+        val successBounds = composeRule.onNodeWithText("RIDE").fetchSemanticsNode().boundsInRoot
         assertEquals(idleBounds.left, successBounds.left, 1f)
         assertEquals(idleBounds.right, successBounds.right, 1f)
         assertEquals(idleBounds.top, successBounds.top, 1f)

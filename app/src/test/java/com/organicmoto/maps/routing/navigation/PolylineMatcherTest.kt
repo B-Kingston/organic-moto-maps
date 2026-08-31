@@ -15,7 +15,7 @@ class PolylineMatcherTest {
         val longitudes = DoubleArray(n) { it * 0.0009 }
         return RouteTrack.fromPath(
             latitudes, longitudes,
-            listOf(0), listOf("origin"), listOf(n), listOf(n * 100.0), listOf(n * 6.0),
+            listOf(0), listOf("origin"), listOf(n), listOf(n * 6.0),
         )
     }
 

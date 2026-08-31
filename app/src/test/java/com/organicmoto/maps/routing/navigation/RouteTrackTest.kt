@@ -18,22 +18,20 @@ class RouteTrackTest {
         val signs = mutableListOf<Int>()
         val names = mutableListOf<String>()
         val counts = mutableListOf<Int>()
-        val distances = mutableListOf<Double>()
         val times = mutableListOf<Double>()
         signs += 0; names += "origin"
         val per = (n - 1) / (turnSigns.size + 1)
-        counts += per; distances += per * 100.0; times += per * 6.0
+        counts += per; times += per * 6.0
         var remaining = n - 1 - per
         for (i in 0..turnSigns.size) {
             val count = if (i < turnSigns.size) per else remaining
             signs += if (i < turnSigns.size) turnSigns[i] else 0
             names += "seg$i"
             counts += count
-            distances += count * 100.0
             times += count * 6.0
             remaining -= count
         }
-        return RouteTrack.fromPath(latitudes, longitudes, signs, names, counts, distances, times)
+        return RouteTrack.fromPath(latitudes, longitudes, signs, names, counts, times)
     }
     @Test
     fun `track computes total distance close to geometric length`() {
@@ -86,5 +84,20 @@ class RouteTrackTest {
         val reconstructed = track.cumulativeDistanceM[index] +
             fraction * (track.cumulativeDistanceM[index + 1] - track.cumulativeDistanceM[index])
         assertTrue(abs(reconstructed - 550.0) < 1.0)
+    }
+
+    @Test
+    fun `instruction time includes the segment leading to the next instruction`() {
+        val track = RouteTrack.fromPath(
+            latitudes = doubleArrayOf(0.0, 0.0, 0.0),
+            longitudes = doubleArrayOf(0.0, 0.001, 0.002),
+            instructionSigns = listOf(0, 2, 4),
+            instructionNames = listOf("depart", "turn", "finish"),
+            instructionPointCounts = listOf(1, 1, 1),
+            instructionTimesS = listOf(10.0, 30.0, 0.0),
+        )
+
+        assertEquals(30.0, track.remainingTimeS(track.cumulativeDistanceM[1]), 1e-6)
+        assertEquals(0.0, track.remainingTimeS(track.totalDistanceM), 1e-6)
     }
 }

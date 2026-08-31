@@ -131,7 +131,6 @@ class NavigationSession(
     private var lastDeltaFixTimestampMs: Long = Long.MIN_VALUE
     private var lastDeltaOffsetM: Double = 0.0
     private var paceDeltaS: Double = Double.NaN
-    private var lastDeltaBankedOffsetM: Double = 0.0
     private var state = NavigationState.Idle
     private var moveAwayCounter = 0
     private var lastMissDistanceM = 0.0
@@ -147,8 +146,18 @@ class NavigationSession(
         onRebuildNeeded = listener
     }
 
-    /** Loads (or reloads) the followed route. Resets matcher state but keeps accumulated completion. */
+    /** Starts a fresh ride and resets all journey progress. Rebuilds use [applyRebuiltRoute]. */
     fun startRoute(track: RouteTrack) {
+        passedDistanceOnSupersededRoutesM = 0.0
+        lastCompletionPercent = 0
+        direction.clear()
+        installTrack(track)
+        resetPaceDelta()
+        resetSnapshot()
+        publish()
+    }
+
+    private fun installTrack(track: RouteTrack) {
         this.track = track
         matcher = PolylineMatcher(track)
         moveAwayCounter = 0
@@ -156,9 +165,6 @@ class NavigationSession(
         lastGoodLat = Double.NaN
         lastGoodLon = Double.NaN
         state = NavigationState.NotStarted
-        resetPaceDelta()
-        resetSnapshot()
-        publish()
     }
 
     /** Wipes the visible snapshot to a blank slate for the current state. */
@@ -188,6 +194,13 @@ class NavigationSession(
         track = null
         matcher = null
         state = NavigationState.Idle
+        moveAwayCounter = 0
+        lastMissDistanceM = 0.0
+        lastGoodLat = Double.NaN
+        lastGoodLon = Double.NaN
+        passedDistanceOnSupersededRoutesM = 0.0
+        lastCompletionPercent = 0
+        direction.clear()
         resetPaceDelta()
         resetSnapshot()
         publish()
@@ -198,19 +211,35 @@ class NavigationSession(
      * replaced route is banked into completion so the percent stays monotonic.
      */
     fun applyRebuiltRoute(track: RouteTrack, coveredDistanceM: Double) {
-        passedDistanceOnSupersededRoutesM += coveredDistanceM
-        lastCompletionPercent = 0 // recompute fresh; the banked distance keeps it monotonic
+        val replacedDistance = this.track?.totalDistanceM ?: coveredDistanceM
+        passedDistanceOnSupersededRoutesM += coveredDistanceM.coerceIn(0.0, replacedDistance)
         // The reroute itself is not the rider's fault: keep the live pace
-        // delta, only resync the offset book to the fresh track (offsets
-        // restart at 0 there; the last timestamp carries over fine).
+        // delta, but resync time and offset because offsets restart at zero
+        // and routing latency must not count as riding time.
         lastDeltaOffsetM = 0.0
-        startRoute(track)
+        lastDeltaFixTimestampMs = Long.MIN_VALUE
+        installTrack(track)
         state = NavigationState.OnRoute
-        publish()
+        _snapshot.value = _snapshot.value.copy(
+            state = state,
+            remainingDistanceM = track.totalDistanceM,
+            remainingTimeS = kotlin.math.max(settings.minimumEtaS, track.totalTimeS),
+            completionPercent = lastCompletionPercent,
+            paceDeltaS = paceDeltaS,
+            turn = null,
+        )
     }
 
     /** Distance the rider has covered along the CURRENT route so far, metres. */
     fun currentRouteCoveredM(): Double = matcher?.currentOffsetM ?: 0.0
+
+    /** Freezes projection while the asynchronous route rebuild is running. */
+    fun markRebuilding() {
+        if (state == NavigationState.NeedRebuild) {
+            state = NavigationState.Rebuilding
+            publish()
+        }
+    }
 
     /**
      * Feeds one GPS fix. Safe from any thread; the snapshot flow is the only
@@ -350,7 +379,6 @@ class NavigationSession(
         }
         lastMissDistanceM = miss
         if (moveAwayCounter > ON_ROUTE_MISSED_COUNT) {
-            bankCurrentRouteProgress()
             state = NavigationState.NeedRebuild
             val heading = direction.headingDeg()
             onRebuildNeeded?.invoke(
@@ -382,7 +410,7 @@ class NavigationSession(
     private fun publishRaw(fix: GpsFix) {
         val heading = direction.headingDeg()
         val bearing = if (heading.isNaN()) Double.NaN else heading
-        emit(fix, fix.lat, fix.lon, bearing, 0.0, null)
+        emit(fix, fix.lat, fix.lon, bearing, matcher?.currentOffsetM ?: 0.0, null)
     }
 
     private fun emit(
@@ -394,16 +422,8 @@ class NavigationSession(
         turn: NavigationSnapshot.TurnInfo?,
     ) {
         val activeTrack = track ?: return
-        val remainingDistance = if (state == NavigationState.OnRoute || state == NavigationState.Finished) {
-            activeTrack.remainingDistanceM(offset)
-        } else {
-            (activeTrack.totalDistanceM - passedDistanceOnSupersededRoutesM).coerceAtLeast(0.0)
-        }
-        val remainingTime = if (state == NavigationState.OnRoute || state == NavigationState.Finished) {
-            activeTrack.remainingTimeS(offset)
-        } else {
-            activeTrack.totalTimeS
-        }
+        val remainingDistance = activeTrack.remainingDistanceM(offset)
+        val remainingTime = activeTrack.remainingTimeS(offset)
         _snapshot.value = NavigationSnapshot(
             state = state,
             lat = lat,
@@ -431,11 +451,6 @@ class NavigationSession(
         }
         lastCompletionPercent = kotlin.math.max(lastCompletionPercent, quantized)
         return lastCompletionPercent
-    }
-
-    private fun bankCurrentRouteProgress() {
-        val activeMatcher = matcher ?: return
-        passedDistanceOnSupersededRoutesM += activeMatcher.currentOffsetM
     }
 
     private fun publish() {

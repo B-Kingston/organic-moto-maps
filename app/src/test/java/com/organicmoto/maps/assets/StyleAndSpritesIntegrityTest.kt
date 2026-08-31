@@ -10,6 +10,30 @@ import java.io.File
 class StyleAndSpritesIntegrityTest {
 
     @Test
+    fun hasExpressionsUseLiteralPropertyNames() {
+        val style = JSONObject(repoRoot().resolve("app/src/main/assets/style.json").readText())
+        val invalid = mutableListOf<String>()
+
+        fun visit(value: Any?) {
+            when (value) {
+                is JSONObject -> value.keys().forEach { visit(value.get(it)) }
+                is JSONArray -> {
+                    if (value.length() >= 2 && value.optString(0) == "has" && value.get(1) !is String) {
+                        invalid += value.toString()
+                    }
+                    for (index in 0 until value.length()) visit(value.get(index))
+                }
+            }
+        }
+        visit(style)
+
+        assertTrue(
+            "MapLibre has expressions require a literal property name, not a nested get: $invalid",
+            invalid.isEmpty(),
+        )
+    }
+
+    @Test
     fun styleHasOnlyLocalSourcesAndCompleteAssetReferences() {
         val root = repoRoot()
         val style = JSONObject(root.resolve("app/src/main/assets/style.json").readText())

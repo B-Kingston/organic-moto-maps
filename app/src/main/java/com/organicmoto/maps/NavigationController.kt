@@ -1,15 +1,11 @@
 package com.organicmoto.maps
 
 import android.util.Log
-import com.graphhopper.util.shapes.GHPoint
 import com.organicmoto.maps.routing.navigation.GpsFix
-import com.organicmoto.maps.routing.navigation.GpsFixSource
 import com.organicmoto.maps.routing.navigation.NavigationSession
 import com.organicmoto.maps.routing.navigation.RebuildRequest
-import com.organicmoto.maps.routing.navigation.RouteTrack
 import com.organicmoto.maps.routing.navigation.RouteTrackFactory
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 private const val TAG = "OrganicMoto.NavSession"
@@ -28,7 +24,6 @@ class NavigationController(
 ) {
     val snapshot = session.snapshot
 
-    private var fixJob: Job? = null
     private var rebuild: (suspend (RebuildRequest) -> Unit)? = null
 
     /** Registers the async rebuild callback; call before [start]. */
@@ -36,24 +31,29 @@ class NavigationController(
         rebuild = handler
     }
 
-    /** Begins following [path]: loads the track, starts GPS, follows. */
+    /** Begins following [path], or atomically installs it as an off-route rebuild. */
     fun start(path: com.graphhopper.ResponsePath) {
         val track = RouteTrackFactory.fromPath(path)
-        session.startRoute(track)
-        session.beginFollowing()
-        fixJob?.cancel()
-        fixJob = scope.launch {
-            GpsFixSource.fixes(NavigationContext.appContext).collect { fix ->
-                session.onFix(fix)
-            }
+        if (session.snapshot.value.state in setOf(
+                com.organicmoto.maps.routing.navigation.NavigationState.NeedRebuild,
+                com.organicmoto.maps.routing.navigation.NavigationState.Rebuilding,
+            )
+        ) {
+            session.applyRebuiltRoute(track, session.currentRouteCoveredM())
+        } else {
+            session.startRoute(track)
+            session.beginFollowing()
         }
         Log.i(TAG, "Guidance started (${track.totalDistanceM.toInt()} m, ${track.turns.size} turns)")
     }
 
-    /** Stops guidance and releases GPS. */
+    /** Feeds the shared screen-level location stream into guidance. */
+    fun onFix(fix: GpsFix) {
+        session.onFix(fix)
+    }
+
+    /** Stops guidance. Location ownership remains with the screen. */
     fun stop() {
-        fixJob?.cancel()
-        fixJob = null
         session.stop()
         Log.i(TAG, "Guidance stopped")
     }
@@ -68,17 +68,10 @@ class NavigationController(
                 TAG,
                 "Off-route: rebuilding from last good position (heading ${request.headingDeg})",
             )
+            session.markRebuilding()
             scope.launch {
-                // Freeze the engine while the reroute is in flight.
-                session.apply { /* state transition handled by handler via suspendRebuild */ }
                 handler(request)
             }
         }
     }
-}
-
-/** Application context holder so GpsFixSource can be created without leaking the Activity. */
-internal object NavigationContext {
-    @Volatile
-    lateinit var appContext: android.content.Context
 }

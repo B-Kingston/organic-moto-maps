@@ -43,10 +43,7 @@ class GraphHopperRouter(context: Context) {
     // routes that share more than the configured road percentage with any
     // earlier one.
     private data class RouteKey(
-        val fromLat: Double,
-        val fromLon: Double,
-        val toLat: Double,
-        val toLon: Double,
+        val points: List<Pair<Double, Double>>,
         val blockUnpaved: Boolean,
     )
     private data class CachedRouteSet(
@@ -184,15 +181,17 @@ class GraphHopperRouter(context: Context) {
         complexity: Double = 0.0,
         maxRoadShare: Double = DEFAULT_MAX_ROUTE_SHARE,
         blockUnpaved: Boolean = false,
+        viaPoints: List<GHPoint> = emptyList(),
     ): RouteResult {
-        if (abs(from.lat - to.lat) < 1e-4 && abs(from.lon - to.lon) < 1e-4) {
+        if (viaPoints.isEmpty() && abs(from.lat - to.lat) < 1e-4 && abs(from.lon - to.lon) < 1e-4) {
             throw IllegalStateException("No route was found")
         }
         // Intentionally no coordinates in the log: from/to are user-supplied.
         val detent = complexity.coerceAtLeast(0.0).roundToInt()
         val safeMaxRoadShare = maxRoadShare.coerceIn(0.10, 0.90)
         val sharePercent = (safeMaxRoadShare * 100.0).roundToInt()
-        val key = RouteKey(from.lat, from.lon, to.lat, to.lon, blockUnpaved)
+        val requestPoints = listOf(from) + viaPoints + to
+        val key = RouteKey(requestPoints.map { it.lat to it.lon }, blockUnpaved)
         synchronized(routeCache) {
             routeCache[key]?.get(detent)?.let { cached ->
                 if (detent == 0 || cached.maxRoadSharePercent == sharePercent) {
@@ -226,7 +225,10 @@ class GraphHopperRouter(context: Context) {
         // candidate pool on retries. Our own overlap check remains unchanged;
         // the wider pool is what lets us find a useful best-effort route when
         // the road network cannot meet the target exactly.
-        for (attempt in 0..2) {
+        // Multi-leg GPX requests use the standard algorithm, which returns one
+        // path. Retrying is useful only for two-point alternative discovery.
+        val attempts = if (viaPoints.isEmpty()) 0..2 else 0..0
+        for (attempt in attempts) {
             if (accepted.size >= MAX_DISPLAYED_ROUTES) break
             val request = buildGhRequest(
                 from = from,
@@ -236,6 +238,7 @@ class GraphHopperRouter(context: Context) {
                 maxRoadShare = safeMaxRoadShare,
                 attempt = attempt,
                 previousEdgeIds = previous.flatMapTo(mutableSetOf()) { it.edgeDistances.keys },
+                viaPoints = viaPoints,
             )
             Log.i(TAG, "Requesting route detent $detent (diversification attempt $attempt)")
             val response = hopper.route(request)

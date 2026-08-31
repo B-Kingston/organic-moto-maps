@@ -33,8 +33,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Canvas
+import com.graphhopper.util.Instruction
 import com.organicmoto.maps.routing.navigation.NavigationSnapshot
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /**
  * Compact top-left guidance card, shown while a route is being followed:
@@ -107,7 +109,7 @@ fun NavigationDataBar(
                     "${NavigationHudFormat.speedKmh(snapshot.speedMps)} kilometres per hour, " +
                     "${NavigationHudFormat.etaText(snapshot.remainingTimeS)} remaining, " +
                     "${NavigationHudFormat.distanceText(snapshot.remainingDistanceM)} left, " +
-                    "pace delta ${NavigationHudFormat.deltaText(snapshot.paceDeltaS)}"
+                    NavigationHudFormat.deltaDescription(snapshot.paceDeltaS)
             },
     ) {
         Row(
@@ -183,7 +185,11 @@ private fun DeltaCell(deltaS: Double, modifier: Modifier = Modifier) {
             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
         )
         Text(
-            text = if (known && deltaS > 0.0) "lost" else "gained",
+            text = when {
+                !known -> "pace"
+                deltaS > 0.0 -> "lost"
+                else -> "gained"
+            },
             style = MaterialTheme.typography.labelSmall,
             color = Color(0xB3FFFFFF),
         )
@@ -203,41 +209,66 @@ private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
         drawPath(path, paint, style = stroke)
         return
     }
-    val isUTurn = abs(sign) == 8
-    val isRoundabout = abs(sign) == 6 || abs(sign) == 7
+    val isUTurn = sign == Instruction.U_TURN_UNKNOWN ||
+        sign == Instruction.U_TURN_LEFT || sign == Instruction.U_TURN_RIGHT
+    val isRoundabout = sign == Instruction.USE_ROUNDABOUT ||
+        sign == Instruction.LEAVE_ROUNDABOUT
     val left = sign < 0 // GraphHopper left maneuvers have negative signs
     val sharp = abs(sign) == 3 // sharp variants
-    val headX = when {
-        isUTurn || isRoundabout -> if (left) w * 0.35f else w * 0.65f
-        left -> w * (if (sharp) 0.08f else 0.18f)
-        else -> w * (if (sharp) 0.92f else 0.82f)
-    }
-    val headY = when {
-        isUTurn || isRoundabout -> h * 0.45f
-        else -> h * (if (sharp) 0.25f else 0.3f)
-    }
+    val straight = sign == Instruction.CONTINUE_ON_STREET ||
+        sign == Instruction.FERRY || sign == Instruction.UNKNOWN
+    var headFromX = w * 0.5f
+    var headFromY = h * 0.45f
+    var headX = w * 0.5f
+    var headY = h * 0.16f
     val path = Path().apply {
         when {
             isUTurn || isRoundabout -> {
-                // U-turn / roundabout approximations: a hook.
-                moveTo(headX, h * 0.85f)
+                // A compact hook whose arrowhead follows the end of the curve.
+                val side = if (left) w * 0.28f else w * 0.72f
+                moveTo(w * 0.5f, h * 0.85f)
+                lineTo(w * 0.5f, h * 0.38f)
+                cubicTo(w * 0.5f, h * 0.15f, side, h * 0.15f, side, h * 0.4f)
+                headFromX = side
+                headFromY = h * 0.18f
+                headX = side
+                headY = h * 0.4f
+            }
+            straight -> {
+                moveTo(w * 0.5f, h * 0.85f)
                 lineTo(headX, headY)
-                cubicTo(headX, h * 0.2f, w - headX, h * 0.2f, w - headX, headY)
             }
             else -> {
-                // Straight stem then a branching head.
+                // Keep the elbow close to the stem and let the final segment
+                // determine the arrowhead angle.
+                val direction = if (left) -1f else 1f
+                val slight = abs(sign) == 1 || abs(sign) == 7
+                headX = w * (0.5f + direction * if (sharp) 0.32f else if (slight) 0.25f else 0.3f)
+                headY = h * if (sharp) 0.55f else if (slight) 0.2f else 0.4f
+                headFromX = w * 0.5f
+                headFromY = h * 0.44f
                 moveTo(w * 0.5f, h * 0.85f)
-                lineTo(w * 0.5f, h * 0.45f)
+                lineTo(headFromX, headFromY)
                 lineTo(headX, headY)
             }
         }
     }
     drawPath(path, paint, style = stroke)
-    // Arrowhead: two short strokes at the branch end.
+
+    // Align a compact arrowhead with the maneuver's final segment. The old
+    // fixed upright chevron spread away from diagonal branches.
+    val dx = headX - headFromX
+    val dy = headY - headFromY
+    val length = sqrt(dx * dx + dy * dy).coerceAtLeast(1f)
+    val ux = dx / length
+    val uy = dy / length
+    val baseX = headX - ux * w * 0.16f
+    val baseY = headY - uy * w * 0.16f
+    val wing = w * 0.075f
     val head = Path().apply {
-        moveTo(headX - w * 0.1f, headY + h * 0.14f)
+        moveTo(baseX - uy * wing, baseY + ux * wing)
         lineTo(headX, headY)
-        lineTo(headX + w * 0.1f, headY + h * 0.14f)
+        lineTo(baseX + uy * wing, baseY - ux * wing)
     }
     drawPath(head, paint, style = stroke)
 }
@@ -267,13 +298,28 @@ object NavigationHudFormat {
         }
     }
 
-    /** Coarse maneuver name for accessibility and logs. */
-    fun turnDescription(turn: NavigationSnapshot.TurnInfo?): String = when {
-        turn == null -> "continue ahead"
-        turn.sign == 4 || turn.sign == -4 -> "make a U-turn"
-        turn.sign > 0 -> "turn right in ${distanceText(turn.distanceM)}"
-        turn.sign < 0 -> "turn left in ${distanceText(turn.distanceM)}"
-        else -> "continue ahead"
+    /** Maneuver name for accessibility and logs, aligned with GraphHopper signs. */
+    fun turnDescription(turn: NavigationSnapshot.TurnInfo?): String {
+        turn ?: return "continue ahead"
+        val action = when (turn.sign) {
+            Instruction.U_TURN_UNKNOWN,
+            Instruction.U_TURN_LEFT,
+            Instruction.U_TURN_RIGHT,
+            -> "make a U-turn"
+            Instruction.TURN_SHARP_LEFT -> "turn sharp left"
+            Instruction.TURN_LEFT -> "turn left"
+            Instruction.TURN_SLIGHT_LEFT -> "turn slight left"
+            Instruction.KEEP_LEFT -> "keep left"
+            Instruction.TURN_SHARP_RIGHT -> "turn sharp right"
+            Instruction.TURN_RIGHT -> "turn right"
+            Instruction.TURN_SLIGHT_RIGHT -> "turn slight right"
+            Instruction.KEEP_RIGHT -> "keep right"
+            Instruction.USE_ROUNDABOUT -> "enter the roundabout"
+            Instruction.LEAVE_ROUNDABOUT -> "exit the roundabout"
+            Instruction.FERRY -> "take the ferry"
+            else -> "continue ahead"
+        }
+        return "$action in ${distanceText(turn.distanceM)}"
     }
 
     /**
@@ -287,5 +333,12 @@ object NavigationHudFormat {
             val sign = if (deltaS > 0.05) "+" else if (deltaS < -0.05) "-" else ""
             "$sign%.1f s".format(java.util.Locale.US, abs(deltaS))
         }
+    }
+
+    fun deltaDescription(deltaS: Double): String = when {
+        deltaS.isNaN() -> "pace delta unavailable"
+        deltaS > 0.05 -> "pace ${deltaText(deltaS)} lost"
+        deltaS < -0.05 -> "pace ${deltaText(deltaS)} gained"
+        else -> "pace on plan"
     }
 }

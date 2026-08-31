@@ -3,7 +3,7 @@ package com.organicmoto.maps.storage
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.InputStream
-import kotlin.math.max
+import kotlin.math.ceil
 
 /**
  * Parses GPX 1.0/1.1 documents into an ordered list of [GeoPoint]s.
@@ -21,15 +21,22 @@ import kotlin.math.max
  */
 object GpxParser {
 
-    /** One parsed GPX document: the ride line plus the name, when present. */
-    data class GpxRoute(val name: String?, val points: List<GeoPoint>)
+    /**
+     * One parsed GPX document. [points] is the detailed ride line while
+     * [waypoints] preserves explicit stops that accompany a track.
+     */
+    data class GpxRoute(
+        val name: String?,
+        val points: List<GeoPoint>,
+        val waypoints: List<GeoPoint>,
+    )
 
     /**
      * Parses [input] as GPX.
      *
      * @throws GpxParseException when the stream is not well-formed XML, is not
      *   a GPX document, or contains no usable track/route/waypoint points.
-     *   The stream is always fully consumed and closed.
+     *   The stream is always closed.
      */
     fun parse(input: InputStream): GpxRoute {
         val parser = try {
@@ -47,11 +54,31 @@ object GpxParser {
         val wayPoints = ArrayList<GeoPoint>()
 
         try {
+            var rootSeen = false
             var insideTrack = false
             var insideRoute = false
+            var acceptedRouteSeen = false
+            var acceptingRoute = false
             while (parser.next() != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == XmlPullParser.END_TAG) {
+                    when (parser.name.substringAfter(':')) {
+                        "trk" -> insideTrack = false
+                        "rte" -> {
+                            insideRoute = false
+                            acceptingRoute = false
+                        }
+                    }
+                    continue
+                }
                 if (parser.eventType != XmlPullParser.START_TAG) continue
-                when (parser.name) {
+                val elementName = parser.name.substringAfter(':')
+                if (!rootSeen) {
+                    if (elementName != "gpx") {
+                        throw GpxParseException("Not a GPX document (root element is <$elementName>)")
+                    }
+                    rootSeen = true
+                }
+                when (elementName) {
                     "gpx" -> {
                         for (i in 0 until parser.attributeCount) {
                             if (parser.getAttributeName(i) == "version" &&
@@ -62,13 +89,15 @@ object GpxParser {
                         }
                     }
                     "trk" -> insideTrack = true
-                    "rte" -> insideRoute = true
+                    "rte" -> {
+                        insideRoute = true
+                        acceptingRoute = !acceptedRouteSeen
+                        acceptedRouteSeen = true
+                    }
                     "trkseg" -> check(insideTrack) { "trkseg outside trk" }
                     "trkpt" -> if (insideTrack) trackPoints.add(readPoint(parser))
-                    "rtept" -> if (insideRoute) routePoints.add(readPoint(parser))
+                    "rtept" -> if (insideRoute && acceptingRoute) routePoints.add(readPoint(parser))
                     "wpt" -> if (!insideTrack && !insideRoute) wayPoints.add(readPoint(parser))
-                    "trk" -> insideTrack = false
-                    "rte" -> insideRoute = false
                     "name" -> if (docName == null && !insideTrack && !insideRoute) {
                         // readPoint advances past END_TAG, so a name child
                         // captured here must be read with nextText().
@@ -92,7 +121,12 @@ object GpxParser {
         if (points.size < 2) {
             throw GpxParseException("GPX contains no ride line (need at least 2 points)")
         }
-        return GpxRoute(docName?.takeIf { it.isNotBlank() }, points)
+        val explicitWaypoints = when {
+            trackPoints.isNotEmpty() -> wayPoints
+            routePoints.isNotEmpty() -> routePoints
+            else -> wayPoints
+        }
+        return GpxRoute(docName?.takeIf { it.isNotBlank() }, points, explicitWaypoints)
     }
 
     /** Reads one lat/lon point; child elements (<ele>, <time>, extensions) are skipped. */
@@ -164,8 +198,110 @@ object GpxGeometry {
         return out
     }
 
+    /**
+     * Produces bounded GraphHopper via points from a detailed GPX line.
+     *
+     * Routing only the two endpoints allows the engine to replace the whole
+     * imported ride with its own route. Instead, this samples the line at a
+     * maximum along-track spacing and merges explicit GPX stops at their
+     * nearest position in the track. This retains loops and produces normal
+     * turn instructions for every leg without submitting thousands of GPS
+     * recording points to the router.
+     */
+    fun routingPoints(
+        points: List<GeoPoint>,
+        waypoints: List<GeoPoint> = emptyList(),
+        maxSpacingMeters: Double = 1_500.0,
+    ): List<GeoPoint> {
+        require(points.size >= 2) { "A route needs at least two points" }
+        require(maxSpacingMeters > 0.0) { "Routing-point spacing must be positive" }
+
+        // Sample by cumulative along-track distance. The hard point cap also
+        // applies when the source itself has unusually sparse, long segments.
+        val cumulative = DoubleArray(points.size)
+        for (i in 1 until points.size) {
+            cumulative[i] = cumulative[i - 1] + haversineMeters(points[i - 1], points[i])
+        }
+        val closedLoop = haversineMeters(points.first(), points.last()) < LOOP_THRESHOLD_METERS
+        val minimumSamples = if (closedLoop) 3 else 2
+        val sampleCount = (ceil(cumulative.last() / maxSpacingMeters).toInt() + 1)
+            .coerceIn(minimumSamples, MAX_ROUTING_POINTS)
+        val indexed = ArrayList<IndexedRoutingPoint>()
+        var sourceIndex = 0
+        for (sample in 0 until sampleCount) {
+            val targetDistance = cumulative.last() * sample / (sampleCount - 1)
+            while (sourceIndex < points.lastIndex && cumulative[sourceIndex] < targetDistance) {
+                sourceIndex++
+            }
+            if (indexed.lastOrNull()?.index != sourceIndex) {
+                indexed += IndexedRoutingPoint(sourceIndex, points[sourceIndex], false)
+            }
+        }
+        if (indexed.last().index != points.lastIndex) {
+            indexed += IndexedRoutingPoint(points.lastIndex, points.last(), false)
+        }
+
+        // GPX waypoints are ordered stops. Place each beside the closest track
+        // vertex so it remains in the correct position even for closed loops.
+        for (waypoint in waypoints) {
+            var nearestIndex = 0
+            var nearestDistance = Double.POSITIVE_INFINITY
+            for (i in points.indices) {
+                val distance = haversineMeters(waypoint, points[i])
+                if (distance < nearestDistance) {
+                    nearestDistance = distance
+                    nearestIndex = i
+                }
+            }
+            indexed += IndexedRoutingPoint(nearestIndex, waypoint, true)
+        }
+        indexed.sortWith(compareBy<IndexedRoutingPoint> { it.index }.thenBy { !it.explicit })
+
+        val result = ArrayList<GeoPoint>(indexed.size)
+        for (candidate in indexed) {
+            if (result.isNotEmpty() &&
+                haversineMeters(result.last(), candidate.point) < DUPLICATE_POINT_METERS
+            ) {
+                // Prefer an explicit stop over a nearby sampled track point.
+                if (candidate.explicit) result[result.lastIndex] = candidate.point
+            } else {
+                result += candidate.point
+            }
+        }
+        // Endpoints own the route boundary. Nearby standalone waypoints may
+        // shape the first/last leg, but may never replace the actual GPX ends.
+        if (haversineMeters(result.first(), points.first()) < DUPLICATE_POINT_METERS) {
+            result[0] = points.first()
+        } else {
+            result.add(0, points.first())
+        }
+        if (haversineMeters(result.last(), points.last()) < DUPLICATE_POINT_METERS) {
+            result[result.lastIndex] = points.last()
+        } else {
+            result += points.last()
+        }
+        require(result.size >= 2) { "GPX route has no usable distance" }
+        return if (result.size <= MAX_ROUTING_POINTS) result else {
+            // A file can contain arbitrarily many explicit waypoints. Keep the
+            // request within GraphHopper's practical bound while retaining
+            // both ends and sampling the ordered merged list evenly.
+            List(MAX_ROUTING_POINTS) { slot ->
+                result[(slot.toLong() * result.lastIndex / (MAX_ROUTING_POINTS - 1)).toInt()]
+            }
+        }
+    }
+
+    private data class IndexedRoutingPoint(
+        val index: Int,
+        val point: GeoPoint,
+        val explicit: Boolean,
+    )
+
     /** Endpoints closer than this are treated as a closed loop (e.g. a return-to-start ride). */
     const val LOOP_THRESHOLD_METERS = 150.0
+
+    private const val MAX_ROUTING_POINTS = 250
+    private const val DUPLICATE_POINT_METERS = 10.0
 
     /**
      * Routing endpoints for an imported track. A closed loop (start and end

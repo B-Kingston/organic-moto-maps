@@ -127,10 +127,15 @@ class RouteTrack(
             instructionSigns: List<Int>,
             instructionNames: List<String>,
             instructionPointCounts: List<Int>,
-            instructionDistancesM: List<Double>,
             instructionTimesS: List<Double>,
         ): RouteTrack {
             val n = latitudes.size
+            require(n >= 2) { "a route track needs at least two vertices" }
+            require(longitudes.size == n) { "coordinate arrays must align" }
+            require(instructionNames.size == instructionSigns.size &&
+                instructionPointCounts.size == instructionSigns.size &&
+                instructionTimesS.size == instructionSigns.size
+            ) { "instruction fields must align" }
             // Exact cumulative geometric distances: the distance cache must
             // reflect real geometry so remaining-distance math is honest.
             val cumulativeDistance = DoubleArray(n)
@@ -150,20 +155,27 @@ class RouteTrack(
             var cursor = 0
             for (i in instructionSigns.indices) {
                 val points = instructionPointCounts[i]
+                require(points >= 0) { "instruction point counts must be non-negative" }
                 val end = (cursor + points).coerceAtMost(n)
                 val time = instructionTimesS[i]
                 val first = cursor
-                var last = cursor
-                while (last < end - 1) last++
-                // Segments [first, last) carry this instruction's time.
+                // GraphHopper omits an instruction's final adjacent point;
+                // that vertex is the first point of the next instruction.
+                // Consequently P instruction points cover P route segments.
+                val segmentEnd = end.coerceAtMost(n - 1)
                 var segLenSum = 0.0
-                val segLens = DoubleArray(last - first)
-                for (v in first until last) {
+                val segmentCount = (segmentEnd - first).coerceAtLeast(0)
+                val segLens = DoubleArray(segmentCount)
+                for (v in first until segmentEnd) {
                     segLens[v - first] = cumulativeDistance[v + 1] - cumulativeDistance[v]
                     segLenSum += segLens[v - first]
                 }
-                for (v in first until last) {
-                    val share = if (segLenSum > 0.0) segLens[v - first] / segLenSum else 1.0 / (last - first)
+                for (v in first until segmentEnd) {
+                    val share = if (segLenSum > 0.0) {
+                        segLens[v - first] / segLenSum
+                    } else {
+                        1.0 / segmentCount
+                    }
                     segmentTime[v] += time * share
                 }
                 // A maneuver sign happens at the START of instruction i, i.e.

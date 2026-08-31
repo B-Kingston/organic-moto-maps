@@ -87,7 +87,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -98,6 +97,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.graphhopper.ResponsePath
 import com.graphhopper.util.PointList
 import com.graphhopper.util.shapes.GHPoint
@@ -108,11 +108,15 @@ import com.organicmoto.maps.map.clearRoutes
 import com.organicmoto.maps.map.drawRoutes
 import com.organicmoto.maps.map.findRouteIndexAt
 import com.organicmoto.maps.map.fitBounds
+import com.organicmoto.maps.map.hideGpxPreviewMarker
 import com.organicmoto.maps.map.routeColorHex
+import com.organicmoto.maps.map.showGpxPreviewMarker
 import com.organicmoto.maps.routing.GraphHopperRouter
 import com.organicmoto.maps.routing.PointParser
 import com.organicmoto.maps.storage.GeoPoint
 import com.organicmoto.maps.storage.GpxParser
+import com.organicmoto.maps.storage.GpxMilestone
+import com.organicmoto.maps.storage.GpxPreview
 import com.organicmoto.maps.storage.PolylineCodec
 import com.organicmoto.maps.storage.RouteSimilarity
 import com.organicmoto.maps.storage.SavedRoute
@@ -127,6 +131,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
@@ -137,7 +142,6 @@ import kotlin.math.abs
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
-import kotlin.math.abs
 import kotlin.math.absoluteValue
 import kotlin.math.sin
 import kotlin.math.roundToInt
@@ -262,6 +266,7 @@ fun RouteScreen() {
                 params.complexity,
                 params.maxRoadShare,
                 params.blockUnpaved,
+                params.viaPoints,
             )
             val primary = result.routes.first()
             Log.i(
@@ -316,14 +321,16 @@ fun RouteScreen() {
         mutableStateOf(routePreferences.getBoolean(BLOCK_UNPAVED_PREF, false))
     }
     var routeSettingsOpen by remember { mutableStateOf(false) }
-    // Endpoints of the most recent submission attempt (START / dial release /
-    // settings apply / saved-route load). Set at SUBMIT time so controls stay
-    // consistent while a route is in flight; nulled whenever either field
-    // changes, so a stale reroute can never target edited-away points.
-    var activePlan by remember { mutableStateOf<Pair<GHPoint, GHPoint>?>(null) }
+    // Complete inputs of the most recent submission attempt (START / dial
+    // release / settings apply / saved-route load). GPX imports carry bounded
+    // shaping points here as well as their endpoints; keeping the complete
+    // immutable request is what lets a later control edit re-route the same
+    // imported ride instead of silently falling back to an endpoint-only ride.
+    // Nulled whenever either field changes, so a stale reroute can never
+    // target edited-away points.
+    var activePlan by remember { mutableStateOf<RouteParams?>(null) }
     val geocodeController = remember { GeocodeSearchController(context.applicationContext) }
     // Guidance: pure engine + Android glue. One controller per screen.
-    NavigationContext.appContext = context.applicationContext
     val navigationController = remember { NavigationController(scope) }
     val navSnapshot by navigationController.snapshot.collectAsState()
     var guidanceRequested by remember { mutableStateOf(false) }
@@ -338,12 +345,17 @@ fun RouteScreen() {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         locationPermissionGranted = granted
+        guidanceRequested = granted
         Log.i(TAG, "Location permission " + if (granted) "granted" else "denied")
     }
     val mapRef = remember { mutableStateOf<MapLibreMap?>(null) }
     // Saved-route storage: repository over device SQLite plus the menu flag.
     val savedRouteRepository = remember { SavedRouteRepository(context.applicationContext) }
     var savedRoutesOpen by remember { mutableStateOf(false) }
+    var importedGpxName by remember { mutableStateOf<String?>(null) }
+    var importedGpxMilestones by remember { mutableStateOf<List<GpxMilestone>>(emptyList()) }
+    var gpxPreviewOpen by remember { mutableStateOf(false) }
+    var gpxImportToken by remember { mutableStateOf(0) }
 
     val selectRoute: (Int) -> Unit = coordinator::selectRoute
     val latestSelectRoute by rememberUpdatedState(selectRoute)
@@ -375,11 +387,20 @@ fun RouteScreen() {
             trackedFix = null
             return@LaunchedEffect
         }
-        GpsFixSource.fixes(context.applicationContext).collect { trackedFix = it }
+        GpsFixSource.fixes(context.applicationContext).collect { fix ->
+            trackedFix = fix
+            navigationController.onFix(fix)
+        }
     }
     DisposableEffect(Unit) {
         onDispose { trackedFix = null }
     }
+
+    // Location lock: when on, the camera re-centres on each fix but keeps
+    // whatever zoom the user last set (follow zoom), so pinch or the zoom
+    // pill works while locked. Tapping the crosshair again releases.
+    var followMe by remember { mutableStateOf(false) }
+    var followZoom by remember { mutableStateOf(FOLLOW_ZOOM) }
 
     var styleJson by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
@@ -434,24 +455,25 @@ fun RouteScreen() {
         roadSharePercent: Float = maxRoadShare,
         blockUnpavedRoads: Boolean = blockUnpaved,
         preferredGeometry: String? = null,
+        viaPoints: List<GHPoint> = emptyList(),
     ) {
-        activePlan = from to to
+        val params = RouteParams(
+            from = from,
+            to = to,
+            complexity = complexityValue.toDouble(),
+            maxRoadShare = roadSharePercent.toDouble() / 100.0,
+            blockUnpaved = blockUnpavedRoads,
+            preferredGeometry = preferredGeometry,
+            viaPoints = viaPoints.toList(),
+        )
+        activePlan = params
         Log.i(TAG, "Route submitted (complexity $complexityValue)")
         if (debugLogs) {
             Log.i(TAG, "Route submitted: from=\"$fromText\" to=\"$toText\"")
         } else {
             Log.i(TAG, "Route submitted")
         }
-        coordinator.submit(
-            RouteParams(
-                from = from,
-                to = to,
-                complexity = complexityValue.toDouble(),
-                maxRoadShare = roadSharePercent.toDouble() / 100.0,
-                blockUnpaved = blockUnpavedRoads,
-                preferredGeometry = preferredGeometry,
-            ),
-        )
+        coordinator.submit(params)
     }
 
     val onRoute: () -> Unit = {
@@ -505,8 +527,8 @@ fun RouteScreen() {
      * never from a stale earlier route.
      */
     suspend fun saveProposedRoute(path: ResponsePath): Boolean {
-        val endpoints = activePlan
-        if (endpoints == null) {
+        val plan = activePlan
+        if (plan == null) {
             Log.w(TAG_SAVED, "Save ignored: no resolved endpoints for the current route")
             return false
         }
@@ -514,11 +536,11 @@ fun RouteScreen() {
             val saved = savedRouteRepository.save(
                 SavedRouteDraft(
                     fromName = fromText.trim()
-                        .ifBlank { "${endpoints.first.lat}, ${endpoints.first.lon}" },
-                    from = GeoPoint(endpoints.first.lat, endpoints.first.lon),
+                        .ifBlank { "${plan.from.lat}, ${plan.from.lon}" },
+                    from = GeoPoint(plan.from.lat, plan.from.lon),
                     toName = toText.trim()
-                        .ifBlank { "${endpoints.second.lat}, ${endpoints.second.lon}" },
-                    to = GeoPoint(endpoints.second.lat, endpoints.second.lon),
+                        .ifBlank { "${plan.to.lat}, ${plan.to.lon}" },
+                    to = GeoPoint(plan.to.lat, plan.to.lon),
                     distanceMeters = path.distance,
                     durationMillis = path.time,
                     complexity = complexity,
@@ -544,6 +566,9 @@ fun RouteScreen() {
      */
     fun loadSavedRoute(saved: SavedRoute) {
         savedRoutesOpen = false
+        importedGpxName = null
+        importedGpxMilestones = emptyList()
+        gpxPreviewOpen = false
         val (from, to) = saved.endpoints
         val restoredFrom = GHPoint(from.lat, from.lon)
         val restoredTo = GHPoint(to.lat, to.lon)
@@ -554,6 +579,7 @@ fun RouteScreen() {
         complexity = saved.complexity.coerceAtLeast(0f)
         maxRoadShare = saved.maxRoadSharePercent.coerceIn(10f, 90f)
         blockUnpaved = saved.blockUnpaved
+        val savedViaPoints = savedRouteViaPoints(saved)
         Log.i(TAG_SAVED, "Loading saved route ${saved.id}")
         submitRoute(
             restoredFrom,
@@ -562,18 +588,26 @@ fun RouteScreen() {
             maxRoadShare,
             blockUnpaved,
             preferredGeometry = saved.geometry,
+            viaPoints = savedViaPoints,
         )
     }
 
     /** Loads an imported GPX ride into the planner and routes it. */
-    fun loadGpxRoute(name: String, points: List<GeoPoint>) {
-        // A closed-loop GPX (start == end) routes to the loop antipode; the
-        // full track still steers candidate selection via preferredGeometry.
-        val (start, end) = GpxGeometry.routingEndpoints(points)
+    fun loadGpxRoute(
+        name: String,
+        points: List<GeoPoint>,
+        waypoints: List<GeoPoint>,
+        milestones: List<GpxMilestone>,
+    ) {
+        val routingPoints = GpxGeometry.routingPoints(points, waypoints)
+        val start = routingPoints.first()
+        val end = routingPoints.last()
         val from = GHPoint(start.lat, start.lon)
         val to = GHPoint(end.lat, end.lon)
-        fromText = name
-        toText = ""
+        importedGpxName = name
+        importedGpxMilestones = milestones
+        fromText = coordinateLabel(start)
+        toText = coordinateLabel(end)
         fromPoint = from
         toPoint = to
         submitRoute(
@@ -583,34 +617,63 @@ fun RouteScreen() {
             maxRoadShare,
             blockUnpaved,
             preferredGeometry = PolylineCodec.encode(points),
+            viaPoints = routingPoints.drop(1).dropLast(1).map { GHPoint(it.lat, it.lon) },
         )
     }
-    // GPX import: pick a .gpx file from device storage, parse it off the UI
-    // thread, then load it exactly like a saved route — endpoints from the
-    // track ends, the thinned track as the preferred geometry so the router
-    // re-selects the candidate closest to the imported shape, and ride mode
-    // works through the normal RIDE button.
+    // GPX import: parse off the UI thread, retain the detailed track for
+    // matching, and route through bounded shaping points plus explicit stops.
+    // This preserves full loops and gives ride mode instructions for every
+    // imported leg instead of replacing the GPX with an endpoint-only route.
     var gpxImportError by remember { mutableStateOf<String?>(null) }
     val gpxPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        val token = ++gpxImportToken
         scope.launch {
             try {
                 val gpx = withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)?.use { GpxParser.parse(it) }
                 } ?: throw GpxParser.GpxParseException("File could not be opened")
                 val thinned = withContext(Dispatchers.Default) { GpxGeometry.thin(gpx.points) }
+                val milestones = withContext(Dispatchers.Default) { GpxPreview.milestones(gpx.points) }
                 val name = gpx.name ?: "Imported GPX"
                 Log.i(TAG, "GPX imported: \"$name\", ${gpx.points.size} points, " +
                     "${GpxGeometry.lengthMeters(gpx.points)} m, thinned to ${thinned.size}")
+                if (token != gpxImportToken) return@launch
                 gpxImportError = null
-                loadGpxRoute(name, thinned)
+                loadGpxRoute(name, thinned, gpx.waypoints, milestones)
+                // Resolve every preview stop in one offline index scan. Routing
+                // starts immediately; labels fill in independently when ready.
+                val places = try {
+                    geocodeController.reverseGeocode(
+                        milestones.map { it.point.lat to it.point.lon },
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A missing/corrupt search asset must not undo a route that
+                    // already imported successfully. Coordinate labels remain
+                    // an honest offline fallback.
+                    Log.w(TAG, "GPX milestone reverse geocoding unavailable", e)
+                    emptyList()
+                }
+                if (token == gpxImportToken) {
+                    val located = milestones.mapIndexed { index, milestone ->
+                        val place = places.getOrNull(index)
+                        milestone.copy(placeName = place?.name, placeDetail = place?.detail)
+                    }
+                    importedGpxMilestones = located
+                    located.firstOrNull()?.let { fromText = milestoneEndpointLabel(it) }
+                    located.lastOrNull()?.let { toText = milestoneEndpointLabel(it) }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "GPX import failed", e)
-                gpxImportError = e.message ?: "GPX import failed"
+                if (token == gpxImportToken) {
+                    Log.e(TAG, "GPX import failed", e)
+                    gpxImportError = e.message ?: "GPX import failed"
+                }
             }
         }
     }
@@ -628,7 +691,15 @@ fun RouteScreen() {
             }
             val rebuildFrom = GHPoint(request.lat, request.lon)
             // Route from the last good position to the ORIGINAL destination.
-            latestSubmitRoute(rebuildFrom, plan.second, complexity, maxRoadShare, blockUnpaved, null)
+            latestSubmitRoute(
+                rebuildFrom,
+                plan.to,
+                complexity,
+                maxRoadShare,
+                blockUnpaved,
+                null,
+                emptyList(),
+            )
         }
     }
 
@@ -643,6 +714,14 @@ fun RouteScreen() {
         val path = routeResult?.routes?.getOrNull(selectedIndex)
         if (path != null) {
             navigationController.start(path)
+        }
+    }
+    LaunchedEffect(state, navSnapshot.state, guidanceRequested) {
+        if (guidanceRequested && state is RouteUiState.Error &&
+            navSnapshot.state == NavigationState.Rebuilding
+        ) {
+            Log.w(TAG, "Guidance rebuild failed; returning to the planner")
+            guidanceRequested = false
         }
     }
     DisposableEffect(Unit) {
@@ -669,6 +748,32 @@ fun RouteScreen() {
                 600,
             )
         }
+    }
+    // Location lock: re-centre on each fix at the user's zoom (followZoom),
+    // never re-asserting a fixed level, so manual zoom works while locked.
+    // Guidance already owns the camera; the lock only matters in planning
+    // mode.
+    LaunchedEffect(trackedFix, followMe, followZoom) {
+        if (!followMe || guidanceRequested) return@LaunchedEffect
+        val map = mapRef.value ?: return@LaunchedEffect
+        val fix = trackedFix ?: return@LaunchedEffect
+        if (fix.lat.isNaN() || fix.lon.isNaN()) return@LaunchedEffect
+        map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(LatLng(fix.lat, fix.lon), followZoom),
+            400,
+        )
+    }
+    // Manual zoom (pinch or the +/- pill) while locked: adopt the new zoom
+    // into followZoom so the re-centre effect keeps the user's level.
+    DisposableEffect(mapRef.value) {
+        val map = mapRef.value ?: return@DisposableEffect onDispose { }
+        val listener = MapLibreMap.OnCameraMoveListener {
+            if (followMe) {
+                mapRef.value?.cameraPosition?.zoom?.let { followZoom = it }
+            }
+        }
+        map.addOnCameraMoveListener(listener)
+        onDispose { map.removeOnCameraMoveListener(listener) }
     }
     // Always-on tracking render: when guidance is idle the position dot
     // still follows the raw tracked fix (GPS bearing when available). During
@@ -726,24 +831,8 @@ fun RouteScreen() {
             )
             CentreOnMeButton(
                 visible = true,
-                onClick = {
-                    val fix = trackedFix
-                    val lat: Double; val lon: Double
-                    if (guidanceRequested && !navSnapshot.lat.isNaN()) {
-                        lat = navSnapshot.lat; lon = navSnapshot.lon
-                    } else if (fix != null && !fix.lat.isNaN()) {
-                        lat = fix.lat; lon = fix.lon
-                    } else {
-                        return@CentreOnMeButton
-                    }
-                    mapRef.value?.animateCamera(
-                        CameraUpdateFactory.newLatLngZoom(
-                            LatLng(lat, lon),
-                            mapRef.value?.cameraPosition?.zoom ?: 14.0,
-                        ),
-                        400,
-                    )
-                },
+                active = followMe,
+                onClick = { followMe = !followMe },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 8.dp, bottom = 8.dp)
@@ -767,12 +856,22 @@ fun RouteScreen() {
                 onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 8.dp, bottom = 64.dp)
+                    // In ride mode the data bar occupies the bottom of the
+                    // map box; lift the pill above it so they never overlap.
+                    .padding(
+                        end = 8.dp,
+                        bottom = if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
+                            148.dp
+                        } else {
+                            64.dp
+                        },
+                    )
             )
         }
         RoutePlanPanel(
             fromText = fromText,
             onFromChange = {
+                importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
                 fromText = it; fromPoint = null
                 activePlan = null; coordinator.invalidate()
             },
@@ -784,6 +883,7 @@ fun RouteScreen() {
             },
             toText = toText,
             onToChange = {
+                importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
                 toText = it; toPoint = null
                 activePlan = null; coordinator.invalidate()
             },
@@ -810,18 +910,24 @@ fun RouteScreen() {
             onDismissGpxError = { gpxImportError = null },
             onSaveRoute = ::saveProposedRoute,
             onToggleGuidance = {
-                if (guidanceRequested) {
-                    guidanceRequested = false
-                } else {
-                    if (!locationPermissionGranted) {
-                        permissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                    }
+                if (locationPermissionGranted) {
                     guidanceRequested = true
+                } else {
+                    permissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
                 }
                 Log.i(TAG, "Guidance toggled: $guidanceRequested")
             },
             guidanceActive = guidanceRequested,
-            guidanceAvailable = locationPermissionGranted,
+            importedGpxName = importedGpxName,
+            importedGpxMilestoneCount = importedGpxMilestones.size,
+            onOpenGpxPreview = { gpxPreviewOpen = true },
+            onEditImportedGpx = {
+                importedGpxName = null
+                importedGpxMilestones = emptyList()
+                gpxImportToken++
+                activePlan = null
+                coordinator.invalidate()
+            },
             onComplexityChangeFinished = { finalComplexity ->
                 // Re-route only when the knob is released, not for every
                 // drag event. Use the gesture's final value directly so a
@@ -829,12 +935,15 @@ fun RouteScreen() {
                 complexity = finalComplexity
                 Log.i(TAG, "Ride complexity dial released: $finalComplexity")
                 activePlan?.let {
+                    // Keep imported GPX shaping points on every dial edit so
+                    // complexity changes the ride along the imported plan.
                     submitRoute(
-                        it.first,
-                        it.second,
+                        it.from,
+                        it.to,
                         finalComplexity,
                         maxRoadShare,
                         blockUnpaved,
+                        viaPoints = it.viaPoints,
                     )
                 }
             }
@@ -855,12 +964,15 @@ fun RouteScreen() {
                     .apply()
                 routeSettingsOpen = false
                 activePlan?.let {
+                    // Road-share and surface edits must re-use the same GPX
+                    // legs; otherwise Apply would silently discard them.
                     submitRoute(
-                        it.first,
-                        it.second,
+                        it.from,
+                        it.to,
                         complexity,
                         percent,
                         shouldBlockUnpaved,
+                        viaPoints = it.viaPoints,
                     )
                 }
             },
@@ -880,7 +992,51 @@ fun RouteScreen() {
             onDismiss = { savedRoutesOpen = false },
         )
     }
+
+    if (gpxPreviewOpen && importedGpxMilestones.isNotEmpty()) {
+        GpxRoutePreviewSheet(
+            routeName = importedGpxName ?: "Imported GPX",
+            milestones = importedGpxMilestones,
+            onFocusMilestone = { milestone ->
+                val map = mapRef.value ?: return@GpxRoutePreviewSheet
+                map.showGpxPreviewMarker(milestone.point.lat, milestone.point.lon)
+                val bottomPadding = mapView.height * 0.35
+                map.animateCamera(
+                    CameraUpdateFactory.newCameraPosition(
+                        CameraPosition.Builder()
+                            .target(LatLng(milestone.point.lat, milestone.point.lon))
+                            .zoom(14.5)
+                            .padding(0.0, 0.0, 0.0, bottomPadding)
+                            .build(),
+                    ),
+                    350,
+                )
+            },
+            onDismiss = {
+                gpxPreviewOpen = false
+                mapRef.value?.let { map ->
+                    map.hideGpxPreviewMarker()
+                    map.moveCamera(
+                        CameraUpdateFactory.newCameraPosition(
+                            CameraPosition.Builder(map.cameraPosition)
+                                .padding(0.0, 0.0, 0.0, 0.0)
+                                .build(),
+                        ),
+                    )
+                    routeResult?.let { map.fitBounds(it.routes) }
+                }
+            },
+        )
+    }
 }
+
+private fun coordinateLabel(point: GeoPoint): String =
+    "%.5f, %.5f".format(Locale.US, point.lat, point.lon)
+
+private fun milestoneEndpointLabel(milestone: GpxMilestone): String =
+    listOfNotNull(milestone.placeName, milestone.placeDetail?.takeIf(String::isNotBlank))
+        .joinToString(", ")
+        .ifBlank { coordinateLabel(milestone.point) }
 
 /**
  * Camera zoom for the current riding speed, in discrete bands so the map
@@ -896,842 +1052,23 @@ internal fun guidanceZoomFor(speedMps: Double): Double = when {
     else -> 12.5
 }
 
+/** Fixed camera zoom the crosshair lock uses; 12.5 keeps several blocks of
+ * street context visible while following. */
+private const val FOLLOW_ZOOM = 12.5
+
 /** Two resolved points within ~11 m count as the same place: routing them
  * yields a zero-edge path that cannot render as a line. */
 private fun samePlace(a: GHPoint, b: GHPoint): Boolean =
     abs(a.lat - b.lat) < 1e-4 && abs(a.lon - b.lon) < 1e-4
 
-internal fun complexityLabel(value: Float): String =
-    if (value < 0.5f) "Fastest" else "Curvy route ${value.roundToInt()}"
-
-/** Clicks per knob revolution; one click = one level = +1.0 complexity. */
-private const val KNOB_LEVELS_PER_REVOLUTION = 8
-
-/**
- * An endless click-stop rotary control: [KNOB_LEVELS_PER_REVOLUTION] detent
- * clicks per revolution, each clockwise click adding one complexity level
- * (+1.0). Winding past the eighth level keeps counting into the next
- * revolution (9, 10, ...); counter-clockwise rotation stops hard at zero.
- * Every crossed detent fires a short haptic tick, and release snaps to the
- * nearest level with a small spring settle.
- */
-@Composable
-private fun InfiniteComplexityKnob(
-    value: Float,
-    onValueChange: (Float) -> Unit,
-    onValueChangeFinished: (Float) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val latestValue by rememberUpdatedState(value)
-    val latestOnValueChange by rememberUpdatedState(onValueChange)
-    val latestOnFinished by rememberUpdatedState(onValueChangeFinished)
-    val view = LocalView.current
-    val scope = rememberCoroutineScope()
-    // The painted angle chases the committed value: exact finger tracking
-    // while dragging (snapTo), then a short mechanical bounce onto the
-    // clicked detent after release (animateTo).
-    val paintedLevels = remember { Animatable(value) }
-    var dragging by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        snapshotFlow { latestValue }.collect { committed ->
-            // External value changes (saved-route restore) must move the
-            // painted indicator even though no drag produced them.
-            if (!dragging && paintedLevels.value != committed) {
-                paintedLevels.animateTo(
-                    committed,
-                    spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                )
-            }
-        }
-    }
-    Canvas(
-        modifier = modifier
-            .size(92.dp)
-            .semantics {
-                contentDescription = "Ride complexity level ${value.roundToInt()}"
-            }
-            .pointerInput(Unit) {
-                var previousAngle = 0f
-                var gestureValue = 0f
-                fun hapticTick(level: Int) {
-                    // CLOCK_TICK is the platform's rotary-detent click; the
-                    // Fastest end stop gets the firmer VIRTUAL_KEY pulse.
-                    view.performHapticFeedback(
-                        if (level <= 0) HapticFeedbackConstants.VIRTUAL_KEY
-                        else HapticFeedbackConstants.CLOCK_TICK,
-                    )
-                }
-                detectDragGestures(
-                    onDragStart = { position ->
-                        dragging = true
-                        previousAngle = atan2(
-                            position.y - size.height / 2f,
-                            position.x - size.width / 2f,
-                        )
-                        gestureValue = latestValue
-                        scope.launch { paintedLevels.snapTo(gestureValue) }
-                    },
-                    onDragEnd = {
-                        dragging = false
-                        val snapped = gestureValue.roundToInt()
-                        if (snapped != gestureValue.toInt()) {
-                            // Release crossed one more detent than the drag
-                            // ticks announced: click that detent too.
-                            hapticTick(snapped)
-                        }
-                        gestureValue = snapped.toFloat()
-                        latestOnValueChange(gestureValue)
-                        latestOnFinished(gestureValue)
-                        scope.launch {
-                            paintedLevels.animateTo(
-                                snapped.toFloat(),
-                                spring(
-                                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                                    stiffness = Spring.StiffnessMedium,
-                                ),
-                            )
-                        }
-                    },
-                    onDragCancel = {
-                        dragging = false
-                        // Interrupted gesture: settle back onto a whole detent
-                        // instead of leaving a fractional level in state (no
-                        // re-route fires for cancelled gestures).
-                        gestureValue = gestureValue.roundToInt().toFloat()
-                        latestOnValueChange(gestureValue)
-                    },
-                    onDrag = { change, _ ->
-                        val angle = atan2(
-                            change.position.y - size.height / 2f,
-                            change.position.x - size.width / 2f,
-                        )
-                        var delta = angle - previousAngle
-                        if (delta > PI) delta -= (2.0 * PI).toFloat()
-                        if (delta < -PI) delta += (2.0 * PI).toFloat()
-                        previousAngle = angle
-                        val levelsPerRadian =
-                            KNOB_LEVELS_PER_REVOLUTION / (2.0 * PI).toFloat()
-                        val newValue = (gestureValue + delta * levelsPerRadian)
-                            .coerceAtLeast(0f)
-                        if (newValue.toInt() != gestureValue.toInt()) {
-                            hapticTick(newValue.toInt())
-                        }
-                        gestureValue = newValue
-                        latestOnValueChange(gestureValue)
-                        scope.launch { paintedLevels.snapTo(newValue) }
-                        change.consume()
-                    },
-                )
-            }
-    ) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val outerRadius = size.minDimension * 0.47f
-        val knobRadius = size.minDimension * 0.34f
-
-        drawCircle(Color(0x18000000), outerRadius, center + Offset(0f, 2.dp.toPx()))
-        drawCircle(Color(0xFFE7E7E7), outerRadius, center)
-        repeat(KNOB_LEVELS_PER_REVOLUTION) { index ->
-            val angle = Math.toRadians(-135.0 + index * 45.0)
-            val dotCenter = center + Offset(
-                (cos(angle) * outerRadius * 0.84).toFloat(),
-                (sin(angle) * outerRadius * 0.84).toFloat(),
-            )
-            val level = value.roundToInt().coerceAtLeast(0)
-            val activeDot = ((level % KNOB_LEVELS_PER_REVOLUTION) +
-                KNOB_LEVELS_PER_REVOLUTION) % KNOB_LEVELS_PER_REVOLUTION
-            drawCircle(
-                color = when {
-                    index == 0 && level <= 0 -> Color(0xFF249CF2)
-                    index == activeDot && level > 0 -> Color(0xFF249CF2)
-                    else -> Color(0xFF8A8A8A)
-                },
-                radius = 2.dp.toPx(),
-                center = dotCenter,
-            )
-        }
-        drawCircle(Color(0x22000000), knobRadius + 2.dp.toPx(), center + Offset(0f, 2.dp.toPx()))
-        drawCircle(Color(0xFFF7F7F7), knobRadius, center)
-        drawCircle(
-            Color(0xFFE0E0E0),
-            knobRadius,
-            center,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-
-        val indicatorAngle = Math.toRadians(
-            -135.0 + paintedLevels.value.toDouble() * (360.0 / KNOB_LEVELS_PER_REVOLUTION),
-        )
-        val indicatorStart = center + Offset(
-            (cos(indicatorAngle) * knobRadius * 0.48).toFloat(),
-            (sin(indicatorAngle) * knobRadius * 0.48).toFloat(),
-        )
-        val indicatorEnd = center + Offset(
-            (cos(indicatorAngle) * knobRadius * 0.78).toFloat(),
-            (sin(indicatorAngle) * knobRadius * 0.78).toFloat(),
-        )
-        drawLine(
-            color = Color(0xFF249CF2),
-            start = indicatorStart,
-            end = indicatorEnd,
-            strokeWidth = 4.dp.toPx(),
-            cap = StrokeCap.Round,
-        )
-    }
-}
-
-@Composable
-private fun SettingsCogIcon() {
-    Canvas(Modifier.size(20.dp)) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        repeat(8) { index ->
-            val angle = Math.toRadians(index * 45.0)
-            drawLine(
-                color = Color(0xFF616161),
-                start = center + Offset(
-                    (cos(angle) * size.minDimension * 0.28).toFloat(),
-                    (sin(angle) * size.minDimension * 0.28).toFloat(),
-                ),
-                end = center + Offset(
-                    (cos(angle) * size.minDimension * 0.43).toFloat(),
-                    (sin(angle) * size.minDimension * 0.43).toFloat(),
-                ),
-                strokeWidth = 3.dp.toPx(),
-                cap = StrokeCap.Round,
-            )
-        }
-        drawCircle(
-            color = Color(0xFF616161),
-            radius = size.minDimension * 0.29f,
-            center = center,
-            style = Stroke(width = 2.5.dp.toPx()),
-        )
-        drawCircle(Color(0xFF616161), size.minDimension * 0.08f, center)
-    }
-}
-
-@Composable
-private fun RouteSettingsDialog(
-    currentPercent: Float,
-    blockUnpaved: Boolean,
-    onDismiss: () -> Unit,
-    onApply: (Float, Boolean) -> Unit,
-) {
-    var draftPercent by remember(currentPercent) { mutableStateOf(currentPercent) }
-    var draftBlockUnpaved by remember(blockUnpaved) { mutableStateOf(blockUnpaved) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Route settings") },
-        text = {
-            Column(Modifier.fillMaxWidth()) {
-                Text(
-                    "Target maximum shared roads",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xFF8A000000),
-                )
-                Text(
-                    "${draftPercent.roundToInt()}%",
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 12.dp),
-                ) {
-                    RoadShareKnob(
-                        value = draftPercent,
-                        onValueChange = { draftPercent = it },
-                    )
-                }
-                Text(
-                    "Lower values ask routes to use more different roads. " +
-                        "Higher values allow more overlap. If the road network cannot meet the target, " +
-                            "the most distinct sensible route is still shown.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF8A000000),
-                )
-                HorizontalDivider(Modifier.padding(vertical = 16.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Block unpaved roads",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        Text(
-                            "Exclude roads tagged as unpaved, gravel, dirt, ground, grass, or sand.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF8A000000),
-                        )
-                    }
-                    Switch(
-                        checked = draftBlockUnpaved,
-                        onCheckedChange = { draftBlockUnpaved = it },
-                        modifier = Modifier.semantics {
-                            contentDescription = "Block unpaved roads"
-                        },
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onApply(draftPercent, draftBlockUnpaved) }) { Text("APPLY") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("CANCEL") }
-        },
-    )
-}
-
-/** Finite 10–90% dial with tactile-style 5% visual detents. */
-@Composable
-private fun RoadShareKnob(
-    value: Float,
-    onValueChange: (Float) -> Unit,
-) {
-    val latestOnValueChange by rememberUpdatedState(onValueChange)
-    Canvas(
-        modifier = Modifier
-            .size(150.dp)
-            .semantics {
-                contentDescription = "Maximum shared roads ${value.roundToInt()} percent"
-            }
-            .pointerInput(Unit) {
-                fun updateFrom(position: Offset) {
-                    var degrees = Math.toDegrees(
-                        atan2(
-                            position.y - size.height / 2f,
-                            position.x - size.width / 2f,
-                        ).toDouble()
-                    )
-                    if (degrees < 0.0) degrees += 360.0
-                    var sweep = (degrees - 135.0 + 360.0) % 360.0
-                    if (sweep > 270.0) sweep = if (sweep < 315.0) 270.0 else 0.0
-                    val raw = 10f + (sweep / 270.0 * 80.0).toFloat()
-                    latestOnValueChange((raw / 5f).roundToInt() * 5f)
-                }
-                detectDragGestures(
-                    onDragStart = { updateFrom(it) },
-                    onDrag = { change, _ ->
-                        updateFrom(change.position)
-                        change.consume()
-                    },
-                )
-            },
-    ) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val outerRadius = size.minDimension * 0.46f
-        val knobRadius = size.minDimension * 0.31f
-        val fraction = ((value.coerceIn(10f, 90f) - 10f) / 80f)
-
-        drawCircle(Color(0x16000000), outerRadius, center + Offset(0f, 2.dp.toPx()))
-        drawCircle(Color(0xFFEAEAEA), outerRadius, center)
-        repeat(17) { index ->
-            val angle = Math.toRadians(135.0 + index * (270.0 / 16.0))
-            val dot = center + Offset(
-                (cos(angle) * outerRadius * 0.84).toFloat(),
-                (sin(angle) * outerRadius * 0.84).toFloat(),
-            )
-            drawCircle(
-                color = if (index <= (fraction * 16f).roundToInt()) {
-                    Color(0xFF249CF2)
-                } else {
-                    Color(0xFF929292)
-                },
-                radius = if (index % 2 == 0) 2.4.dp.toPx() else 1.7.dp.toPx(),
-                center = dot,
-            )
-        }
-        drawCircle(Color(0x22000000), knobRadius + 2.dp.toPx(), center + Offset(0f, 2.dp.toPx()))
-        drawCircle(Color(0xFFF9F9F9), knobRadius, center)
-        drawCircle(
-            Color(0xFFD9D9D9),
-            knobRadius,
-            center,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-        val indicatorAngle = Math.toRadians(135.0 + fraction * 270.0)
-        drawLine(
-            color = Color(0xFF249CF2),
-            start = center + Offset(
-                (cos(indicatorAngle) * knobRadius * 0.45).toFloat(),
-                (sin(indicatorAngle) * knobRadius * 0.45).toFloat(),
-            ),
-            end = center + Offset(
-                (cos(indicatorAngle) * knobRadius * 0.78).toFloat(),
-                (sin(indicatorAngle) * knobRadius * 0.78).toFloat(),
-            ),
-            strokeWidth = 5.dp.toPx(),
-            cap = StrokeCap.Round,
-        )
-    }
-}
-
-/** Card width inside the swipeable route bar; edge padding centers the active card. */
-private val ROUTE_CARD_WIDTH = 220.dp
-private val ROUTE_CARD_HEIGHT = 48.dp
-
-/** 50 dp From/To row inside the panel (see RoutePlanSearchField). */
-private val SEARCH_FIELD_ROW_HEIGHT = 50.dp
-
-/**
- * Fixed panel-frame slot heights. Every panel state — idle, typing, route
- * success, error — is built from exactly these slots, so the panel's total
- * height, and with it the map viewport above, never changes with state.
- */
-private val ROUTE_STATUS_HEIGHT = 40.dp
-
-/** Knob row (6 + 100 + 6 dp) plus the fixed status row. */
-private val RIDE_CONTROLS_HEIGHT = 112.dp + ROUTE_STATUS_HEIGHT
-
-/** Reserved carousel slot; equals the pager height in RouteCarouselBar. */
-private val CAROUSEL_SLOT_HEIGHT = ROUTE_CARD_HEIGHT + 12.dp
-
-/** Carousel + divider + ride controls + START row (2 + 40 + 10), planning mode. */
-private val PANEL_CONTENT_HEIGHT = CAROUSEL_SLOT_HEIGHT + RIDE_CONTROLS_HEIGHT +
-    SEARCH_FIELD_ROW_HEIGHT * 2 + 52.dp + 3.dp
-
-/** Ride mode hides the two planner field rows, so the panel shrinks by them. */
-private val RIDE_PANEL_CONTENT_HEIGHT = PANEL_CONTENT_HEIGHT -
-    SEARCH_FIELD_ROW_HEIGHT * 2 - 3.dp
-
-/**
- * Thin horizontal bar on top of the route-planning panel: one card per
- * proposed route in a snap-scrolling carousel. The centered card IS the
- * selection — swiping left/right re-centers another card and selects that
- * route on the map; selecting a route from the map (line tap) scrolls its
- * card into the middle instead.
- */
-@Composable
-private fun RouteCarouselBar(
-    routes: List<ResponsePath>,
-    selectedIndex: Int,
-    onSelectRoute: (Int) -> Unit,
-    onSaveRoute: suspend (ResponsePath) -> Boolean,
-    modifier: Modifier = Modifier,
-) {
-    if (routes.isEmpty()) return
-    val view = LocalView.current
-    val pagerState = rememberPagerState(pageCount = { routes.size })
-
-    // Settling a swipe slots that card into the middle: tick a haptic detent
-    // and select the matching route on the map. Equal re-emissions are
-    // ignored so external selection changes never echo back through here.
-    LaunchedEffect(pagerState, routes.size) {
-        var lastSettledPage = pagerState.settledPage
-        snapshotFlow { pagerState.settledPage }.collect { page ->
-            val changedPage = page != lastSettledPage
-            lastSettledPage = page
-            if (changedPage) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                onSelectRoute(page.coerceIn(0, routes.lastIndex))
-            }
-        }
-    }
-    // External selection (map tap, fresh result) animates the matching card
-    // into the middle. Skipped while a gesture is driving the pager.
-    LaunchedEffect(pagerState, selectedIndex, routes.size) {
-        val target = selectedIndex.coerceIn(0, routes.lastIndex)
-        if (!pagerState.isScrollInProgress && target != pagerState.settledPage) {
-            pagerState.animateScrollToPage(target)
-        }
-    }
-    BoxWithConstraints(modifier.fillMaxWidth()) {
-        val edgePadding = ((maxWidth - ROUTE_CARD_WIDTH) / 2f).coerceAtLeast(0.dp)
-        HorizontalPager(
-            state = pagerState,
-            contentPadding = PaddingValues(horizontal = edgePadding),
-            pageSpacing = 10.dp,
-            // Slight overshoot before settling: the incoming card dips past
-            // center and pops back — a physical slot-into-place feel.
-            flingBehavior = PagerDefaults.flingBehavior(
-                state = pagerState,
-                snapAnimationSpec = spring(
-                    dampingRatio = Spring.DampingRatioLowBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(ROUTE_CARD_HEIGHT + 12.dp),
-        ) { page ->
-            RouteCard(
-                path = routes[page],
-                routeIndex = page,
-                selected = page == pagerState.targetPage,
-                onSelectRoute = onSelectRoute,
-                onSaveRoute = { onSaveRoute(routes[page]) },
-                modifier = Modifier
-                    .graphicsLayer {
-                        // Depth cue while swiping: neighbours shrink and fade,
-                        // so the landing card visibly pops into place.
-                        val distanceFromCenter =
-                            pagerState.getOffsetDistanceInPages(page).absoluteValue
-                                .coerceIn(0f, 1f)
-                        scaleX = 1f - 0.12f * distanceFromCenter
-                        scaleY = 1f - 0.12f * distanceFromCenter
-                        alpha = 1f - 0.4f * distanceFromCenter
-                    }
-                    .width(ROUTE_CARD_WIDTH)
-                    .height(ROUTE_CARD_HEIGHT),
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun RouteCard(
-    path: ResponsePath,
-    routeIndex: Int,
-    selected: Boolean,
-    onSelectRoute: (Int) -> Unit,
-    onSaveRoute: suspend () -> Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val routeColor = Color(android.graphics.Color.parseColor(routeColorHex(routeIndex)))
-    val background by animateColorAsState(
-        targetValue = if (selected) routeColor else Color.White,
-        animationSpec = tween(durationMillis = 150),
-        label = "routeCardBackground",
-    )
-    val foreground by animateColorAsState(
-        targetValue = if (selected) Color.White else Color(0xFF303030),
-        animationSpec = tween(durationMillis = 150),
-        label = "routeCardForeground",
-    )
-    val view = LocalView.current
-    var saveBubbleShown by remember { mutableStateOf(false) }
-    val metrics = "${formatRouteDuration(path.time)} · ${formatRouteDistance(path.distance)}"
-    Surface(
-        color = background,
-        shape = RoundedCornerShape(12.dp),
-        shadowElevation = if (selected) 3.dp else 1.dp,
-        modifier = modifier
-            .border(
-                width = 1.dp,
-                color = if (selected) Color.Transparent else routeColor.copy(alpha = 0.45f),
-                shape = RoundedCornerShape(12.dp),
-            )
-            .combinedClickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { onSelectRoute(routeIndex) },
-                onLongClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    saveBubbleShown = true
-                },
-            )
-            .semantics {
-                contentDescription = "Route ${routeIndex + 1}: $metrics"
-            },
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 12.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(if (selected) Color.White else routeColor, CircleShape),
-            )
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text(
-                    text = "Route ${routeIndex + 1}",
-                    color = foreground,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                )
-                Text(
-                    text = metrics,
-                    color = foreground.copy(alpha = if (selected) 0.92f else 0.72f),
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                )
-            }
-        }
-        SaveRouteBubble(
-            visible = saveBubbleShown,
-            metrics = metrics,
-            onSave = onSaveRoute,
-            onDismiss = { saveBubbleShown = false },
-        )
-    }
-}
-
-/**
- * Bottom route-planning panel styled after Organic Maps, with a FIXED frame:
- * the carousel slot, the 50 dp From/To rows, the ride-controls region and
- * the START button. Fields collapse in ride mode. The panel is anchored to
- * the bottom (no typing) and the carousel slot stays reserved while no route
- * exists, so nothing outside the ride-controls region ever moves. The map
- * viewport ends where this panel begins.
- */
-@Composable
-private fun RoutePlanPanel(
-    fromText: String,
-    onFromChange: (String) -> Unit,
-    onFromPicked: (GeocodeResult) -> Unit,
-    toText: String,
-    onToChange: (String) -> Unit,
-    onToPicked: (GeocodeResult) -> Unit,
-    geocodeController: GeocodeController,
-    state: RouteUiState,
-    onSelectRoute: (Int) -> Unit,
-    onRoute: () -> Unit,
-    complexity: Float,
-    onComplexityChange: (Float) -> Unit,
-    onComplexityChangeFinished: (Float) -> Unit,
-    onRouteSettings: () -> Unit,
-    onOpenSavedRoutes: () -> Unit,
-    onSaveRoute: suspend (ResponsePath) -> Boolean,
-    onToggleGuidance: () -> Unit,
-    guidanceActive: Boolean,
-    onImportGpx: () -> Unit,
-    gpxImportError: String?,
-    onDismissGpxError: () -> Unit,
-    guidanceAvailable: Boolean,
-) {
-    val focusManager = LocalFocusManager.current
-    val fromSearch = rememberRouteFieldSearchState()
-    val toSearch = rememberRouteFieldSearchState()
-    Surface(
-        color = Color(0xFFF5F5F5),
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        shadowElevation = 6.dp,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(min = if (guidanceActive) 0.dp else PANEL_CONTENT_HEIGHT)
-        ) {
-            // In ride mode the whole planner UI hides: the top HUD carries the
-            // next turn and the NavigationDataBar carries speed, ETA, distance,
-            // pace delta, and the END button. The rider cannot edit the plan
-            // mid-ride, and the map gets the freed screen space.
-            if (guidanceActive) return@Column
-            RoutePlanSearchField(
-                label = "From",
-                hint = "Route from",
-                icon = { StartDotIcon() },
-                value = fromText,
-                onValueChange = onFromChange,
-                onResultPicked = onFromPicked,
-                controller = geocodeController,
-                searchState = fromSearch,
-                modifier = Modifier.fillMaxWidth()
-            )
-            HorizontalDivider(
-                color = Color(0xFF1E000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(start = 40.dp)
-            )
-            RoutePlanSearchField(
-                label = "To",
-                hint = "Route to",
-                icon = { FinishFlagIcon() },
-                value = toText,
-                onValueChange = onToChange,
-                onResultPicked = onToPicked,
-                controller = geocodeController,
-                searchState = toSearch,
-                modifier = Modifier.fillMaxWidth()
-            )
-            HorizontalDivider(
-                color = Color(0xFF1E000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(start = 40.dp)
-            )
-            // Fixed ride-controls region: while a field is searching, its
-            // suggestions replace the knob and status rows inside this box;
-            // nothing outside the box ever moves.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = RIDE_CONTROLS_HEIGHT)
-            ) {
-                val activeSearch = fromSearch.takeIf { it.active } ?: toSearch.takeIf { it.active }
-                if (activeSearch != null) {
-                    RoutePlanSearchResults(
-                        state = activeSearch,
-                        maxHeight = RIDE_CONTROLS_HEIGHT,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                } else {
-                    Column {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp)
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    text = "Ride complexity",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF8A000000)
-                                )
-                                Text(
-                                    text = complexityLabel(complexity),
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    text = "Turn clockwise for longer, curvier roads",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF8A000000)
-                                )
-                            }
-                            // 164 dp wide so the 48 dp corner buttons sit
-                            // clear of the 92 dp knob circle: the buttons'
-                            // inner corners stay outside the knob ring.
-                            Box(Modifier.size(width = 164.dp, height = 100.dp)) {
-                                IconButton(
-                                    onClick = onImportGpx,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "Import GPX route" },
-                                ) {
-                                    ImportIcon()
-                                }
-                                InfiniteComplexityKnob(
-                                    value = complexity,
-                                    onValueChange = onComplexityChange,
-                                    onValueChangeFinished = onComplexityChangeFinished,
-                                    modifier = Modifier.align(Alignment.Center),
-                                )
-                                IconButton(
-                                    onClick = onRouteSettings,
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "Route settings" },
-                                ) {
-                                    SettingsCogIcon()
-                                }
-                                IconButton(
-                                    onClick = onOpenSavedRoutes,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "Saved routes" },
-                                ) {
-                                    BookmarkIcon(filled = false)
-                                }
-                            }
-                        }
-                        RouteStatusSlot(state)
-                    }
-                }
-            }
-            Button(
-                onClick = {
-                    focusManager.clearFocus()
-                    if (state is RouteUiState.Success) {
-                        onToggleGuidance()
-                    } else {
-                        onRoute()
-                    }
-                },
-                enabled = state !is RouteUiState.Loading,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (guidanceActive) Color(0xFF0D2137) else Color(0xFF249CF2),
-                    contentColor = Color.White,
-                    disabledContainerColor = Color(0xFF9ECDF5),
-                    disabledContentColor = Color(0xFFE0E0E0)
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)
-            ) {
-                Text(
-                    when {
-                        guidanceActive -> "STOP GUIDANCE"
-                        state is RouteUiState.Success -> "RIDE"
-                        else -> "START"
-                    },
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-        }
-    }
-
-    if (gpxImportError != null) {
-        AlertDialog(
-            onDismissRequest = onDismissGpxError,
-            title = { Text("Import failed") },
-            text = { Text(gpxImportError) },
-            confirmButton = {
-                TextButton(onClick = onDismissGpxError) { Text("OK") }
-            },
-        )
-    }
-}
-
-/**
- * Fixed-height status row between the ride controls and START: the selected
- * route's ETA and distance on success, the failure message on error, empty
- * otherwise. The constant size keeps the panel frame identical in every
- * state, so the START button never moves.
- */
-@Composable
-private fun RouteStatusSlot(state: RouteUiState) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .height(ROUTE_STATUS_HEIGHT)
-    ) {
-        (state as? RouteUiState.Success)?.let { success ->
-            val selectedPath = success.result.routes.getOrNull(success.selectedIndex)
-                ?: success.result.routes.first()
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp)
-            ) {
-                Text(
-                    text = formatRouteDuration(selectedPath.time),
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = formatRouteDistance(selectedPath.distance),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Color(0xFF8A000000)
-                )
-            }
-        }
-        (state as? RouteUiState.Error)?.let {
-            Text(
-                text = it.message,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.CenterStart)
-                    .padding(horizontal = 16.dp)
-            )
-        }
-    }
+/** Closed saved rides need shaping points or GraphHopper sees start-to-start. */
+internal fun savedRouteViaPoints(saved: SavedRoute): List<GHPoint> {
+    val (from, to) = saved.endpoints
+    if (!samePlace(GHPoint(from.lat, from.lon), GHPoint(to.lat, to.lon))) return emptyList()
+    return GpxGeometry.routingPoints(saved.decodedPoints())
+        .drop(1)
+        .dropLast(1)
+        .map { GHPoint(it.lat, it.lon) }
 }
 
 /**
@@ -1763,22 +1100,31 @@ private fun ZoomPill(
 }
 
 /**
- * 48 dp round white button that re-centres the camera on the rider's
- * position dot. Sits at the bottom-right of the map, below the zoom pill.
+ * 48 dp round button that locks the camera on the rider's position. While
+ * active it tints blue and recentres on every fix; any manual map gesture
+ * releases the lock. Sits at the bottom-right of the map, below the zoom pill.
  */
 @Composable
 private fun CentreOnMeButton(
     visible: Boolean,
+    active: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (!visible) return
+    val backgroundColor by animateColorAsState(
+        targetValue = if (active) Color(0xFF249CF2) else Color.White,
+        label = "followMeBackground",
+    )
     Box(
         modifier = modifier
             .size(48.dp)
             .clip(RoundedCornerShape(24.dp))
-            .background(Color.White)
-            .semantics { contentDescription = "Centre on me" }
+            .background(backgroundColor)
+            .semantics {
+                contentDescription =
+                    if (active) "Following your location; tap to release" else "Centre on me"
+            }
             .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
@@ -1786,7 +1132,7 @@ private fun CentreOnMeButton(
             // Crosshair: dot ring plus four ticks, like the repo's other
             // hand-drawn map icons.
             val stroke = 2.dp.toPx()
-            val color = Color(0xFF249CF2)
+            val color = if (active) Color.White else Color(0xFF249CF2)
             drawCircle(color = color, radius = 5.dp.toPx(), style = Stroke(stroke))
             drawCircle(color = color, radius = 1.8.dp.toPx())
             val tick = 4.dp.toPx()
@@ -1837,7 +1183,7 @@ private fun ZoomPillCell(plus: Boolean, onClick: () -> Unit) {
 
 /** Route start marker: filled #1E96F0 dot with a small white inner circle. */
 @Composable
-private fun StartDotIcon() {
+internal fun StartDotIcon() {
     Canvas(Modifier.size(24.dp)) {
         drawCircle(color = Color(0xFF1E96F0), radius = size.minDimension / 2f, center = center)
         drawCircle(color = Color.White, radius = 5.5.dp.toPx(), center = center)
@@ -1846,7 +1192,7 @@ private fun StartDotIcon() {
 
 /** Route finish marker: white checkered flag (~20x16dp) with a dark outline. */
 @Composable
-private fun FinishFlagIcon() {
+internal fun FinishFlagIcon() {
     Canvas(Modifier.size(24.dp)) {
         val left = 2.dp.toPx()
         val top = 4.dp.toPx()

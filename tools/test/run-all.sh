@@ -168,6 +168,8 @@ pull_internal_reports() {
 
 pull_internal_reports fuzz "$REPORT_DIR/fuzz"
 pull_internal_reports perf.json "$REPORT_DIR"
+[[ -s "$REPORT_DIR/perf.json" ]] || fail \
+    "PerfSmokeTest did not leave $REPORT_DIR/perf.json; cross-run performance verification cannot run"
 
 # Cross-run performance drift gate. The app package is wiped after every
 # connected task, so on-device history cannot survive a run; the durable
@@ -175,9 +177,8 @@ pull_internal_reports perf.json "$REPORT_DIR"
 # measured metrics to perf.history.jsonl and compares against the most
 # recent previous entry. Delete that file to re-baseline after a deliberate
 # slowdown (e.g. graph rebuild).
-if [[ -s "$REPORT_DIR/perf.json" ]]; then
-    DRIFT_FACTORS='{"coldRouteMs":2.5,"warmRouteMs":1.75,"curveRouteMs":1.75,"geocoderLoadMs":2.0,"queryMs":2.0}'
-    python3 - "$REPORT_DIR/perf.json" "$PERF_HISTORY" "$DRIFT_FACTORS" <<'PY'
+DRIFT_FACTORS='{"coldRouteMs":2.5,"warmRouteMs":1.75,"curveRouteMs":1.75,"geocoderLoadMs":2.0,"queryMs":2.0}'
+python3 - "$REPORT_DIR/perf.json" "$PERF_HISTORY" "$DRIFT_FACTORS" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -214,7 +215,6 @@ with history_path.open("a") as handle:
     handle.write(json.dumps(entry) + "\n")
 print(f"OK: perf drift check against {len(history)} prior entr(y/ies); baseline appended.")
 PY
-fi
 
 if command -v jq >/dev/null 2>&1; then
     while IFS= read -r report; do

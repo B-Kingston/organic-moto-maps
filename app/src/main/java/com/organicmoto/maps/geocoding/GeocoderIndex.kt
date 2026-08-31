@@ -14,7 +14,9 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.sqrt
 
 private const val TAG = "OrganicMoto.GeocoderIndex"
 
@@ -27,6 +29,13 @@ private const val TAG = "OrganicMoto.GeocoderIndex"
  * so concurrent queries never share mutable buffer state.
  */
 class GeocoderIndex private constructor() {
+
+    data class ReverseGeocodeResult(
+        val name: String,
+        val detail: String,
+        val lat: Double,
+        val lon: Double,
+    )
 
     private lateinit var state: State
 
@@ -153,6 +162,73 @@ class GeocoderIndex private constructor() {
             throw IllegalStateException("corrupt geocoder index: doc $id has unknown type $type")
         }
         return type
+    }
+
+    /**
+     * Resolves several route points in one index pass. The index deliberately
+     * has no spatial tree, so batching is important: a GPX preview pays one
+     * linear scan instead of one scan per milestone. Only the winning records
+     * are fully decoded, keeping the scan allocation-free.
+     */
+    fun reverseGeocode(points: List<Pair<Double, Double>>): List<ReverseGeocodeResult?> {
+        if (points.isEmpty()) return emptyList()
+        val bestPoi = IntArray(points.size) { -1 }
+        val bestStreet = IntArray(points.size) { -1 }
+        val bestLocality = IntArray(points.size) { -1 }
+        val poiDistance = DoubleArray(points.size) { Double.POSITIVE_INFINITY }
+        val streetDistance = DoubleArray(points.size) { Double.POSITIVE_INFINITY }
+        val localityDistance = DoubleArray(points.size) { Double.POSITIVE_INFINITY }
+        val lonScales = DoubleArray(points.size) { index ->
+            cos(Math.toRadians(points[index].first)).coerceAtLeast(0.1)
+        }
+        val briefBuffer = buf()
+
+        for (docId in 0 until docCount) {
+            val offset = docOffset(docId)
+            checkRead(briefBuffer, offset, 11)
+            val type = briefBuffer.get(offset).toInt() and 0xFF
+            if (type !in TYPE_POI..TYPE_LOCALITY) {
+                throw IllegalStateException("corrupt geocoder index: doc $docId has unknown type $type")
+            }
+            val lat = briefBuffer.getInt(offset + 3) / 1e7
+            val lon = briefBuffer.getInt(offset + 7) / 1e7
+            for (pointIndex in points.indices) {
+                val target = points[pointIndex]
+                val dLat = lat - target.first
+                val dLon = (lon - target.second) * lonScales[pointIndex]
+                val distanceM = sqrt(dLat * dLat + dLon * dLon) * 111_195.0
+                when (type) {
+                    TYPE_POI -> if (distanceM < poiDistance[pointIndex]) {
+                        poiDistance[pointIndex] = distanceM
+                        bestPoi[pointIndex] = docId
+                    }
+                    TYPE_STREET -> if (distanceM < streetDistance[pointIndex]) {
+                        streetDistance[pointIndex] = distanceM
+                        bestStreet[pointIndex] = docId
+                    }
+                    TYPE_LOCALITY -> if (distanceM < localityDistance[pointIndex]) {
+                        localityDistance[pointIndex] = distanceM
+                        bestLocality[pointIndex] = docId
+                    }
+                }
+            }
+        }
+
+        return points.indices.map { index ->
+            val locality = bestLocality[index].takeIf { it >= 0 }?.let(::doc)
+            val street = bestStreet[index].takeIf { it >= 0 }?.let(::doc)
+            val poi = bestPoi[index].takeIf { it >= 0 }?.let(::doc)
+            val chosen = when {
+                poi != null && poiDistance[index] <= 250.0 -> poi
+                street != null && streetDistance[index] <= 2_000.0 -> street
+                locality != null && localityDistance[index] <= 50_000.0 -> locality
+                else -> null
+            } ?: return@map null
+            val city = chosen.cityName.ifBlank { locality?.name.orEmpty() }
+                .takeUnless { it.equals(chosen.name, ignoreCase = true) }
+                .orEmpty()
+            ReverseGeocodeResult(chosen.name, city, chosen.lat, chosen.lon)
+        }
     }
 
     /**

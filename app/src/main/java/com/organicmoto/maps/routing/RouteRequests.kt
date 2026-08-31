@@ -19,8 +19,9 @@ internal fun buildGhRequest(
     maxRoadShare: Double,
     attempt: Int,
     previousEdgeIds: Set<Int>,
+    viaPoints: List<GHPoint> = emptyList(),
 ): GHRequest {
-    val request = GHRequest(from, to)
+    val request = GHRequest(listOf(from) + viaPoints + to)
         .setProfile(MOTORCYCLE_PROFILE)
         .setPathDetails(listOf("edge_id"))
     request.putHint(Parameters.CH.DISABLE, true)
@@ -35,6 +36,10 @@ internal fun buildGhRequest(
             MOTO_PREVIOUS_EDGE_PENALTY,
             AlternativePolicy.previousRoadPenalty(maxRoadShare, detent, attempt),
         )
+        // GraphHopper's alternative-route algorithm only supports two-point
+        // requests. Imported GPX rides use the normal flexible algorithm so
+        // every via point becomes a routed leg with turn instructions.
+        if (viaPoints.isNotEmpty()) return request
         request.setAlgorithm(Parameters.Algorithms.ALT_ROUTE)
         request.putHint(
             Parameters.Algorithms.AltRoute.MAX_PATHS,

@@ -108,7 +108,8 @@ dependencies {
     implementation(libs.slf4j.android)
 
     implementation(platform(libs.compose.bom))
-    testImplementation("net.sf.kxml:kxml2:2.3.0")
+    testImplementation(libs.kxml)
+    androidTestImplementation(platform(libs.compose.bom))
     debugImplementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
@@ -117,6 +118,7 @@ dependencies {
 
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.kotlinx.coroutines.android)
 
     // Saved-route storage tests: pure JVM suites for the codec/projection/

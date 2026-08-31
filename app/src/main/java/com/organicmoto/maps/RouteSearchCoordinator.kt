@@ -30,6 +30,7 @@ data class RouteParams(
     val maxRoadShare: Double,
     val blockUnpaved: Boolean,
     val preferredGeometry: String? = null,
+    val viaPoints: List<GHPoint> = emptyList(),
 )
 
 sealed interface RouteOutcome {
