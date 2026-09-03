@@ -1,5 +1,6 @@
 package com.organicmoto.maps.ui
 
+import android.Manifest
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalDensity
@@ -11,12 +12,19 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.test.rule.GrantPermissionRule
 import com.organicmoto.maps.RouteScreen
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
 class FontScaleTest {
+
+    @get:Rule
+    val permissionRule: GrantPermissionRule = GrantPermissionRule.grant(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+    )
 
     @get:Rule
     val composeRule = createComposeRule()

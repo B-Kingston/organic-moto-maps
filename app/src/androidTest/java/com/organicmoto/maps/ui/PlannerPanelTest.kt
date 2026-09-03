@@ -1,6 +1,8 @@
 package com.organicmoto.maps.ui
 
+import android.Manifest
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -10,7 +12,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.rule.GrantPermissionRule
+import com.organicmoto.maps.CAROUSEL_SLOT_HEIGHT
 import com.organicmoto.maps.MainActivity
+import com.organicmoto.maps.MapRouteCountKey
 import com.organicmoto.maps.RouteUiStateKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -20,6 +25,12 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class PlannerPanelTest {
+
+    @get:Rule
+    val permissionRule: GrantPermissionRule = GrantPermissionRule.grant(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+    )
 
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
@@ -36,6 +47,27 @@ class PlannerPanelTest {
         assertTrue(bounds.right <= root.right)
         assertTrue(bounds.top >= root.top)
         assertTrue(bounds.bottom <= root.bottom)
+    }
+
+    @Test
+    fun planningActionsFormAReachableVerticalPill() {
+        val root = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
+        val import = composeRule.onNodeWithContentDescription("Import GPX route")
+            .fetchSemanticsNode().boundsInRoot
+        val settings = composeRule.onNodeWithContentDescription("Route settings")
+            .fetchSemanticsNode().boundsInRoot
+        val saved = composeRule.onNodeWithContentDescription("Saved routes")
+            .fetchSemanticsNode().boundsInRoot
+        val zoomIn = composeRule.onNodeWithContentDescription("Zoom in")
+            .fetchSemanticsNode().boundsInRoot
+
+        assertTrue(import.top < settings.top)
+        assertTrue(settings.top < saved.top)
+        assertTrue(import.left >= root.center.x)
+        assertEquals(import.width, zoomIn.width, 1f)
+        assertEquals(import.right, zoomIn.right, 1f)
+        assertTrue(saved.right <= root.right)
+        assertTrue(saved.bottom <= root.bottom)
     }
 
     @Test
@@ -65,7 +97,14 @@ class PlannerPanelTest {
 
     @Test(timeout = 300_000)
     fun validCoordinatesKeepPanelFrameFixedAcrossRouting() {
+        // Routeless frame contract: the panel is bottom-anchored, so START
+        // and the From/To rows sit at the same spot in every state that has
+        // no route candidates (idle, typing, loading, error).
         val idleBounds = composeRule.onNodeWithText("START").fetchSemanticsNode().boundsInRoot
+        val idleFromTop = composeRule.onNodeWithContentDescription("From")
+            .fetchSemanticsNode().boundsInRoot.top
+        val idleMapBounds = composeRule.onNode(SemanticsMatcher.keyIsDefined(MapRouteCountKey))
+            .fetchSemanticsNode().boundsInRoot
         composeRule.onNodeWithContentDescription("From").performTextInput("-27.4698,153.0251")
         composeRule.onNodeWithContentDescription("To").performTextInput("-27.3353,152.7720")
         composeRule.onNodeWithText("START").performClick()
@@ -83,10 +122,18 @@ class PlannerPanelTest {
         // The waitUntil above can only exit when a success frame is observed,
         // so asserting anything weaker here would be unreachable-false.
         assertTrue(observedSuccess)
+        // Success swaps the frame: the carousel bar (one card per candidate)
+        // appears above the fields. The panel grows upward only: START and
+        // the From/To rows never move, and the panel's top edge — the map
+        // viewport's bottom — rises by exactly the carousel slot height.
+        val carouselPx = with(composeRule.density) { CAROUSEL_SLOT_HEIGHT.toPx() }
         val successBounds = composeRule.onNodeWithText("RIDE").fetchSemanticsNode().boundsInRoot
-        assertEquals(idleBounds.left, successBounds.left, 1f)
-        assertEquals(idleBounds.right, successBounds.right, 1f)
-        assertEquals(idleBounds.top, successBounds.top, 1f)
-        assertEquals(idleBounds.bottom, successBounds.bottom, 1f)
+        val fromBounds = composeRule.onNodeWithContentDescription("From")
+            .fetchSemanticsNode().boundsInRoot
+        val successMapBounds = composeRule.onNode(SemanticsMatcher.keyIsDefined(MapRouteCountKey))
+            .fetchSemanticsNode().boundsInRoot
+        assertEquals(idleBounds, successBounds)
+        assertEquals(idleFromTop, fromBounds.top, 1f)
+        assertEquals(carouselPx, idleMapBounds.bottom - successMapBounds.bottom, 1f)
     }
 }

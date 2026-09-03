@@ -66,26 +66,95 @@ import kotlin.math.absoluteValue
 /** Card width inside the swipeable route bar; edge padding centers the active card. */
 private val ROUTE_CARD_WIDTH = 220.dp
 private val ROUTE_CARD_HEIGHT = 48.dp
+/** Shared planner surface color used by fields and their result extension. */
+internal val ROUTE_PANEL_COLOR = Color(0xFFF5F5F5)
 
 /** 50 dp From/To row inside the panel (see RoutePlanSearchField). */
 private val SEARCH_FIELD_ROW_HEIGHT = 50.dp
 
 /**
- * Fixed panel-frame slot heights. Every panel state — idle, typing, route
- * success, error — is built from exactly these slots, so the panel's total
- * height, and with it the map viewport above, never changes with state.
+ * Panel-frame slot heights. Every routeless panel state — idle, typing,
+ * loading, error — is built from exactly these slots, so the panel's total
+ * height never changes with state until route candidates exist.
  */
 private val ROUTE_STATUS_HEIGHT = 40.dp
 
 /** Knob row (6 + 100 + 6 dp) plus the fixed status row. */
 private val RIDE_CONTROLS_HEIGHT = 112.dp + ROUTE_STATUS_HEIGHT
 
-/** Reserved carousel slot; equals the pager height in RouteCarouselBar. */
-private val CAROUSEL_SLOT_HEIGHT = ROUTE_CARD_HEIGHT + 12.dp
+/** Carousel slot; equals the pager height in RouteCarouselBar. Test seam. */
+internal val CAROUSEL_SLOT_HEIGHT = ROUTE_CARD_HEIGHT + 12.dp
 
-/** Carousel + divider + ride controls + accessible action row (2 + 48 + 10). */
-private val PANEL_CONTENT_HEIGHT = CAROUSEL_SLOT_HEIGHT + RIDE_CONTROLS_HEIGHT +
+/** Ride controls + 50 dp From/To rows + START action row (2 + 48 + 10) + divider. */
+private val BASE_PANEL_HEIGHT = RIDE_CONTROLS_HEIGHT +
     SEARCH_FIELD_ROW_HEIGHT * 2 + 60.dp + 3.dp
+
+/**
+ * Compact map-side action rail for the three less-frequent planning actions.
+ * It stays in the upper-right reach zone instead of crowding the complexity
+ * dial, while each cell remains a full 48 dp touch target.
+ */
+@Composable
+internal fun RouteActionsPill(
+    onImportGpx: () -> Unit,
+    onRouteSettings: () -> Unit,
+    onOpenSavedRoutes: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(28.dp)
+    Surface(
+        color = Color.White.copy(alpha = 0.94f),
+        shape = shape,
+        shadowElevation = 5.dp,
+        modifier = modifier
+            .width(48.dp)
+            .border(1.dp, Color(0x22000000), shape),
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(vertical = 4.dp),
+        ) {
+            RouteActionsPillButton(
+                contentDescription = "Import GPX route",
+                onClick = onImportGpx,
+            ) { ImportIcon() }
+            HorizontalDivider(
+                color = Color(0x1A000000),
+                thickness = 1.dp,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
+            RouteActionsPillButton(
+                contentDescription = "Route settings",
+                onClick = onRouteSettings,
+            ) { SettingsCogIcon() }
+            HorizontalDivider(
+                color = Color(0x1A000000),
+                thickness = 1.dp,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
+            RouteActionsPillButton(
+                contentDescription = "Saved routes",
+                onClick = onOpenSavedRoutes,
+            ) { BookmarkIcon(filled = false) }
+        }
+    }
+}
+
+@Composable
+private fun RouteActionsPillButton(
+    contentDescription: String,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(48.dp)
+            .semantics { this.contentDescription = contentDescription },
+    ) {
+        icon()
+    }
+}
 
 /**
  * Thin horizontal bar on top of the route-planning panel: one card per
@@ -256,20 +325,23 @@ private fun RouteCard(
 }
 
 /**
- * Bottom route-planning panel styled after Organic Maps, with a FIXED frame:
- * the carousel slot, the 50 dp From/To rows, the ride-controls region and
- * the START button. Fields collapse in ride mode. The panel is anchored to
- * the bottom (no typing) and the carousel slot stays reserved while no route
- * exists, so nothing outside the ride-controls region ever moves. The map
- * viewport ends where this panel begins.
+ * Bottom route-planning panel styled after Organic Maps: the 50 dp From/To
+ * rows, the ride-controls region and the START button. Fields collapse in
+ * ride mode. The panel is anchored to the bottom. Routeless states share one
+ * fixed frame; a successful search adds the carousel bar above the fields.
+ * The map viewport ends where this panel begins.
  */
 @Composable
 internal fun RoutePlanPanel(
     fromText: String,
+    fromResolved: Boolean,
     onFromChange: (String) -> Unit,
+    onEditFrom: () -> Unit,
     onFromPicked: (GeocodeResult) -> Unit,
     toText: String,
+    toResolved: Boolean,
     onToChange: (String) -> Unit,
+    onEditTo: () -> Unit,
     onToPicked: (GeocodeResult) -> Unit,
     geocodeController: GeocodeController,
     state: RouteUiState,
@@ -278,12 +350,9 @@ internal fun RoutePlanPanel(
     complexity: Float,
     onComplexityChange: (Float) -> Unit,
     onComplexityChangeFinished: (Float) -> Unit,
-    onRouteSettings: () -> Unit,
-    onOpenSavedRoutes: () -> Unit,
     onSaveRoute: suspend (ResponsePath) -> Boolean,
     onToggleGuidance: () -> Unit,
     guidanceActive: Boolean,
-    onImportGpx: () -> Unit,
     gpxImportError: String?,
     onDismissGpxError: () -> Unit,
     importedGpxName: String?,
@@ -295,7 +364,7 @@ internal fun RoutePlanPanel(
     val fromSearch = rememberRouteFieldSearchState()
     val toSearch = rememberRouteFieldSearchState()
     Surface(
-        color = Color(0xFFF5F5F5),
+        color = ROUTE_PANEL_COLOR,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         shadowElevation = 6.dp,
         modifier = Modifier.fillMaxWidth()
@@ -303,31 +372,27 @@ internal fun RoutePlanPanel(
         Column(
             Modifier
                 .fillMaxWidth()
-                .heightIn(min = if (guidanceActive) 0.dp else PANEL_CONTENT_HEIGHT)
+                .heightIn(min = if (guidanceActive) 0.dp else BASE_PANEL_HEIGHT)
         ) {
             // In ride mode the whole planner UI hides: the top HUD carries the
             // next turn and the NavigationDataBar carries speed, ETA, distance,
             // pace delta, and the END button. The rider cannot edit the plan
             // mid-ride, and the map gets the freed screen space.
             if (guidanceActive) return@Column
-            // Carousel slot, always reserved: route cards appear here on
-            // success without moving the fields below.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(CAROUSEL_SLOT_HEIGHT)
-            ) {
-                (state as? RouteUiState.Success)
-                    ?.takeIf { it.result.routes.isNotEmpty() }
-                    ?.let { success ->
-                        RouteCarouselBar(
-                            routes = success.result.routes,
-                            selectedIndex = success.selectedIndex,
-                            onSelectRoute = onSelectRoute,
-                            onSaveRoute = onSaveRoute,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+            // Carousel bar renders only when a successful search produced
+            // route candidates; the empty slot is not reserved, so the panel
+            // stays compact until there is something to put in it.
+            val success = state as? RouteUiState.Success
+            if (success != null && success.result.routes.isNotEmpty()) {
+                RouteCarouselBar(
+                    routes = success.result.routes,
+                    selectedIndex = success.selectedIndex,
+                    onSelectRoute = onSelectRoute,
+                    onSaveRoute = onSaveRoute,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(CAROUSEL_SLOT_HEIGHT),
+                )
             }
             HorizontalDivider(color = Color(0x1E000000), thickness = 1.dp)
             if (importedGpxName != null) {
@@ -352,120 +417,103 @@ internal fun RoutePlanPanel(
                     onAction = onOpenGpxPreview,
                 )
             } else {
-                RoutePlanSearchField(
-                    label = "From",
-                    hint = "Route from",
-                    icon = { StartDotIcon() },
-                    value = fromText,
-                    onValueChange = onFromChange,
-                    onResultPicked = onFromPicked,
-                    controller = geocodeController,
-                    searchState = fromSearch,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                HorizontalDivider(
-                    color = Color(0xFF1E000000),
-                    thickness = 1.dp,
-                    modifier = Modifier.padding(start = 40.dp)
-                )
-                RoutePlanSearchField(
-                    label = "To",
-                    hint = "Route to",
-                    icon = { FinishFlagIcon() },
-                    value = toText,
-                    onValueChange = onToChange,
-                    onResultPicked = onToPicked,
-                    controller = geocodeController,
-                    searchState = toSearch,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // Anchor the shared result popup to the top of the complete
+                // endpoint group, not to the active field. This keeps results
+                // above both From and To when To owns the search.
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        RoutePlanSearchField(
+                            label = "From",
+                            hint = "Route from",
+                            icon = { StartDotIcon() },
+                            value = fromText,
+                            onValueChange = onFromChange,
+                            onResultPicked = onFromPicked,
+                            controller = geocodeController,
+                            searchState = fromSearch,
+                            modifier = Modifier.fillMaxWidth(),
+                            renderResultsPopup = false,
+                            isResolved = fromResolved,
+                            onEditResolved = onEditFrom,
+                        )
+                        HorizontalDivider(
+                            color = Color(0xFF1E000000),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(start = 40.dp)
+                        )
+                        RoutePlanSearchField(
+                            label = "To",
+                            hint = "Route to",
+                            icon = { FinishFlagIcon() },
+                            value = toText,
+                            onValueChange = onToChange,
+                            onResultPicked = onToPicked,
+                            controller = geocodeController,
+                            searchState = toSearch,
+                            modifier = Modifier.fillMaxWidth(),
+                            renderResultsPopup = false,
+                            isResolved = toResolved,
+                            onEditResolved = onEditTo,
+                        )
+                    }
+                    val activeSearch = fromSearch.takeIf { it.active } ?: toSearch.takeIf { it.active }
+                    if (activeSearch != null && maxWidth > 0.dp) {
+                        RoutePlanSearchResultsPopup(
+                            state = activeSearch,
+                            width = maxWidth,
+                        )
+                    }
+                }
             }
             HorizontalDivider(
                 color = Color(0xFF1E000000),
                 thickness = 1.dp,
                 modifier = Modifier.padding(start = 40.dp)
             )
-            // Fixed ride-controls region: while a field is searching, its
-            // suggestions replace the knob and status rows inside this box;
-            // nothing outside the box ever moves.
+            // Keep the ride-controls region fixed while typing. Search
+            // suggestions render in a popup above the focused field.
             Box(
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = RIDE_CONTROLS_HEIGHT)
             ) {
-                val activeSearch = fromSearch.takeIf { it.active } ?: toSearch.takeIf { it.active }
-                if (activeSearch != null) {
-                    RoutePlanSearchResults(
-                        state = activeSearch,
-                        maxHeight = RIDE_CONTROLS_HEIGHT,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                } else {
-                    Column {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp)
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    text = "Ride complexity",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF8A000000)
-                                )
-                                Text(
-                                    text = complexityLabel(complexity),
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    text = "Turn clockwise for longer, curvier roads",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF8A000000)
-                                )
-                            }
-                            // 164 dp wide so the 48 dp corner buttons sit
-                            // clear of the 92 dp knob circle: the buttons'
-                            // inner corners stay outside the knob ring.
-                            Box(Modifier.size(width = 164.dp, height = 100.dp)) {
-                                IconButton(
-                                    onClick = onImportGpx,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "Import GPX route" },
-                                ) {
-                                    ImportIcon()
-                                }
-                                InfiniteComplexityKnob(
-                                    value = complexity,
-                                    onValueChange = onComplexityChange,
-                                    onValueChangeFinished = onComplexityChangeFinished,
-                                    modifier = Modifier.align(Alignment.Center),
-                                )
-                                IconButton(
-                                    onClick = onRouteSettings,
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "Route settings" },
-                                ) {
-                                    SettingsCogIcon()
-                                }
-                                IconButton(
-                                    onClick = onOpenSavedRoutes,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "Saved routes" },
-                                ) {
-                                    BookmarkIcon(filled = false)
-                                }
-                            }
+                Column {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "Ride complexity",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF8A000000)
+                            )
+                            Text(
+                                text = complexityLabel(complexity),
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Turn clockwise for longer, curvier roads",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF8A000000)
+                            )
                         }
-                        RouteStatusSlot(state)
+                        // Keep the dial centered in its compact control
+                        // slot; the occasional planning actions live in
+                        // the map-side vertical pill.
+                        Box(Modifier.size(100.dp)) {
+                            InfiniteComplexityKnob(
+                                value = complexity,
+                                onValueChange = onComplexityChange,
+                                onValueChangeFinished = onComplexityChangeFinished,
+                                modifier = Modifier.align(Alignment.Center),
+                            )
+                        }
                     }
+                    RouteStatusSlot(state)
                 }
             }
             Button(

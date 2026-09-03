@@ -188,13 +188,10 @@ object KnobRobot {
     }
 
     /**
-     * Guarantees the ride-controls box actually contains the dial. While a
-     * planner field is focused, its search suggestions REPLACE the knob in
-     * that box (RouteScreen.kt swaps content on `searchState.active`), so
-     * tests that type coordinates and only then reach for the dial otherwise
-     * race the debounce and see a tree without any knob. Dismissing the IME
-     * clears focus, which flips the field back to Idle (SearchField.kt
-     * onFocusChanged) and restores the dial synchronously.
+     * The dial remains in the ride-controls box while a planner field is
+     * focused. Search suggestions render in a popup above the field, so
+     * typing does not remove the knob. Dismissing the IME clears focus and
+     * closes the popup.
      */
     private fun ensureIdleControlsVisible(rule: ComposeTestRule) {
         if (!present(rule)) {

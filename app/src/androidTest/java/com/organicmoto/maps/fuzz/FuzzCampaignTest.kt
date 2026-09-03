@@ -1,8 +1,10 @@
 package com.organicmoto.maps.fuzz
 
+import android.Manifest
 import androidx.compose.ui.test.junit4.ComposeTestRule
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.rule.GrantPermissionRule
 import androidx.test.platform.app.InstrumentationRegistry
 import com.organicmoto.maps.MainActivity
 import kotlinx.coroutines.runBlocking
@@ -13,6 +15,12 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class FuzzCampaignTest {
+
+    @get:Rule
+    val permissionRule: GrantPermissionRule = GrantPermissionRule.grant(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+    )
 
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()

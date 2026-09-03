@@ -20,6 +20,9 @@ desktop and shipped inside the APK.
   fastest route; each click adds one step of curve preference. Positive levels
   request genuinely different alternatives, softly penalizing roads used by
   lower levels, with a configurable maximum shared-road target (10–90%).
+- **Startup location** — requests foreground precise or approximate location
+  on first open, starts the offline location stream after approval, and centers
+  the map on the first fix. Android retains a normal grant until it is revoked.
 
 ## Building
 

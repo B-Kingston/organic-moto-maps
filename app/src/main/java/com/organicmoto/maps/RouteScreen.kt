@@ -27,16 +27,15 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
@@ -335,18 +334,47 @@ fun RouteScreen() {
     val navSnapshot by navigationController.snapshot.collectAsState()
     var guidanceRequested by remember { mutableStateOf(false) }
     var locationPermissionGranted by remember {
-        mutableStateOf(
-            androidx.core.content.ContextCompat.checkSelfPermission(
-                context, android.Manifest.permission.ACCESS_FINE_LOCATION,
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
-        )
+        mutableStateOf(LocationPermission.isGranted(context))
     }
+    var pendingGuidanceStart by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        // Runtime permissions belong to Android, not app storage: a normal
+        // grant is retained across launches until the user changes it in
+        // Settings. Android may expire one-time grants by policy.
+        val granted = LocationPermission.isGranted(context)
         locationPermissionGranted = granted
-        guidanceRequested = granted
+        if (pendingGuidanceStart) {
+            guidanceRequested = granted
+            pendingGuidanceStart = false
+        }
         Log.i(TAG, "Location permission " + if (granted) "granted" else "denied")
+    }
+    // Start location acquisition as soon as the screen is composed. This runs
+    // once per screen lifetime and is a no-op on later launches when Android
+    // has already retained the user's grant.
+    LaunchedEffect(Unit) {
+        if (!locationPermissionGranted) {
+            Log.i(TAG, "Requesting location permission at app startup")
+            permissionLauncher.launch(LocationPermission.requestedPermissions)
+        }
+    }
+    // Refresh the cached UI state after returning from Settings, where a user
+    // may grant or revoke location access without going through our launcher.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            val granted = LocationPermission.isGranted(context)
+            locationPermissionGranted = granted
+            if (!granted) {
+                pendingGuidanceStart = false
+                guidanceRequested = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val mapRef = remember { mutableStateOf<MapLibreMap?>(null) }
     // Saved-route storage: repository over device SQLite plus the menu flag.
@@ -382,9 +410,11 @@ fun RouteScreen() {
     // Always-on map tracking: a bare fix stream (no guidance engine) that
     // keeps the position dot visible whenever permission is granted. The
     var trackedFix by remember { mutableStateOf<GpsFix?>(null) }
+    var initialLocationCentered by remember { mutableStateOf(false) }
     LaunchedEffect(locationPermissionGranted) {
         if (!locationPermissionGranted) {
             trackedFix = null
+            initialLocationCentered = false
             return@LaunchedEffect
         }
         GpsFixSource.fixes(context.applicationContext).collect { fix ->
@@ -763,6 +793,21 @@ fun RouteScreen() {
             400,
         )
     }
+    // On the first usable fix, move the initial map viewport to the rider.
+    // This is intentionally one-shot: later fixes update the position marker,
+    // while the rider can pan freely until they explicitly enable the lock.
+    LaunchedEffect(trackedFix, styleJson, mapRef.value, routeResult) {
+        if (initialLocationCentered || routeResult != null) return@LaunchedEffect
+        val map = mapRef.value ?: return@LaunchedEffect
+        val fix = trackedFix ?: return@LaunchedEffect
+        if (fix.lat.isNaN() || fix.lon.isNaN()) return@LaunchedEffect
+        map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(LatLng(fix.lat, fix.lon), FOLLOW_ZOOM),
+            500,
+        )
+        initialLocationCentered = true
+        Log.i(TAG, "Initial map viewport centered on the first location fix")
+    }
     // Manual zoom (pinch or the +/- pill) while locked: adopt the new zoom
     // into followZoom so the re-centre effect keeps the user's level.
     DisposableEffect(mapRef.value) {
@@ -795,11 +840,13 @@ fun RouteScreen() {
     Column(
         Modifier
             .fillMaxSize()
+            .imePadding()
             .semantics {
                 this[RouteUiStateKey] = routeStateName
                 this[RouteGenerationKey] = coordinator.generation
                 this[SelectedRouteKey] = selectedIndex
                 this[RouteCountKey] = routeCount
+                this[LocationPermissionKey] = locationPermissionGranted
             }
     ) {
         Box(
@@ -817,6 +864,27 @@ fun RouteScreen() {
                 NavigationHud(
                     snapshot = navSnapshot,
                     modifier = Modifier.align(Alignment.TopStart),
+                )
+            }
+            if (!guidanceRequested) {
+                RouteActionsPill(
+                    onImportGpx = {
+                        gpxPicker.launch(
+                            arrayOf(
+                                "application/gpx+xml",
+                                "application/gpx",
+                                "text/xml",
+                                "application/xml",
+                                "*/*",
+                            )
+                        )
+                    },
+                    onRouteSettings = { routeSettingsOpen = true },
+                    onOpenSavedRoutes = { savedRoutesOpen = true },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .statusBarsPadding()
+                        .padding(top = 32.dp, end = 8.dp),
                 )
             }
             Text(
@@ -851,29 +919,40 @@ fun RouteScreen() {
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
-            ZoomPill(
-                onZoomIn = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
-                onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    // In ride mode the data bar occupies the bottom of the
-                    // map box; lift the pill above it so they never overlap.
-                    .padding(
-                        end = 8.dp,
-                        bottom = if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
-                            148.dp
-                        } else {
-                            64.dp
-                        },
-                    )
-            )
+            // The keyboard shrinks the map box; in that state the pill rides
+            // up under the RouteActionsPill stack and steals its taps, so it
+            // stays hidden while the IME is visible.
+            if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) {
+                ZoomPill(
+                    onZoomIn = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
+                    onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        // In ride mode the data bar occupies the bottom of the
+                        // map box; lift the pill above it so they never overlap.
+                        .padding(
+                            end = 8.dp,
+                            bottom = if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
+                                148.dp
+                            } else {
+                                64.dp
+                            },
+                        )
+                )
+            }
         }
         RoutePlanPanel(
             fromText = fromText,
+            fromResolved = fromPoint != null,
             onFromChange = {
                 importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
                 fromText = it; fromPoint = null
                 activePlan = null; coordinator.invalidate()
+            },
+            onEditFrom = {
+                fromPoint = null
+                activePlan = null
+                coordinator.invalidate()
             },
             onFromPicked = { result ->
                 fromText =
@@ -882,10 +961,16 @@ fun RouteScreen() {
                 activePlan = null; coordinator.invalidate()
             },
             toText = toText,
+            toResolved = toPoint != null,
             onToChange = {
                 importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
                 toText = it; toPoint = null
                 activePlan = null; coordinator.invalidate()
+            },
+            onEditTo = {
+                toPoint = null
+                activePlan = null
+                coordinator.invalidate()
             },
             onToPicked = { result ->
                 toText =
@@ -899,13 +984,6 @@ fun RouteScreen() {
             onRoute = onRoute,
             complexity = complexity,
             onComplexityChange = { complexity = it },
-            onRouteSettings = { routeSettingsOpen = true },
-            onOpenSavedRoutes = { savedRoutesOpen = true },
-            onImportGpx = {
-                gpxPicker.launch(
-                    arrayOf("application/gpx+xml", "application/gpx", "text/xml", "application/xml", "*/*")
-                )
-            },
             gpxImportError = gpxImportError,
             onDismissGpxError = { gpxImportError = null },
             onSaveRoute = ::saveProposedRoute,
@@ -913,7 +991,8 @@ fun RouteScreen() {
                 if (locationPermissionGranted) {
                     guidanceRequested = true
                 } else {
-                    permissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                    pendingGuidanceStart = true
+                    permissionLauncher.launch(LocationPermission.requestedPermissions)
                 }
                 Log.i(TAG, "Guidance toggled: $guidanceRequested")
             },

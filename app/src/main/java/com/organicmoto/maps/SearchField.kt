@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -21,6 +22,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -29,30 +31,39 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.organicmoto.maps.geocoding.GeocodeResult
 import androidx.compose.ui.semantics.contentDescription
@@ -90,9 +101,7 @@ internal sealed interface SearchUiState {
 }
 
 /**
- * Search state of one route-planning field, hoisted so the panel can render
- * the suggestions of whichever field is active in a single shared, fixed
- * results viewport (instead of each field growing the panel inline).
+ * Search state for one route-planning field and its anchored result popup.
  */
 @Stable
 class RouteFieldSearchState internal constructor() {
@@ -100,7 +109,7 @@ class RouteFieldSearchState internal constructor() {
     internal var hasFocus by mutableStateOf(false)
     internal var onPick: (GeocodeResult) -> Unit = {}
 
-    /** True while this field owns the shared results viewport. */
+    /** True while this field owns an active result popup. */
     val active: Boolean get() = hasFocus && uiState != SearchUiState.Idle
 }
 
@@ -197,17 +206,19 @@ fun GeocodeSearchField(
         // Results dropdown as an anchored overlay window. A separate window (Popup)
         // gives it correct z-order — it renders above the map panel, the sibling
         // field and the route controls instead of being clipped/covered by them.
-        // It is deliberately non-focusable so the text field keeps the keyboard,
-        // taps outside dismiss it, and taps on non-result areas propagate to the
-        // controls below (the second field and the route button stay reachable).
+        // It is deliberately non-focusable so the text field keeps the keyboard.
+        // The popup ignores outside-window input because every soft-keyboard tap
+        // is outside this window. Field focus changes still hide the results.
         if (hasFocus && uiState != SearchUiState.Idle && fieldWidthDp > 0.dp) {
             Popup(
-                onDismissRequest = {
-                    uiState = SearchUiState.Idle
-                    focusManager.clearFocus()
-                },
+                onDismissRequest = { uiState = SearchUiState.Idle },
                 offset = IntOffset(0, fieldHeightPx),
-                properties = PopupProperties(focusable = false, usePlatformDefaultWidth = false),
+                properties = PopupProperties(
+                    focusable = false,
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false,
+                ),
             ) {
                 SearchDropdown(width = fieldWidthDp) {
                     when (val state = uiState) {
@@ -243,10 +254,9 @@ fun GeocodeSearchField(
 /**
  * Route-planning variant of [GeocodeSearchField]: same 300 ms debounced
  * offline search-as-you-type, but styled as a 50 dp row (icon + bold text)
- * for the bottom route-planning panel. Results are NOT rendered here: the
- * field publishes its state into [searchState] and the panel shows them in
- * one shared, fixed-height viewport ([RoutePlanSearchResults]) so the panel
- * frame never grows or shifts while typing.
+ * for the bottom route-planning panel. By default, results render in an
+ * anchored popup above the focused field. A host can disable that popup and
+ * render [RoutePlanSearchResultsPopup] from a shared anchor.
  */
 @Composable
 fun RoutePlanSearchField(
@@ -259,12 +269,30 @@ fun RoutePlanSearchField(
     controller: GeocodeController,
     searchState: RouteFieldSearchState,
     modifier: Modifier = Modifier,
+    renderResultsPopup: Boolean = true,
+    isResolved: Boolean = false,
+    onEditResolved: () -> Unit = {},
 ) {
     val focusManager = LocalFocusManager.current
     val debugLogs = isDebugBuild(LocalContext.current)
+    // The shared result popup (rendered by the host or by this field) invokes
+    // searchState.onPick; without this wiring its default is a no-op lambda,
+    // so taps on result rows would do nothing.
+    SideEffect { searchState.onPick = onResultPicked }
+    val density = LocalDensity.current
+    var fieldWidthDp by remember { mutableStateOf(0.dp) }
+    val focusRequester = remember { FocusRequester() }
+    var focusAfterEdit by remember { mutableStateOf(false) }
 
-    LaunchedEffect(value) {
-        if (value.isBlank()) {
+    LaunchedEffect(isResolved) {
+        if (!isResolved && focusAfterEdit) {
+            focusRequester.requestFocus()
+            focusAfterEdit = false
+        }
+    }
+
+    LaunchedEffect(value, isResolved) {
+        if (isResolved || value.isBlank()) {
             searchState.uiState = SearchUiState.Idle
             return@LaunchedEffect
         }
@@ -289,14 +317,21 @@ fun RoutePlanSearchField(
                 Log.d(
                     TAG,
                     "[$label] \"$value\" -> ${results.size} result(s): " +
-                        results.take(MAX_INLINE_RESULTS).joinToString(", ") { it.name }
+                        results.take(MAX_DROPDOWN_ROWS).joinToString(", ") { it.name }
                 )
             }
         }
         searchState.uiState = if (results.isEmpty()) SearchUiState.Empty else SearchUiState.Results(results)
     }
 
-    Column(modifier = modifier.fillMaxWidth()) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { coordinates ->
+                val width = with(density) { coordinates.size.width.toDp() }
+                if (width != fieldWidthDp) fieldWidthDp = width
+            },
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -311,81 +346,174 @@ fun RoutePlanSearchField(
             ) {
                 icon()
             }
-            BasicTextField(
-                value = value,
-                onValueChange = {
-                    if (debugLogs) Log.v(TAG, "[$label] text changed: \"$it\"")
-                    onValueChange(it)
-                },
-                textStyle = TextStyle(
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFDE000000)
-                ),
-                cursorBrush = SolidColor(Color(0xFF249CF2)),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(
-                    // Commit the typed text and drop focus: dismissing the IME
-                    // must also leave search-suggestion mode so the ride
-                    // controls (dial/status) come back without any race.
-                    onDone = { focusManager.clearFocus() }
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .semantics { contentDescription = label }
-                    .padding(horizontal = 8.dp)
-                    .onFocusChanged { focused ->
-                        val wasFocused = searchState.hasFocus
-                        searchState.hasFocus = focused.isFocused
-                        if (wasFocused && !focused.isFocused) searchState.uiState = SearchUiState.Idle
-                    },
-                decorationBox = { innerTextField ->
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        if (value.isEmpty()) {
-                            Text(
-                                text = hint,
-                                style = TextStyle(
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF8A000000)
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        innerTextField()
+            if (isResolved) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clickable(
+                            role = Role.Button,
+                            onClick = {
+                                focusAfterEdit = true
+                                onEditResolved()
+                            },
+                        )
+                        .semantics { contentDescription = "$label selected: $value" }
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = value,
+                            style = TextStyle(
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFDE000000),
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "Selected place",
+                            style = TextStyle(
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFF249CF2),
+                            ),
+                        )
                     }
+                    Text(
+                        text = "CHANGE",
+                        style = TextStyle(
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF249CF2),
+                        ),
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
                 }
-            )
-        }
-
-        // The panel renders this field's suggestions in the shared results
-        // viewport while the field is active; publish the pick handler that
-        // the viewport's rows invoke.
-        searchState.onPick = { result ->
-            searchState.uiState = SearchUiState.Idle
-            focusManager.clearFocus()
-            if (debugLogs) {
-                Log.i(
-                    TAG,
-                    "[$label] picked \"${result.name}${if (result.subtitle.isNotBlank()) ", " + result.subtitle else ""}\" " +
-                        "(${result.type}, lat=${result.lat}, lon=${result.lon}, score=${result.score})"
+            } else {
+                BasicTextField(
+                    value = value,
+                    onValueChange = {
+                        if (debugLogs) Log.v(TAG, "[$label] text changed: \"$it\"")
+                        onValueChange(it)
+                    },
+                    textStyle = TextStyle(
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFDE000000)
+                    ),
+                    cursorBrush = SolidColor(Color(0xFF249CF2)),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        // Commit the typed text and drop focus: dismissing the IME
+                        // must also leave search-suggestion mode so the ride
+                        // controls (dial/status) come back without any race.
+                        onDone = { focusManager.clearFocus() }
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .focusRequester(focusRequester)
+                        .semantics { contentDescription = label }
+                        .padding(horizontal = 8.dp)
+                        .onFocusChanged { focused ->
+                            val wasFocused = searchState.hasFocus
+                            searchState.hasFocus = focused.isFocused
+                            if (wasFocused && !focused.isFocused) searchState.uiState = SearchUiState.Idle
+                        },
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            if (value.isEmpty()) {
+                                Text(
+                                    text = hint,
+                                    style = TextStyle(
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF8A000000)
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            innerTextField()
+                        }
+                    }
                 )
             }
-            onResultPicked(result)
+        }
+
+        // Suggestions use a separate, non-focusable popup. The popup ignores
+        // outside-window input so a soft-keyboard tap cannot clear field focus.
+        if (renderResultsPopup && searchState.active && fieldWidthDp > 0.dp) {
+            RoutePlanSearchResultsPopup(
+                state = searchState,
+                width = fieldWidthDp,
+            )
         }
     }
 }
 
-/** Elevated surface anchored directly below the text field (overlays the map). */
+/**
+ * Renders route suggestions above a shared endpoint-group anchor.
+ *
+ * The popup uses the anchor's top edge. RoutePlanPanel places that anchor
+ * around both From and To fields, so results never cover either field.
+ */
+@Composable
+internal fun RoutePlanSearchResultsPopup(
+    state: RouteFieldSearchState,
+    width: Dp,
+) {
+    val focusManager = LocalFocusManager.current
+    Popup(
+        popupPositionProvider = remember { AboveAnchorPopupPositionProvider() },
+        onDismissRequest = { state.uiState = SearchUiState.Idle },
+        properties = PopupProperties(
+            focusable = false,
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        SearchDropdown(
+            width = width,
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            color = ROUTE_PANEL_COLOR,
+            shadowElevation = 0.dp,
+        ) {
+            when (val current = state.uiState) {
+                SearchUiState.Idle -> Unit
+                SearchUiState.Loading -> DropdownMessage("Searching…")
+                SearchUiState.Empty -> DropdownMessage("No results", dim = true)
+                is SearchUiState.Results ->
+                    current.results.take(MAX_DROPDOWN_ROWS).forEachIndexed { index, result ->
+                        if (index > 0) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        ResultRow(result) {
+                            state.uiState = SearchUiState.Idle
+                            focusManager.clearFocus()
+                            state.onPick(result)
+                        }
+                    }
+            }
+        }
+    }
+}
+
+/** Result surface; route-planning fields override it to extend the panel. */
 @Composable
 private fun SearchDropdown(
     width: Dp,
+    shape: Shape = MaterialTheme.shapes.small,
+    color: Color = MaterialTheme.colorScheme.surface,
+    shadowElevation: Dp = 4.dp,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -393,9 +521,9 @@ private fun SearchDropdown(
         modifier = modifier
             .width(width)
             .heightIn(max = MAX_DROPDOWN_HEIGHT),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 4.dp,
+        shape = shape,
+        color = color,
+        shadowElevation = shadowElevation,
     ) {
         Column(
             modifier = Modifier
@@ -406,11 +534,27 @@ private fun SearchDropdown(
     }
 }
 
+/** Places a popup directly above its text-field anchor. */
+private class AboveAnchorPopupPositionProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        val x = when (layoutDirection) {
+            LayoutDirection.Ltr -> anchorBounds.left
+            LayoutDirection.Rtl -> anchorBounds.right - popupContentSize.width
+        }.coerceIn(0, maxX)
+        val y = (anchorBounds.top - popupContentSize.height).coerceAtLeast(0)
+        return IntOffset(x, y)
+    }
+}
+
 /**
- * Shared results viewport for the route-planning panel: renders the search
- * state of whichever [RoutePlanSearchField] is active. Always bounded by
- * [maxHeight] — extra rows scroll — so the panel frame around it never
- * changes size while typing. Sits on the panel surface (no elevation).
+ * Standalone results viewport for route-planning tests and non-panel hosts.
+ * The route panel uses the anchored popup from [RoutePlanSearchField].
  */
 @Composable
 fun RoutePlanSearchResults(
