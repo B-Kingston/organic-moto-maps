@@ -166,8 +166,7 @@ private fun isDebugBuild(context: Context): Boolean =
 private fun PointList.toGeoPoints(): List<GeoPoint> =
     List(size()) { index -> GeoPoint(getLat(index), getLon(index)) }
 
-private suspend fun loadOfflineStyle(context: Context): String {
-    val tilesUrl = OfflineTileStore.ensureReady(context)
+private suspend fun loadOfflineStyle(context: Context, tilesUrl: String): String {
     val style = withContext(Dispatchers.IO) {
         context.assets.open(STYLE_ASSET).bufferedReader().use { it.readText() }
     }
@@ -432,13 +431,60 @@ fun RouteScreen() {
     var followMe by remember { mutableStateOf(false) }
     var followZoom by remember { mutableStateOf(FOLLOW_ZOOM) }
 
+    var mapUrl by remember { mutableStateOf<String?>(null) }
+    var mapFileChecked by remember { mutableStateOf(false) }
+    var mapImporting by remember { mutableStateOf(false) }
+    var mapImportError by remember { mutableStateOf<String?>(null) }
+    var mapRevision by remember { mutableStateOf(0) }
     var styleJson by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         try {
-            styleJson = loadOfflineStyle(context.applicationContext)
+            mapUrl = OfflineTileStore.installedUrl(context.applicationContext)
         } catch (e: Exception) {
-            Log.e(TAG, "Offline map assets failed to load", e)
+            mapImportError = "The installed map file could not be opened"
+            Log.e(TAG, "Installed map failed to load", e)
+        } finally {
+            mapFileChecked = true
         }
+    }
+    LaunchedEffect(mapUrl, mapRevision) {
+        // Force a style reload when a replacement is imported at the same
+        // private path; the URL string itself intentionally stays stable.
+        styleJson = null
+        val url = mapUrl ?: run {
+            return@LaunchedEffect
+        }
+        try {
+            styleJson = loadOfflineStyle(context.applicationContext, url)
+        } catch (e: Exception) {
+            mapImportError = "The offline map style could not be loaded"
+            Log.e(TAG, "Offline map style failed to load", e)
+        }
+    }
+
+    val mapPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            mapImporting = true
+            mapImportError = null
+            try {
+                mapUrl = OfflineTileStore.import(context.applicationContext, uri)
+                mapRevision++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mapImportError = e.message ?: "Map file import failed"
+                Log.e(TAG, "Map file import failed", e)
+            } finally {
+                mapImporting = false
+                mapFileChecked = true
+            }
+        }
+    }
+    val chooseMapFile = {
+        mapPicker.launch(arrayOf("application/octet-stream", "*/*"))
     }
 
     val mapView = rememberMapView(context) { mapRef.value = it }
@@ -847,6 +893,7 @@ fun RouteScreen() {
                 this[SelectedRouteKey] = selectedIndex
                 this[RouteCountKey] = routeCount
                 this[LocationPermissionKey] = locationPermissionGranted
+                this[MapInstalledKey] = mapUrl != null
             }
     ) {
         Box(
@@ -868,6 +915,7 @@ fun RouteScreen() {
             }
             if (!guidanceRequested) {
                 RouteActionsPill(
+                    onLoadMap = chooseMapFile,
                     onImportGpx = {
                         gpxPicker.launch(
                             arrayOf(
@@ -885,6 +933,14 @@ fun RouteScreen() {
                         .align(Alignment.TopEnd)
                         .statusBarsPadding()
                         .padding(top = 32.dp, end = 8.dp),
+                )
+            }
+            if (mapFileChecked && mapUrl == null) {
+                MissingMapCard(
+                    importing = mapImporting,
+                    error = mapImportError,
+                    onChooseFile = chooseMapFile,
+                    modifier = Modifier.align(Alignment.Center),
                 )
             }
             Text(
@@ -1107,6 +1163,17 @@ fun RouteScreen() {
             },
         )
     }
+
+    if (mapUrl != null && mapImportError != null) {
+        AlertDialog(
+            onDismissRequest = { mapImportError = null },
+            title = { Text("Map file not loaded") },
+            text = { Text(mapImportError.orEmpty()) },
+            confirmButton = {
+                TextButton(onClick = { mapImportError = null }) { Text("OK") }
+            },
+        )
+    }
 }
 
 private fun coordinateLabel(point: GeoPoint): String =
@@ -1306,6 +1373,38 @@ internal fun FinishFlagIcon() {
             size = Size(flagWidth, flagHeight),
             style = Stroke(width = 1.dp.toPx())
         )
+    }
+
+}
+
+@Composable
+private fun MissingMapCard(
+    importing: Boolean,
+    error: String?,
+    onChooseFile: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = Color.White.copy(alpha = 0.96f),
+        shape = RoundedCornerShape(16.dp),
+        shadowElevation = 6.dp,
+        modifier = modifier.padding(24.dp),
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(20.dp),
+        ) {
+            Text("Offline map file needed", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                error ?: "Download the .pmtiles map to this phone, then select it here.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onChooseFile, enabled = !importing) {
+                Text(if (importing) "Importing…" else "Choose map file")
+            }
+        }
     }
 }
 

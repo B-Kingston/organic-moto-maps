@@ -96,6 +96,7 @@ private val BASE_PANEL_HEIGHT = RIDE_CONTROLS_HEIGHT +
  */
 @Composable
 internal fun RouteActionsPill(
+    onLoadMap: () -> Unit,
     onImportGpx: () -> Unit,
     onRouteSettings: () -> Unit,
     onOpenSavedRoutes: () -> Unit,
@@ -114,6 +115,15 @@ internal fun RouteActionsPill(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(vertical = 4.dp),
         ) {
+            RouteActionsPillButton(
+                contentDescription = "Load map file",
+                onClick = onLoadMap,
+            ) { Text("MAP", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold) }
+            HorizontalDivider(
+                color = Color(0x1A000000),
+                thickness = 1.dp,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
             RouteActionsPillButton(
                 contentDescription = "Import GPX route",
                 onClick = onImportGpx,

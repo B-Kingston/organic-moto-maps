@@ -1,8 +1,10 @@
 package com.organicmoto.maps.tiles
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import java.io.File
+import java.io.InputStream
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -16,83 +18,85 @@ import kotlinx.coroutines.withContext
 private const val TAG = "OrganicMoto.Tiles"
 
 /**
- * Serves the prebuilt vector basemap (PMTiles, OpenMapTiles schema) that ships
- * in APK assets.
+ * Owns the user-imported PMTiles basemap. The large archive is deliberately
+ * not packaged in the APK.
  *
  * MapLibre Native reads PMTiles natively through the `pmtiles://file://` scheme
- * (maplibre-android-sdk >= 11.7). That reader performs byte-range reads, which
- * AssetManager cannot do, so the archive is copied to internal storage on first
- * use — the same first-run pattern as the GraphHopper graph cache and the
- * geocoder index.
+ * (maplibre-android-sdk >= 11.7). Android's picker supplies a downloaded
+ * archive, which is copied into private storage so it remains available after
+ * a restart or removal of the original download.
  */
 object OfflineTileStore {
-    private const val ASSET_NAME = "tiles/queensland.pmtiles"
-    private const val ASSET_HASH_NAME = "tiles/queensland.pmtiles.sha256"
-    private const val FILE_NAME = "queensland.pmtiles"
-    private const val HASH_FILE_NAME = "$FILE_NAME.sha256"
+    private const val FILE_NAME = "basemap.pmtiles"
+    private const val TEMP_FILE_NAME = "$FILE_NAME.importing"
+    private const val PMTILES_HEADER_SIZE = 127
+    private val PMTILES_MAGIC = "PMTiles".encodeToByteArray()
+    private const val PMTILES_VERSION = 3
 
-    private val copyMutex = Mutex()
+    private val importMutex = Mutex()
 
     /**
-     * Ensures the tile archive exists in internal storage and returns the
-     * `pmtiles://file://` URL to hand to the style's tile source. Safe to call
-     * concurrently; the copy runs once.
+     * Returns the installed archive URL, or null until the user imports one.
      */
-    suspend fun ensureReady(context: Context): String = withContext(Dispatchers.IO) {
-        copyMutex.withLock {
+    suspend fun installedUrl(context: Context): String? = withContext(Dispatchers.IO) {
+        installedFile(context.applicationContext)
+            .takeIf { it.isFile && it.length() >= PMTILES_HEADER_SIZE && hasValidHeader(it.inputStream()) }
+            ?.let(::mapUrl)
+    }
+
+    /** Validates and atomically imports [source], preserving any prior map on failure. */
+    suspend fun import(context: Context, source: Uri): String = withContext(Dispatchers.IO) {
+        importMutex.withLock {
             val appContext = context.applicationContext
-            val dir = File(appContext.filesDir, "tiles").apply { mkdirs() }
-            val file = File(dir, FILE_NAME)
-            val hashFile = File(dir, HASH_FILE_NAME)
-            val expectedHash = appContext.assets.open(ASSET_HASH_NAME).bufferedReader().use { it.readText().trim() }
-            check(expectedHash.length == 64 && expectedHash.all { it in "0123456789abcdefABCDEF" }) {
-                "invalid PMTiles SHA-256 sidecar"
+            val destination = installedFile(appContext)
+            destination.parentFile?.mkdirs()
+            val input = appContext.contentResolver.openInputStream(source)
+                ?: throw IllegalArgumentException("The selected map file could not be opened")
+            importTo(input, destination)
+            Log.i(TAG, "Imported map archive: ${destination.length()} bytes")
+            mapUrl(destination)
+        }
+    }
+
+    internal fun importTo(input: InputStream, destination: File) {
+        destination.parentFile?.mkdirs()
+        val temporary = File(destination.parentFile, TEMP_FILE_NAME)
+        temporary.delete()
+        try {
+            input.use { sourceStream ->
+                temporary.outputStream().buffered().use { output -> sourceStream.copyTo(output) }
             }
-            val cachedHash = hashFile.takeIf { it.isFile }?.runCatching { readText().trim() }?.getOrNull()
-            val cacheMatches = file.isFile && file.length() > 0L && cachedHash == expectedHash
-            if (!cacheMatches) {
-                val tmp = File(dir, "$FILE_NAME.tmp")
-                val hashTmp = File(dir, "$HASH_FILE_NAME.tmp")
-                tmp.delete()
-                hashTmp.delete()
-                try {
-                    Log.i(TAG, "Copying $ASSET_NAME -> ${file.absolutePath}")
-                    appContext.assets.open(ASSET_NAME).use { input ->
-                        tmp.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    FileChannel.open(tmp.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
-                    try {
-                        Files.move(
-                            tmp.toPath(),
-                            file.toPath(),
-                            StandardCopyOption.ATOMIC_MOVE,
-                            StandardCopyOption.REPLACE_EXISTING,
-                        )
-                    } catch (_: AtomicMoveNotSupportedException) {
-                        Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    }
-                    hashTmp.writeText("$expectedHash\n")
-                    FileChannel.open(hashTmp.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
-                    try {
-                        Files.move(
-                            hashTmp.toPath(),
-                            hashFile.toPath(),
-                            StandardCopyOption.ATOMIC_MOVE,
-                            StandardCopyOption.REPLACE_EXISTING,
-                        )
-                    } catch (_: AtomicMoveNotSupportedException) {
-                        Files.move(hashTmp.toPath(), hashFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    }
-                } catch (e: Exception) {
-                    tmp.delete()
-                    hashTmp.delete()
-                    throw IllegalStateException("failed to copy tile archive from assets", e)
-                }
-                Log.i(TAG, "Tile archive ready: ${file.length()} bytes")
-            } else {
-                Log.d(TAG, "Tile archive already present: ${file.length()} bytes")
+            if (temporary.length() < PMTILES_HEADER_SIZE || !hasValidHeader(temporary.inputStream())) {
+                throw IllegalArgumentException("Choose a valid PMTiles v3 (.pmtiles) map file")
             }
-            "pmtiles://file://${file.absolutePath}"
+            FileChannel.open(temporary.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+            moveReplacing(temporary, destination)
+        } catch (e: Exception) {
+            temporary.delete()
+            throw e
+        }
+    }
+
+    internal fun hasValidHeader(input: InputStream): Boolean = input.use { stream ->
+        val header = ByteArray(PMTILES_MAGIC.size + 1)
+        var offset = 0
+        while (offset < header.size) {
+            val count = stream.read(header, offset, header.size - offset)
+            if (count < 0) return@use false
+            offset += count
+        }
+        header.copyOfRange(0, PMTILES_MAGIC.size).contentEquals(PMTILES_MAGIC) &&
+            header.last().toInt() == PMTILES_VERSION
+    }
+
+    private fun installedFile(context: Context) = File(File(context.filesDir, "tiles"), FILE_NAME)
+    private fun mapUrl(file: File) = "pmtiles://file://${file.absolutePath}"
+
+    private fun moveReplacing(from: File, to: File) {
+        try {
+            Files.move(from.toPath(), to.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
     }
 }

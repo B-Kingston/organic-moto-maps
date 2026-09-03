@@ -51,7 +51,7 @@ class FuzzOracles(private val rule: ComposeTestRule) {
         }.getOrDefault(false)
 
     fun softWarnings(state: StateFingerprint): List<String> = buildList {
-        if (state.stateName == "success" && !state.mapReady) {
+        if (state.stateName == "success" && state.mapInstalled && !state.mapReady) {
             add("MapReadyBeforeRouteRender: route success before map readiness")
         }
     }

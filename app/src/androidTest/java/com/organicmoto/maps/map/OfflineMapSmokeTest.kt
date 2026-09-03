@@ -27,13 +27,23 @@ class OfflineMapSmokeTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test(timeout = 240_000)
-    fun localMapLoadsAttributionAndSurvivesControls() {
+    fun separatelyInstalledMapOrImportPromptSurvivesControls() {
         composeRule.waitUntil(180_000) {
             composeRule.onAllNodes(SemanticsMatcher.expectValue(MapReadyKey, true))
                 .fetchSemanticsNodes()
-                .isNotEmpty()
+                .isNotEmpty() ||
+                composeRule.onAllNodes(hasText("Offline map file needed"))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
         }
-        composeRule.onNode(SemanticsMatcher.expectValue(MapReadyKey, true)).assertExists()
+        val mapReady = composeRule.onAllNodes(SemanticsMatcher.expectValue(MapReadyKey, true))
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        if (!mapReady) {
+            composeRule.onNode(hasText("Offline map file needed")).assertExists()
+            composeRule.onNode(hasText("Choose map file")).assertExists()
+            composeRule.onNodeWithContentDescription("Load map file").assertExists()
+        }
         composeRule.onNode(hasText("© OpenMapTiles.org © OpenStreetMap contributors", substring = true)).assertExists()
         // Zoom actions use semantics and do not depend on API-private touch injection.
         composeRule.onNodeWithContentDescription("Zoom in").performClick()

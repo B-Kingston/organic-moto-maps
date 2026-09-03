@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Builds the offline vector basemap (PMTiles, OpenMapTiles schema) from the
-# QLD OSM extract and installs it into the app assets, mirroring the
-# tools/gh graph pipeline. Run from the repo root:
+# Builds the separately distributed offline vector basemap (PMTiles,
+# OpenMapTiles schema) from the QLD OSM extract. Run from the repo root:
 #
 #   tools/tiles/build-tiles.sh [path/to/extract.osm.pbf]
 #
@@ -33,7 +32,6 @@ fi
 JAVA="$TILE_JAVA_HOME/bin/java"
 PBF="${1:-data/queensland.osm.pbf}"
 OUT="data/tiles/queensland.pmtiles"
-ASSET_DIR="app/src/main/assets/tiles"
 
 if [ ! -f "$PBF" ]; then
     echo "OSM extract not found: $PBF (download it, e.g. Geofabrik queensland-latest.osm.pbf)" >&2
@@ -56,7 +54,7 @@ fi
 echo "$PLANETILER_JAR_SHA256  $PLANETILER_JAR" | shasum -a 256 -c - >/dev/null \
     || { echo "Planetiler jar checksum mismatch: delete $PLANETILER_JAR and re-run" >&2; exit 1; }
 
-mkdir -p data/tiles "$ASSET_DIR"
+mkdir -p data/tiles
 
 # --download fetches the OpenMapTiles profile's external sources
 # (Natural Earth, water polygons) into data/sources/ on first run.
@@ -70,9 +68,7 @@ echo "Generating vector tiles from $PBF (zoom 0-14)..."
     --http-retries=10 \
     --force
 
-echo "Installing $OUT -> $ASSET_DIR/queensland.pmtiles"
-cp "$OUT" "$ASSET_DIR/queensland.pmtiles"
 HASH_OUT="data/tiles/queensland.pmtiles.sha256"
 shasum -a 256 "$OUT" | cut -d ' ' -f1 > "$HASH_OUT"
-cp "$HASH_OUT" "$ASSET_DIR/queensland.pmtiles.sha256"
-echo "Done: $(du -h "$ASSET_DIR/queensland.pmtiles" | cut -f1)"
+echo "Done: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "Copy or download this .pmtiles file to the phone, then choose Load map file in the app."

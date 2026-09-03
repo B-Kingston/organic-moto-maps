@@ -9,7 +9,7 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew assembleDebug
 ```
 
 - `JAVA_HOME` is mandatory. Use `/opt/homebrew/opt/openjdk@17`. Plain `gradle` uses Gradle 9.7 on JDK 26 and breaks this build. Always use `./gradlew` (wrapper = Gradle 9.5.0, AGP = 9.3.1, Kotlin = 2.2.10).
-- Output: `app/build/outputs/apk/debug/app-debug.apk`; size depends on generated graph and tile assets (~400 MB with the current Queensland archive).
+- Output: `app/build/outputs/apk/debug/app-debug.apk`; the separately distributed PMTiles basemap is not included in its size.
 - `local.properties` (gitignored) points `sdk.dir` at `~/Library/Android/sdk`.
 - `minSdk = 26` is a hard floor: GraphHopper's jar fails dexing below it. Do not lower.
 - `tools/test/ci.sh` is the light CI tier. It runs `tools/test/preflight.sh`, every JVM suite, and `assembleDebug`. It does not need an emulator.
@@ -87,7 +87,7 @@ GraphHopper compiles `weighting=custom` expressions with Janino at load time; Ja
 
 ## Map tile data pipeline (offline basemap)
 
-The basemap is prebuilt on the desktop from the same Queensland OSM extract. The app ships one OpenMapTiles vector tile archive in `app/src/main/assets/tiles/`. The app copies the archive to `{filesDir}/tiles/` on first map load. MapLibre Native reads it with `pmtiles://file://` byte-range reads.
+The basemap is prebuilt on the desktop from the same Queensland OSM extract and distributed separately from the APK. On the phone, **Load map file** opens Android's document picker; the app validates the selected PMTiles v3 archive, atomically copies it to `{filesDir}/tiles/basemap.pmtiles`, and reuses it across launches. MapLibre Native reads it with `pmtiles://file://` byte-range reads. A failed replacement never destroys the installed map.
 
 To rebuild the basemap:
 
@@ -96,13 +96,13 @@ To rebuild the basemap:
    ```
    tools/tiles/build-tiles.sh
    ```
-3. Build the APK after the script copies `data/tiles/queensland.pmtiles` and `data/tiles/queensland.pmtiles.sha256` to `app/src/main/assets/tiles/`.
+3. Distribute `data/tiles/queensland.pmtiles` as a separate download. Copy or download it to the phone, then select it with **Load map file**. The `.sha256` sidecar is for distribution verification and is not selected in the app.
 
 - `tools/tiles/build-tiles.sh` pins Planetiler `0.10.2`. The standalone jar uses the OpenMapTiles profile and writes PMTiles with `--output`.
 - Planetiler `0.10.2` needs JDK 21. The script finds JDK 21 with `java_home -v 21`; set `TILE_JAVA_HOME` to override it. The Android build still needs JDK 17.
 - `--download` fetches the Natural Earth and water-polygon sources into `data/sources/` on the desktop. The phone does not download map data.
 - `app/src/main/assets/style.json` contains the local style. It has no remote style, glyph, or sprite URL. Its only runtime-replaced token is `{tiles_path}` (placeholder lives in `app/src/main/assets/style.json`, replacement in RouteScreen's `loadOfflineStyle`); glyphs and sprites use `asset://` URLs baked into the style (see the glyphs/sprites section).
-- The SHA-256 sidecar lets the app replace a cached archive after an APK update without hashing the full archive on every launch.
+- The APK must not contain the generated PMTiles archive. Importing uses Android's Storage Access Framework, so no broad storage permission is needed.
 - The map must show `© OpenMapTiles.org © OpenStreetMap contributors` attribution. OSM data and the OpenMapTiles style require it.
 - Generated tile output and the Planetiler jar are gitignored. A fresh clone must run this pipeline before `assembleDebug`.
 

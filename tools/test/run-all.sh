@@ -45,10 +45,17 @@ done
 [[ "$booted" = "1" ]] || fail "The Android emulator did not finish booting"
 
 APK="app/build/outputs/apk/debug/app-debug.apk"
+MAP_ARCHIVE="data/tiles/queensland.pmtiles"
 [[ -s "$APK" ]] || fail "Missing $APK after the light tier"
+[[ -s "$MAP_ARCHIVE" ]] || fail "Missing separate map archive $MAP_ARCHIVE after the light tier"
 "$ADB" install -r "$APK"
+# The production app imports through Android's document picker. Seed the same
+# private destination directly for the automated airplane-mode render proof,
+# where a system picker cannot be driven reliably by Compose test semantics.
+"$ADB" shell "run-as $PACKAGE mkdir -p files/tiles"
+"$ADB" shell "run-as $PACKAGE sh -c 'cat > files/tiles/basemap.pmtiles'" < "$MAP_ARCHIVE"
 "$ADB" shell am start -n "$PACKAGE/.MainActivity"
-printf 'Pre-warming graph, tiles, and geocoder copies for 180 seconds.\n'
+printf 'Pre-warming graph, separately installed map, and geocoder for 180 seconds.\n'
 sleep 180
 "$ADB" shell am force-stop "$PACKAGE"
 rm -rf "$REPORT_DIR"

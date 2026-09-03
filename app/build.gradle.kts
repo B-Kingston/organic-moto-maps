@@ -85,21 +85,8 @@ tasks.register("validateGeocoderAsset") {
     }
 }
 
-tasks.register("validateTileAsset") {
-    val archive = file("src/main/assets/tiles/queensland.pmtiles")
-    val archiveHash = file("src/main/assets/tiles/queensland.pmtiles.sha256")
-    doLast {
-        if (!archive.isFile || archive.length() == 0L || !archiveHash.isFile || archiveHash.length() == 0L) {
-            throw GradleException(
-                "Missing app/src/main/assets/tiles/queensland.pmtiles or its SHA-256 sidecar. " +
-                    "Build them with tools/tiles/build-tiles.sh before assembling the APK."
-            )
-        }
-    }
-}
-
 tasks.named("preBuild") {
-    dependsOn("validateGeocoderAsset", "validateTileAsset")
+    dependsOn("validateGeocoderAsset")
 }
 
 dependencies {

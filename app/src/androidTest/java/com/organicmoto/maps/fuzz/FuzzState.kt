@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.hasText
 import com.organicmoto.maps.FocusedRouteIndexKey
 import com.organicmoto.maps.MapReadyKey
+import com.organicmoto.maps.MapInstalledKey
 import com.organicmoto.maps.MapRouteCountKey
 import com.organicmoto.maps.RouteCountKey
 import com.organicmoto.maps.RouteGenerationKey
@@ -26,6 +27,7 @@ data class StateFingerprint(
     val fromText: String,
     val toText: String,
     val mapReady: Boolean,
+    val mapInstalled: Boolean,
     val focusedRouteIndex: Int,
     val mapRouteCount: Int,
     val dialog: String?,
@@ -46,6 +48,7 @@ class StateExtractor(private val rule: ComposeTestRule) {
             fromText = editableText("From"),
             toText = editableText("To"),
             mapReady = map?.let { it.config.valueOrDefault(MapReadyKey, false) } ?: false,
+            mapInstalled = root.config.valueOrDefault(MapInstalledKey, false),
             focusedRouteIndex = map?.let { it.config.valueOrDefault(FocusedRouteIndexKey, 0) } ?: 0,
             mapRouteCount = map?.let { it.config.valueOrDefault(MapRouteCountKey, 0) } ?: 0,
             dialog = dialogText(),

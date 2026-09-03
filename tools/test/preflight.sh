@@ -40,8 +40,8 @@ case "$GRAPH_PROPERTIES" in
 esac
 printf 'OK: GraphHopper cache files and stored profile marker\n'
 
-TILE="app/src/main/assets/tiles/queensland.pmtiles"
-TILE_HASH_FILE="app/src/main/assets/tiles/queensland.pmtiles.sha256"
+TILE="data/tiles/queensland.pmtiles"
+TILE_HASH_FILE="data/tiles/queensland.pmtiles.sha256"
 [[ -s "$TILE" && -s "$TILE_HASH_FILE" ]] || fail "Missing PMTiles archive or SHA-256 sidecar" "$TILE_BUILD"
 EXPECTED_HASH="$(tr -d '[:space:]' < "$TILE_HASH_FILE")"
 ACTUAL_HASH="$(shasum -a 256 "$TILE" | cut -d ' ' -f1)"

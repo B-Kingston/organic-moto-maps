@@ -67,7 +67,6 @@ jobs:
             tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
             app/src/main/assets/graph-cache
             app/src/main/assets/geocoder
-            app/src/main/assets/tiles
           key: offline-${{ runner.os }}-${{ env.CACHE_SEED }}-gh${{ env.GRAPHHOPPER_VERSION }}-${{ hashFiles('tools/gh/config.yml', 'tools/gh/motorcycle.json', 'tools/tiles/build-tiles.sh', 'geocoder-tool/**') }}
 
       - name: Download OSM extract and GraphHopper import jar

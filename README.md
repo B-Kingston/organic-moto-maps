@@ -3,14 +3,14 @@
 Offline-first motorcycle routing for Android.
 Kotlin + Jetpack Compose + MapLibre Android SDK (map) + GraphHopper core (routing).
 
-The app makes **zero runtime network calls**: the vector basemap, map style,
-glyphs/sprites, place-search index, and routing graph are all prebuilt on the
-desktop and shipped inside the APK.
+The app makes **zero runtime network calls**. The map style, glyphs/sprites,
+place-search index, and routing graph ship inside the APK. The much larger
+PMTiles basemap is downloaded separately and imported with **Load map file**.
 
 ## Features
 
-- **Offline basemap** — OpenMapTiles vector tiles in a PMTiles archive, rendered
-  by MapLibre Native with a local style (`app/src/main/assets/style.json`).
+- **Offline basemap** — a separately distributed OpenMapTiles PMTiles archive,
+  selected from the phone and rendered with the APK's local style.
 - **Offline place search** — From/To fields backed by a prebuilt on-device
   geocoder index; raw `lat,lon` entry also works.
 - **Offline motorcycle routing** — GraphHopper with a motorcycle custom model,
@@ -45,7 +45,9 @@ pipelines are re-run. All take an OSM `.osm.pbf` extract placed at
 
 1. **Routing graph** — import with `tools/gh/graphhopper-web-11.0.jar`, copy
    `data/graph-cache` into `app/src/main/assets/graph-cache`.
-2. **Basemap tiles** — `tools/tiles/build-tiles.sh` (Planetiler, needs JDK 21).
+2. **Basemap tiles** — `tools/tiles/build-tiles.sh` (Planetiler, needs JDK 21)
+   writes `data/tiles/queensland.pmtiles`. Distribute that file separately;
+   users download it to their phone and select **Load map file** in the app.
 3. **Style glyphs & sprites** — `tools/style/fetch-style-assets.sh`.
 4. **Geocoder index** — `./gradlew :geocoder-tool:run` writes
    `app/src/main/assets/geocoder/geocoder.dat`.
