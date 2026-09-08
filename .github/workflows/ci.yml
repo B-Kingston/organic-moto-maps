@@ -15,11 +15,12 @@ name: light-ci
 # (tools/test/run-all.sh on a machine with an AVD).
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -142,3 +143,20 @@ jobs:
           name: ci-failure-log
           path: build/test-report/
           if-no-files-found: ignore
+
+      # A tag publishes the exact APK and matching PMTiles archive produced by
+      # this verified build. The PMTiles archive stays out of git and is
+      # distributed as a release asset for phone import.
+      - name: Publish phone test release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "curveMaps $GITHUB_REF_NAME" \
+            --notes "Install app-debug.apk, then open curveMaps and choose MAP > Load map file to import queensland.pmtiles." \
+            --prerelease \
+            app/build/outputs/apk/debug/app-debug.apk \
+            data/tiles/queensland.pmtiles \
+            data/tiles/queensland.pmtiles.sha256
