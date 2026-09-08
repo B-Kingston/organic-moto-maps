@@ -1,8 +1,8 @@
-# Test Regime for Organic Moto Maps
+# Test Regime for curveMaps
 
 ## Context
 
-The user supplied a 2153-line generic testing/fuzzing spec for offline Android apps and asked to tailor it to this repository and plan its implementation. Deliverable: a production-grade deterministic + property + fuzzing test regime for Organic Moto Maps (offline Kotlin/Compose + MapLibre + GraphHopper motorcycle route planner), implemented as JVM unit tests, instrumented androidTest suites, and local test-tier scripts (one light CI tier + one manual full-suite trigger). The regime proves the offline guarantee, generated-artifact compatibility (GraphHopper profile/helper ABI), routing invariants, complexity-dial behavior, single-flight/stale-generation safety, storage truthfulness, geocoder robustness, and UI consistency (carousel↔map, dial, fixed panel). It includes a seeded Compose-semantics fuzzer with failure recording/replay/shrinking, and encodes a LIVING-SUITE mandate into AGENTS.md: every future feature/logic change must ship with tests at this same rigor.
+The user supplied a 2153-line generic testing/fuzzing spec for offline Android apps and asked to tailor it to this repository and plan its implementation. Deliverable: a production-grade deterministic + property + fuzzing test regime for curveMaps (offline Kotlin/Compose + MapLibre + GraphHopper motorcycle route planner), implemented as JVM unit tests, instrumented androidTest suites, and local test-tier scripts (one light CI tier + one manual full-suite trigger). The regime proves the offline guarantee, generated-artifact compatibility (GraphHopper profile/helper ABI), routing invariants, complexity-dial behavior, single-flight/stale-generation safety, storage truthfulness, geocoder robustness, and UI consistency (carousel↔map, dial, fixed panel). It includes a seeded Compose-semantics fuzzer with failure recording/replay/shrinking, and encodes a LIVING-SUITE mandate into AGENTS.md: every future feature/logic change must ship with tests at this same rigor.
 
 ## Grounding facts (measured 2026-08-26)
 
