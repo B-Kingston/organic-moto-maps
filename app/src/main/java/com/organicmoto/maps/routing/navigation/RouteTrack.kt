@@ -40,6 +40,12 @@ class RouteTrack(
         val sign: Int,
         /** Human road/street name for the maneuver, may be empty. */
         val streetName: String,
+        /** Signed route deflection at the maneuver, in degrees; right is positive. */
+        val turnAngleDeg: Double? = null,
+        /** Chosen exit number for a GraphHopper roundabout instruction, when known. */
+        val roundaboutExitNumber: Int? = null,
+        /** True for clockwise circulation, false for counterclockwise, null when ambiguous. */
+        val roundaboutClockwise: Boolean? = null,
     )
 
     val vertexCount: Int get() = latitudes.size
@@ -128,13 +134,17 @@ class RouteTrack(
             instructionNames: List<String>,
             instructionPointCounts: List<Int>,
             instructionTimesS: List<Double>,
+            instructionRoundaboutExitNumbers: List<Int?> = List(instructionSigns.size) { null },
+            instructionRoundaboutClockwise: List<Boolean?> = List(instructionSigns.size) { null },
         ): RouteTrack {
             val n = latitudes.size
             require(n >= 2) { "a route track needs at least two vertices" }
             require(longitudes.size == n) { "coordinate arrays must align" }
             require(instructionNames.size == instructionSigns.size &&
                 instructionPointCounts.size == instructionSigns.size &&
-                instructionTimesS.size == instructionSigns.size
+                instructionTimesS.size == instructionSigns.size &&
+                instructionRoundaboutExitNumbers.size == instructionSigns.size &&
+                instructionRoundaboutClockwise.size == instructionSigns.size
             ) { "instruction fields must align" }
             // Exact cumulative geometric distances: the distance cache must
             // reflect real geometry so remaining-distance math is honest.
@@ -182,7 +192,15 @@ class RouteTrack(
                 // at the vertex where the previous instruction ended. Skip the
                 // synthetic first instruction (depart / continue at origin).
                 if (i > 0 && isRealTurn(instructionSigns[i])) {
-                    turns += TurnNode(cursor.coerceAtMost(n - 1), instructionSigns[i], instructionNames[i])
+                    val vertex = cursor.coerceAtMost(n - 1)
+                    turns += TurnNode(
+                        vertexIndex = vertex,
+                        sign = instructionSigns[i],
+                        streetName = instructionNames[i],
+                        turnAngleDeg = turnAngleAt(latitudes, longitudes, vertex),
+                        roundaboutExitNumber = instructionRoundaboutExitNumbers[i],
+                        roundaboutClockwise = instructionRoundaboutClockwise[i],
+                    )
                 }
                 cursor = end
             }
@@ -209,5 +227,42 @@ class RouteTrack(
             -> false
             else -> true
         }
+
+        /**
+         * Measures the route's direction change from the closest distinct
+         * geometry vertices either side of a maneuver. GraphHopper signs
+         * classify the instruction; this angle preserves how gently the road
+         * actually bends for the HUD arrow.
+         */
+        private fun turnAngleAt(
+            latitudes: DoubleArray,
+            longitudes: DoubleArray,
+            vertex: Int,
+        ): Double? {
+            var before = vertex - 1
+            while (before >= 0 && GeoMath.haversineM(
+                    latitudes[before], longitudes[before], latitudes[vertex], longitudes[vertex],
+                ) < MIN_TURN_BEARING_SAMPLE_M
+            ) {
+                before--
+            }
+            var after = vertex + 1
+            while (after < latitudes.size && GeoMath.haversineM(
+                    latitudes[vertex], longitudes[vertex], latitudes[after], longitudes[after],
+                ) < MIN_TURN_BEARING_SAMPLE_M
+            ) {
+                after++
+            }
+            if (before < 0 || after >= latitudes.size) return null
+            val incoming = GeoMath.bearingDeg(
+                latitudes[before], longitudes[before], latitudes[vertex], longitudes[vertex],
+            )
+            val outgoing = GeoMath.bearingDeg(
+                latitudes[vertex], longitudes[vertex], latitudes[after], longitudes[after],
+            )
+            return GeoMath.signedBearingDeltaDeg(incoming, outgoing)
+        }
+
+        private const val MIN_TURN_BEARING_SAMPLE_M = 0.5
     }
 }
