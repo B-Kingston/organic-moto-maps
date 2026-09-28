@@ -64,6 +64,12 @@ data class NavigationSnapshot(
         val streetName: String,
         /** Distance to the maneuver in metres. */
         val distanceM: Double,
+        /** Signed route deflection at the maneuver, in degrees; right is positive. */
+        val turnAngleDeg: Double? = null,
+        /** Chosen exit number for a roundabout, when known. */
+        val roundaboutExitNumber: Int? = null,
+        /** True for clockwise circulation, false for counterclockwise, null when ambiguous. */
+        val roundaboutClockwise: Boolean? = null,
     )
 }
 
@@ -402,7 +408,14 @@ class NavigationSession(
         bearing: Double,
     ) {
         val turn = activeTrack.nextTurn(offset)?.let { (node, distance) ->
-            NavigationSnapshot.TurnInfo(node.sign, node.streetName, distance)
+            NavigationSnapshot.TurnInfo(
+                sign = node.sign,
+                streetName = node.streetName,
+                distanceM = distance,
+                turnAngleDeg = node.turnAngleDeg,
+                roundaboutExitNumber = node.roundaboutExitNumber,
+                roundaboutClockwise = node.roundaboutClockwise,
+            )
         }
         emit(fix, lat, lon, bearing, offset, turn)
     }

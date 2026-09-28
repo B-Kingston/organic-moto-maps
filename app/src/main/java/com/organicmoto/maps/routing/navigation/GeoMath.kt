@@ -40,6 +40,15 @@ internal object GeoMath {
         return if (d > 180.0) 360.0 - d else d
     }
 
+    /**
+     * Signed shortest change from [fromDeg] to [toDeg], where positive means
+     * clockwise/right and negative means counter-clockwise/left.
+     */
+    fun signedBearingDeltaDeg(fromDeg: Double, toDeg: Double): Double {
+        val delta = (toDeg - fromDeg + 540.0) % 360.0 - 180.0
+        return if (delta == -180.0) 180.0 else delta
+    }
+
     /** Shortest squared distance from [p] to segment [a]-[b] in a local
      * equirectangular approximation (metres). Also returns the projection
      * parameter t in [0,1]. */

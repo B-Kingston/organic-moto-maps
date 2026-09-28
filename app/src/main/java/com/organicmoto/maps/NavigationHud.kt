@@ -1,8 +1,7 @@
 package com.organicmoto.maps
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,18 +9,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -32,7 +35,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.Canvas
 import com.graphhopper.util.Instruction
 import com.organicmoto.maps.routing.navigation.NavigationSnapshot
 import kotlin.math.abs
@@ -64,8 +66,26 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
-                drawTurnArrow(snapshot.turn?.sign, size.width, size.height)
+            Box(
+                modifier = Modifier.size(width = 44.dp, height = 44.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
+                    drawTurnArrow(snapshot.turn, size.width, size.height)
+                }
+                snapshot.turn?.roundaboutExitNumber?.takeIf { it > 0 }?.let { exitNumber ->
+                    Text(
+                        text = exitNumber.toString(),
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .clip(CircleShape)
+                            .background(Color(0xFF249CF2))
+                            .padding(horizontal = 3.dp, vertical = 1.dp),
+                    )
+                }
             }
             Spacer(Modifier.height(6.dp))
             Text(
@@ -196,10 +216,11 @@ private fun DeltaCell(deltaS: Double, modifier: Modifier = Modifier) {
     }
 }
 
-/** Hand-drawn turn arrow: one canvas, sign-driven shape like the repo's icons. */
-private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
+/** Hand-drawn maneuver symbol, shaped from GraphHopper's instruction and route geometry. */
+private fun DrawScope.drawTurnArrow(turn: NavigationSnapshot.TurnInfo?, w: Float, h: Float) {
     val stroke = Stroke(width = w * 0.09f, cap = StrokeCap.Round)
     val paint = Color.White
+    val sign = turn?.sign
     if (sign == null) {
         // No turn pending: draw a straight placeholder stem.
         val path = Path().apply {
@@ -211,8 +232,42 @@ private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
     }
     val isUTurn = sign == Instruction.U_TURN_UNKNOWN ||
         sign == Instruction.U_TURN_LEFT || sign == Instruction.U_TURN_RIGHT
-    val isRoundabout = sign == Instruction.USE_ROUNDABOUT ||
-        sign == Instruction.LEAVE_ROUNDABOUT
+    val isRoundabout = sign == Instruction.USE_ROUNDABOUT || sign == Instruction.LEAVE_ROUNDABOUT
+    if (isUTurn) {
+        drawUTurnArrow(
+            NavigationHudFormat.uTurnSide(sign, turn.turnAngleDeg),
+            w,
+            h,
+            paint,
+            stroke,
+        )
+        return
+    }
+    if (isRoundabout) {
+        drawRoundaboutArrow(
+            w,
+            h,
+            sign == Instruction.LEAVE_ROUNDABOUT,
+            turn.roundaboutClockwise,
+            paint,
+            stroke,
+        )
+        return
+    }
+    if (sign == Instruction.KEEP_LEFT || sign == Instruction.KEEP_RIGHT) {
+        drawKeepArrow(sign == Instruction.KEEP_LEFT, w, h, paint, stroke)
+        return
+    }
+    if (sign == Instruction.TURN_SLIGHT_LEFT || sign == Instruction.TURN_SLIGHT_RIGHT) {
+        drawVeerArrow(
+            NavigationHudFormat.slightVeerAngleDeg(sign, turn.turnAngleDeg),
+            w,
+            h,
+            paint,
+            stroke,
+        )
+        return
+    }
     val left = sign < 0 // GraphHopper left maneuvers have negative signs
     val sharp = abs(sign) == 3 // sharp variants
     val straight = sign == Instruction.CONTINUE_ON_STREET ||
@@ -223,17 +278,6 @@ private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
     var headY = h * 0.16f
     val path = Path().apply {
         when {
-            isUTurn || isRoundabout -> {
-                // A compact hook whose arrowhead follows the end of the curve.
-                val side = if (left) w * 0.28f else w * 0.72f
-                moveTo(w * 0.5f, h * 0.85f)
-                lineTo(w * 0.5f, h * 0.38f)
-                cubicTo(w * 0.5f, h * 0.15f, side, h * 0.15f, side, h * 0.4f)
-                headFromX = side
-                headFromY = h * 0.18f
-                headX = side
-                headY = h * 0.4f
-            }
             straight -> {
                 moveTo(w * 0.5f, h * 0.85f)
                 lineTo(headX, headY)
@@ -242,9 +286,8 @@ private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
                 // Keep the elbow close to the stem and let the final segment
                 // determine the arrowhead angle.
                 val direction = if (left) -1f else 1f
-                val slight = abs(sign) == 1 || abs(sign) == 7
-                headX = w * (0.5f + direction * if (sharp) 0.32f else if (slight) 0.25f else 0.3f)
-                headY = h * if (sharp) 0.55f else if (slight) 0.2f else 0.4f
+                headX = w * (0.5f + direction * if (sharp) 0.32f else 0.3f)
+                headY = h * if (sharp) 0.55f else 0.4f
                 headFromX = w * 0.5f
                 headFromY = h * 0.44f
                 moveTo(w * 0.5f, h * 0.85f)
@@ -271,6 +314,191 @@ private fun DrawScope.drawTurnArrow(sign: Int?, w: Float, h: Float) {
         lineTo(baseX + uy * wing, baseY - ux * wing)
     }
     drawPath(head, paint, style = stroke)
+}
+
+/** A neutral U-turn when GraphHopper does not provide a side. */
+private fun DrawScope.drawUTurnArrow(
+    side: Int,
+    w: Float,
+    h: Float,
+    color: Color,
+    stroke: Stroke,
+) {
+    if (side == 0) {
+        val centerX = w * 0.5f
+        val leftX = w * 0.27f
+        val rightX = w * 0.73f
+        val turnY = h * 0.45f
+        val returnY = h * 0.68f
+        val path = Path().apply {
+            moveTo(centerX, h * 0.9f)
+            lineTo(centerX, turnY)
+            cubicTo(centerX, h * 0.2f, leftX, h * 0.2f, leftX, turnY)
+            lineTo(leftX, returnY)
+            moveTo(centerX, turnY)
+            cubicTo(centerX, h * 0.2f, rightX, h * 0.2f, rightX, turnY)
+            lineTo(rightX, returnY)
+        }
+        drawPath(path, color, style = stroke)
+        drawArrowHead(leftX, returnY, 0f, 1f, w, color, stroke)
+        drawArrowHead(rightX, returnY, 0f, 1f, w, color, stroke)
+        return
+    }
+
+    val sideX = w * if (side < 0) 0.28f else 0.72f
+    val path = Path().apply {
+        moveTo(w * 0.5f, h * 0.88f)
+        lineTo(w * 0.5f, h * 0.38f)
+        cubicTo(w * 0.5f, h * 0.15f, sideX, h * 0.15f, sideX, h * 0.4f)
+    }
+    drawPath(path, color, style = stroke)
+    drawArrowHead(sideX, h * 0.4f, 0f, 1f, w, color, stroke)
+}
+
+/** A slight bend keeps the arrowhead close to straight ahead, matching a veer. */
+private fun DrawScope.drawVeerArrow(
+    deflectionDeg: Float,
+    w: Float,
+    h: Float,
+    color: Color,
+    stroke: Stroke,
+) {
+    val angle = Math.toRadians(deflectionDeg.toDouble())
+    val directionX = kotlin.math.sin(angle).toFloat()
+    val directionY = -kotlin.math.cos(angle).toFloat()
+    val stemX = w * 0.5f
+    val bendY = h * 0.58f
+    val tipX = stemX + directionX * w * 0.31f
+    val tipY = bendY + directionY * h * 0.31f
+    val handle = w * 0.16f
+    val path = Path().apply {
+        moveTo(stemX, h * 0.88f)
+        lineTo(stemX, bendY)
+        cubicTo(
+            stemX,
+            bendY - handle,
+            tipX - directionX * handle,
+            tipY - directionY * handle,
+            tipX,
+            tipY,
+        )
+    }
+    drawPath(path, color, style = stroke)
+    drawArrowHead(tipX, tipY, directionX, directionY, w, color, stroke)
+}
+
+/** A fork with only the chosen keep-left/right branch receiving an arrowhead. */
+private fun DrawScope.drawKeepArrow(
+    keepLeft: Boolean,
+    w: Float,
+    h: Float,
+    color: Color,
+    stroke: Stroke,
+) {
+    val forkX = w * 0.5f
+    val forkY = h * 0.55f
+    val selectedX = w * if (keepLeft) 0.2f else 0.8f
+    val otherX = w - selectedX
+    val branchY = h * 0.22f
+    val approach = Path().apply {
+        moveTo(forkX, h * 0.9f)
+        lineTo(forkX, forkY)
+    }
+    val selected = Path().apply {
+        moveTo(forkX, forkY)
+        lineTo(selectedX, branchY)
+    }
+    val other = Path().apply {
+        moveTo(forkX, forkY)
+        lineTo(otherX, branchY)
+    }
+    drawPath(approach, color, style = stroke)
+    drawPath(selected, color, style = stroke)
+    drawPath(other, Color(0xFF85858A), style = Stroke(width = w * 0.055f, cap = StrokeCap.Round))
+    val directionX = if (keepLeft) -0.68f else 0.68f
+    val directionY = -0.73f
+    drawArrowHead(selectedX, branchY, directionX, directionY, w, color, stroke)
+}
+
+/** Entry into a roundabout, with the selected exit number shown as a badge. */
+private fun DrawScope.drawRoundaboutArrow(
+    w: Float,
+    h: Float,
+    leaving: Boolean,
+    clockwise: Boolean?,
+    color: Color,
+    stroke: Stroke,
+) {
+    val diameter = w * 0.58f
+    val radius = diameter * 0.5f
+    val left = (w - diameter) * 0.5f
+    val top = h * 0.16f
+    val center = Offset(w * 0.5f, top + radius)
+    drawPath(
+        Path().apply {
+            moveTo(center.x, h * 0.94f)
+            lineTo(center.x, center.y + radius)
+        },
+        color,
+        style = stroke,
+    )
+    // The lower gap joins the approach to the loop. GraphHopper supplies the
+    // actual circulation direction; omit the arrowhead if its geometry is
+    // ambiguous instead of implying the wrong direction.
+    val startAngle = if (clockwise == false) 40f else 140f
+    val sweepAngle = if (clockwise == false) -280f else 280f
+    drawArc(
+        color = color,
+        startAngle = startAngle,
+        sweepAngle = sweepAngle,
+        useCenter = false,
+        topLeft = Offset(left, top),
+        size = Size(diameter, diameter),
+        style = stroke,
+    )
+    clockwise?.let { isClockwise ->
+        val endAngle = Math.toRadians((startAngle + sweepAngle).toDouble())
+        val endX = center.x + radius * kotlin.math.cos(endAngle).toFloat()
+        val endY = center.y + radius * kotlin.math.sin(endAngle).toFloat()
+        val rotationSign = if (isClockwise) 1f else -1f
+        val tangentX = -kotlin.math.sin(endAngle).toFloat() * rotationSign
+        val tangentY = kotlin.math.cos(endAngle).toFloat() * rotationSign
+        drawArrowHead(endX, endY, tangentX, tangentY, w, color, stroke)
+    }
+    if (leaving) {
+        val exitY = center.y
+        val exit = Path().apply {
+            moveTo(center.x + radius, exitY)
+            lineTo(w * 0.94f, exitY)
+        }
+        drawPath(exit, color, style = stroke)
+        drawArrowHead(w * 0.94f, exitY, 1f, 0f, w, color, stroke)
+    }
+}
+
+/** Arrowhead aligned to a normalized direction vector. */
+private fun DrawScope.drawArrowHead(
+    tipX: Float,
+    tipY: Float,
+    directionX: Float,
+    directionY: Float,
+    w: Float,
+    color: Color,
+    stroke: Stroke,
+) {
+    val length = kotlin.math.sqrt(directionX * directionX + directionY * directionY).coerceAtLeast(1e-3f)
+    val ux = directionX / length
+    val uy = directionY / length
+    val headLength = w * 0.15f
+    val wing = w * 0.075f
+    val baseX = tipX - ux * headLength
+    val baseY = tipY - uy * headLength
+    val head = Path().apply {
+        moveTo(baseX - uy * wing, baseY + ux * wing)
+        lineTo(tipX, tipY)
+        lineTo(baseX + uy * wing, baseY - ux * wing)
+    }
+    drawPath(head, color, style = stroke)
 }
 
 
@@ -308,18 +536,59 @@ object NavigationHudFormat {
             -> "make a U-turn"
             Instruction.TURN_SHARP_LEFT -> "turn sharp left"
             Instruction.TURN_LEFT -> "turn left"
-            Instruction.TURN_SLIGHT_LEFT -> "turn slight left"
+            Instruction.TURN_SLIGHT_LEFT -> "veer slightly left"
             Instruction.KEEP_LEFT -> "keep left"
             Instruction.TURN_SHARP_RIGHT -> "turn sharp right"
             Instruction.TURN_RIGHT -> "turn right"
-            Instruction.TURN_SLIGHT_RIGHT -> "turn slight right"
+            Instruction.TURN_SLIGHT_RIGHT -> "veer slightly right"
             Instruction.KEEP_RIGHT -> "keep right"
-            Instruction.USE_ROUNDABOUT -> "enter the roundabout"
+            Instruction.USE_ROUNDABOUT -> turn.roundaboutExitNumber
+                ?.takeIf { it > 0 }
+                ?.let { "take the ${ordinal(it)} exit at the roundabout" }
+                ?: "enter the roundabout"
             Instruction.LEAVE_ROUNDABOUT -> "exit the roundabout"
             Instruction.FERRY -> "take the ferry"
             else -> "continue ahead"
         }
         return "$action in ${distanceText(turn.distanceM)}"
+    }
+
+    /** Returns the route's slight-turn angle when it agrees with the sign. */
+    fun slightVeerAngleDeg(sign: Int, routeAngleDeg: Double?): Float {
+        val direction = when (sign) {
+            Instruction.TURN_SLIGHT_LEFT -> -1.0
+            Instruction.TURN_SLIGHT_RIGHT -> 1.0
+            else -> return 0f
+        }
+        val measuredMagnitude = routeAngleDeg
+            ?.takeIf { it.isFinite() && it * direction > 0.0 && abs(it) >= 8.0 }
+            ?.let { abs(it).coerceIn(12.0, 58.0) }
+        return (measuredMagnitude ?: 35.0).toFloat() * direction.toFloat()
+    }
+
+    /** Resolves a U-turn side from its sign or unambiguous route geometry. */
+    fun uTurnSide(sign: Int, routeAngleDeg: Double?): Int = when (sign) {
+        Instruction.U_TURN_LEFT -> -1
+        Instruction.U_TURN_RIGHT -> 1
+        Instruction.U_TURN_UNKNOWN -> routeAngleDeg
+            ?.takeIf { it.isFinite() && abs(it) in 30.0..160.0 }
+            ?.let { if (it < 0.0) -1 else 1 }
+            ?: 0
+        else -> 0
+    }
+
+    private fun ordinal(number: Int): String {
+        val suffix = if (number % 100 in 11..13) {
+            "th"
+        } else {
+            when (number % 10) {
+                1 -> "st"
+                2 -> "nd"
+                3 -> "rd"
+                else -> "th"
+            }
+        }
+        return "$number$suffix"
     }
 
     /**
