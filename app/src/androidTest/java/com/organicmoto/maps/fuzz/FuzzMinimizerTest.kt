@@ -137,6 +137,8 @@ class FuzzMinimizerTest {
         FuzzAction.Back -> "{\"type\":\"Back\"}"
         FuzzAction.OpenSavedRoutes -> "{\"type\":\"OpenSavedRoutes\"}"
         FuzzAction.ToggleSettings -> "{\"type\":\"ToggleSettings\"}"
+        FuzzAction.OpenVoiceSettings -> "{\"type\":\"OpenVoiceSettings\"}"
+        FuzzAction.ToggleDarkRideMap -> "{\"type\":\"ToggleDarkRideMap\"}"
         is FuzzAction.PanMap -> "{\"type\":\"PanMap\",\"direction\":\"${action.direction}\"}"
         FuzzAction.BackgroundForeground -> "{\"type\":\"BackgroundForeground\"}"
     }

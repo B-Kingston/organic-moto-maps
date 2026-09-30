@@ -56,13 +56,16 @@ class PlannerPanelTest {
             .fetchSemanticsNode().boundsInRoot
         val settings = composeRule.onNodeWithContentDescription("Route settings")
             .fetchSemanticsNode().boundsInRoot
+        val voiceSettings = composeRule.onNodeWithContentDescription("Voice guidance settings")
+            .fetchSemanticsNode().boundsInRoot
         val saved = composeRule.onNodeWithContentDescription("Saved routes")
             .fetchSemanticsNode().boundsInRoot
         val zoomIn = composeRule.onNodeWithContentDescription("Zoom in")
             .fetchSemanticsNode().boundsInRoot
 
         assertTrue(import.top < settings.top)
-        assertTrue(settings.top < saved.top)
+        assertTrue(settings.top < voiceSettings.top)
+        assertTrue(voiceSettings.top < saved.top)
         assertTrue(import.left >= root.center.x)
         assertEquals(import.width, zoomIn.width, 1f)
         assertEquals(import.right, zoomIn.right, 1f)

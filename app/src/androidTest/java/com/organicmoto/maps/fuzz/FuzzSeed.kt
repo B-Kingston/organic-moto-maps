@@ -57,6 +57,8 @@ object FuzzSeed {
                 "Back" -> FuzzAction.Back
                 "OpenSavedRoutes" -> FuzzAction.OpenSavedRoutes
                 "ToggleSettings" -> FuzzAction.ToggleSettings
+                "OpenVoiceSettings" -> FuzzAction.OpenVoiceSettings
+                "ToggleDarkRideMap" -> FuzzAction.ToggleDarkRideMap
                 "PanMap" -> FuzzAction.PanMap(requireNotNull(direction))
                 "BackgroundForeground" -> FuzzAction.BackgroundForeground
                 else -> error("unknown fuzz action type $type")

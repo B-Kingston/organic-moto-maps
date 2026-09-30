@@ -36,6 +36,7 @@ class AccessibilityTest {
             "Ride complexity level 0",
             "Saved routes",
             "Route settings",
+            "Voice guidance settings",
             "From",
             "To",
         )
@@ -45,12 +46,42 @@ class AccessibilityTest {
         assertTargetAtLeast48Dp("Ride complexity level 0", requiresClick = false)
         assertTargetAtLeast48Dp("Saved routes")
         assertTargetAtLeast48Dp("Route settings")
+        assertTargetAtLeast48Dp("Voice guidance settings")
         val start = composeRule.onNodeWithText("START")
         start.assertHasClickAction()
         val minimum = 48f * composeRule.density.density
         val startBounds = start.fetchSemanticsNode().boundsInRoot
         assertTrue("START width ${startBounds.width} < $minimum", startBounds.width >= minimum)
         assertTrue("START height ${startBounds.height} < $minimum", startBounds.height >= minimum)
+    }
+
+    @Test
+    fun voiceSettingsExposeAccessibleControlsAndOfflineStatus() {
+        composeRule.onNodeWithContentDescription("Voice guidance settings", substring = true)
+            .performClick()
+        composeRule.onNodeWithText("Voice guidance").assertExists()
+        composeRule.onNodeWithContentDescription("Spoken turn guidance").assertExists()
+        composeRule.onNodeWithContentDescription("Announcement interval", substring = true).assertExists()
+        composeRule.onNodeWithContentDescription("Preview next", substring = true).assertExists()
+        composeRule.onNodeWithText("offline voice", substring = true, ignoreCase = true).assertExists()
+        assertTargetAtLeast48Dp("Spoken turn guidance")
+        assertTargetAtLeast48Dp("Announcement interval", requiresClick = false)
+        assertTargetAtLeast48Dp("Preview next", requiresClick = false)
+    }
+
+    @Test
+    fun darkRideMapToggleHasAnAccessibleTargetDuringGuidance() {
+        composeRule.onNodeWithContentDescription("From").performTextInput("-27.4698,153.0251")
+        composeRule.onNodeWithContentDescription("To").performTextInput("-27.3353,152.7720")
+        composeRule.onNodeWithText("START").performClick()
+        composeRule.waitUntil(300_000) {
+            composeRule.onAllNodes(SemanticsMatcher.expectValue(RouteUiStateKey, "success"))
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        composeRule.onNodeWithText("RIDE").performClick()
+        composeRule.onNodeWithContentDescription("Dark ride map", substring = true).assertExists()
+        assertTargetAtLeast48Dp("Dark ride map")
     }
 
     @Test

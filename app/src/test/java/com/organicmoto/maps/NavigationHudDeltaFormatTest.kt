@@ -57,13 +57,35 @@ class NavigationHudDeltaFormatTest {
         val twelfthExit = secondExit.copy(roundaboutExitNumber = 12)
 
         assertEquals(
-            "take the 2nd exit at the roundabout in 120 m",
+            "enter the roundabout in 120 m, then take the 2nd exit",
             NavigationHudFormat.turnDescription(secondExit),
         )
         assertEquals(
-            "take the 12th exit at the roundabout in 120 m",
+            "enter the roundabout in 120 m, then take the 12th exit",
             NavigationHudFormat.turnDescription(twelfthExit),
         )
+    }
+
+    @Test
+    fun voiceSettingsDescriptionSeparatesPreferenceFromAvailability() {
+        assertEquals(
+            "Voice guidance settings, enabled, checking offline voice",
+            NavigationHudFormat.voiceSettingsDescription(true, "checking offline voice"),
+        )
+        assertEquals(
+            "Voice guidance settings, enabled",
+            NavigationHudFormat.voiceSettingsDescription(true),
+        )
+        assertEquals(
+            "Voice guidance settings, disabled",
+            NavigationHudFormat.voiceSettingsDescription(false, "checking offline voice"),
+        )
+    }
+
+    @Test
+    fun darkRideMapDescriptionStatesItsCurrentSetting() {
+        assertEquals("Dark ride map, on", NavigationHudFormat.darkRideMapDescription(true))
+        assertEquals("Dark ride map, off", NavigationHudFormat.darkRideMapDescription(false))
     }
 
     @Test
@@ -94,6 +116,16 @@ class NavigationHudDeltaFormatTest {
         assertEquals(1, NavigationHudFormat.uTurnSide(Instruction.U_TURN_UNKNOWN, 90.0))
         assertEquals(0, NavigationHudFormat.uTurnSide(Instruction.U_TURN_UNKNOWN, 180.0))
         assertEquals(0, NavigationHudFormat.uTurnSide(Instruction.U_TURN_UNKNOWN, Double.NaN))
+    }
+
+    @Test
+    fun maneuverAccessibilityDescriptionIncludesTheRoadName() {
+        assertEquals(
+            "turn left in 120 m onto Queen Street",
+            NavigationHudFormat.turnDescription(
+                NavigationSnapshot.TurnInfo(Instruction.TURN_LEFT, "Queen Street", 120.0),
+            ),
+        )
     }
 
     @Test

@@ -86,6 +86,37 @@ class StyleAndSpritesIntegrityTest {
         }
     }
 
+    @Test
+    fun darkRideStyleIsOfflineBlackAndKeepsOnlyDimRoadsAndLimitedRoadNames() {
+        val style = JSONObject(
+            repoRoot().resolve("app/src/main/assets/ride-dark-style.json").readText(),
+        )
+        val source = style.getJSONObject("sources").getJSONObject("omt")
+        assertEquals("{tiles_path}", source.getString("url"))
+        assertTrue(source.getString("attribution").contains("OpenStreetMap"))
+
+        val layers = style.getJSONArray("layers")
+        val ids = (0 until layers.length()).map { layers.getJSONObject(it).getString("id") }
+        assertEquals(listOf("background", "ride-roads", "ride-road-labels"), ids)
+        assertEquals(
+            "#000000",
+            layers.getJSONObject(0).getJSONObject("paint").getString("background-color"),
+        )
+        val roads = layers.getJSONObject(1)
+        assertEquals("transportation", roads.getString("source-layer"))
+        assertEquals("#777777", roads.getJSONObject("paint").getString("line-color"))
+        val labels = layers.getJSONObject(2)
+        assertEquals("transportation_name", labels.getString("source-layer"))
+        assertTrue(labels.getInt("minzoom") >= 10)
+        assertEquals("asset://glyphs/{fontstack}/{range}.pbf", style.getString("glyphs"))
+
+        val strings = mutableListOf<String>()
+        collectStrings(style, null, strings)
+        assertTrue("dark guidance style must not request network resources", strings.none {
+            it.matches(Regex("^https?://.*"))
+        })
+    }
+
     /**
      * The install step in tools/style/fetch-style-assets.sh already fails when
      * a listed icon is missing from sprite.json, but nothing stopped someone

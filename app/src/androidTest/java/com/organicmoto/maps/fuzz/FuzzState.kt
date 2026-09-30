@@ -11,6 +11,9 @@ import androidx.compose.ui.test.hasText
 import com.organicmoto.maps.FocusedRouteIndexKey
 import com.organicmoto.maps.MapReadyKey
 import com.organicmoto.maps.MapInstalledKey
+import com.organicmoto.maps.GuidanceActiveKey
+import com.organicmoto.maps.DarkRideMapEnabledKey
+import com.organicmoto.maps.DarkGuidanceStyleReadyKey
 import com.organicmoto.maps.MapRouteCountKey
 import com.organicmoto.maps.RouteCountKey
 import com.organicmoto.maps.RouteGenerationKey
@@ -32,6 +35,10 @@ data class StateFingerprint(
     val mapRouteCount: Int,
     val dialog: String?,
     val sheetOpen: Boolean,
+    val voiceSettingsOpen: Boolean,
+    val guidanceActive: Boolean,
+    val darkRideMapEnabled: Boolean,
+    val darkGuidanceStyleReady: Boolean,
 )
 
 class StateExtractor(private val rule: ComposeTestRule) {
@@ -53,6 +60,13 @@ class StateExtractor(private val rule: ComposeTestRule) {
             mapRouteCount = map?.let { it.config.valueOrDefault(MapRouteCountKey, 0) } ?: 0,
             dialog = dialogText(),
             sheetOpen = rule.onAllNodes(hasText("Saved routes")).fetchSemanticsNodes().isNotEmpty(),
+            voiceSettingsOpen = rule.onAllNodes(
+                hasText("Spoken turn guidance"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty(),
+            guidanceActive = root.config.valueOrDefault(GuidanceActiveKey, false),
+            darkRideMapEnabled = root.config.valueOrDefault(DarkRideMapEnabledKey, false),
+            darkGuidanceStyleReady = root.config.valueOrDefault(DarkGuidanceStyleReadyKey, false),
         )
     }
 
@@ -159,6 +173,8 @@ class CoverageTracker {
         FuzzAction.Back -> null
         FuzzAction.OpenSavedRoutes -> UiTarget.SAVED_ROUTES
         FuzzAction.ToggleSettings -> UiTarget.SETTINGS_COG
+        FuzzAction.OpenVoiceSettings -> UiTarget.VOICE_SETTINGS
+        FuzzAction.ToggleDarkRideMap -> UiTarget.DARK_RIDE_MAP
         is FuzzAction.PanMap -> UiTarget.MAP
         FuzzAction.BackgroundForeground -> null
     }

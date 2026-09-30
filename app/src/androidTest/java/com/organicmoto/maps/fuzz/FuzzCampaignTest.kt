@@ -188,6 +188,8 @@ class FuzzCampaignTest {
         FuzzAction.Back::class.java to 5,
         FuzzAction.OpenSavedRoutes::class.java to 5,
         FuzzAction.ToggleSettings::class.java to 5,
+        FuzzAction.OpenVoiceSettings::class.java to 5,
+        FuzzAction.ToggleDarkRideMap::class.java to 5,
         FuzzAction.PanMap::class.java to 6,
         FuzzAction.BackgroundForeground::class.java to 3,
     )

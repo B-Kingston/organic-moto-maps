@@ -1,6 +1,7 @@
 package com.organicmoto.maps.map
 
 import android.Manifest
+import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
@@ -80,6 +81,18 @@ class CarouselMapConsistencyTest {
         composeRule.waitUntil(30_000) { rootNode().config[SelectedRouteKey] != before }
         assertSelectionMatchesMap()
         // Selecting the "Route 2" card must land exactly on alternative index 1.
+        assertEquals(1, rootNode().config[SelectedRouteKey])
+
+        // Exercise the MapView stop/start path after selection. The route set
+        // and focus stay selected, and the resumed map must become ready again.
+        composeRule.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        composeRule.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        composeRule.waitUntil(30_000) {
+            composeRule.onAllNodes(SemanticsMatcher.keyIsDefined(MapRouteCountKey))
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        assertSelectionMatchesMap()
         assertEquals(1, rootNode().config[SelectedRouteKey])
     }
 

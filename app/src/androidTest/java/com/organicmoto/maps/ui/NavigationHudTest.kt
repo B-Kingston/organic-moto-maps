@@ -48,6 +48,12 @@ class NavigationHudTest {
     fun routedPlanShowsRideAction() {
         routeSomethingValid()
         composeRule.onNodeWithText("RIDE").assertIsDisplayed()
+        org.junit.Assert.assertTrue(
+            "dark ride map toggle must stay inside guidance",
+            composeRule.onAllNodes(
+                androidx.compose.ui.test.hasContentDescription("Dark ride map", substring = true),
+            ).fetchSemanticsNodes().isEmpty(),
+        )
     }
 
     @Test
@@ -62,5 +68,57 @@ class NavigationHudTest {
     @Test
     fun centreOnMeButtonIsAvailable() {
         composeRule.onNodeWithContentDescription("Centre on me").assertIsDisplayed()
+    }
+
+    @Test
+    fun voiceSettingsRemainReachableDuringGuidance() {
+        routeSomethingValid()
+        composeRule.onNodeWithText("RIDE").performClick()
+        composeRule.onNodeWithContentDescription("Voice guidance settings", substring = true)
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.onNodeWithText("Voice guidance").assertIsDisplayed()
+    }
+
+    @Test
+    fun darkRideMapPreferenceIsRememberedForTheNextRide() {
+        routeSomethingValid()
+        composeRule.onNodeWithText("RIDE").performClick()
+        val darkMapOff = composeRule.onAllNodes(
+            androidx.compose.ui.test.hasContentDescription("Dark ride map, off"),
+        ).fetchSemanticsNodes()
+        if (darkMapOff.isNotEmpty()) {
+            composeRule.onNodeWithContentDescription("Dark ride map, off").performClick()
+        }
+        composeRule.onNodeWithContentDescription("Dark ride map, on").assertIsDisplayed()
+        waitForDarkGuidanceStyle()
+        composeRule.onNodeWithContentDescription("Dark ride map, on").performClick()
+        composeRule.onNodeWithContentDescription("Dark ride map, off").performClick()
+        waitForDarkGuidanceStyle()
+        composeRule.onNodeWithContentDescription("Dark ride map, on").assertIsDisplayed()
+
+        composeRule.onNodeWithText("END").performClick()
+        composeRule.onNodeWithText("START").performClick()
+        composeRule.waitUntil(120_000) {
+            composeRule.onAllNodes(androidx.compose.ui.test.SemanticsMatcher
+                .expectValue(com.organicmoto.maps.RouteUiStateKey, "success"))
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        composeRule.onNodeWithText("RIDE").performClick()
+        composeRule.onNodeWithContentDescription("Dark ride map, on").assertIsDisplayed()
+        waitForDarkGuidanceStyle()
+        composeRule.onNodeWithText("END").performClick()
+    }
+
+    private fun waitForDarkGuidanceStyle() {
+        composeRule.waitUntil(30_000) {
+            composeRule.onAllNodes(
+                androidx.compose.ui.test.SemanticsMatcher.expectValue(
+                    com.organicmoto.maps.DarkGuidanceStyleReadyKey,
+                    true,
+                ),
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
     }
 }

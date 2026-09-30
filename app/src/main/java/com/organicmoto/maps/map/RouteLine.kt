@@ -23,6 +23,8 @@ private const val ROUTE_SOURCE_ID = "route"
 private const val ROUTE_LINE_ID = "route-line"
 private const val ROUTE_CASING_ID = "route-casing"
 private const val ROUTE_HIT_ID = "route-hit"
+private const val ROUTE_FOCUS_LINE_ID = "route-focus-line"
+private const val ROUTE_FOCUS_CASING_ID = "route-focus-casing"
 private const val ROUTE_INDEX_PROPERTY = "route_index"
 private const val ROUTE_COLOR_PROPERTY = "route_color"
 private const val ROUTE_OPACITY_PROPERTY = "route_opacity"
@@ -56,25 +58,60 @@ private val ROUTE_COLORS = listOf("#FF5500", "#00897B", "#6750A4")
 internal fun routeColorHex(index: Int): String =
     ROUTE_COLORS[index.coerceIn(0, ROUTE_COLORS.lastIndex)]
 
-private fun LineLayer.setRouteProperties(
-    color: Expression,
-    opacity: Expression,
-    width: Expression,
-    sort: Expression,
-) {
-    setProperties(
-        PropertyFactory.lineColor(color),
-        PropertyFactory.lineOpacity(opacity),
-        PropertyFactory.lineWidth(width),
-        PropertyFactory.lineSortKey(sort),
-        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
-    )
+/**
+ * Retains point-to-GeoJSON conversion for one immutable route set. Selection
+ * updates focused-layer filters while the source geometry stays fixed;
+ * replacing or clearing the set drops the previous geometry. RouteResult's
+ * route list remains stable across carousel selection changes.
+ */
+internal class RouteGeometryCache {
+    private var cachedRoutes: List<ResponsePath>? = null
+    private var cachedGeometry: List<LineString?> = emptyList()
+    private var sourceRoutes: List<ResponsePath>? = null
+    private var drawGeneration = 0L
+
+    @Synchronized
+    fun geometriesFor(routes: List<ResponsePath>): List<LineString?> {
+        if (cachedRoutes === routes) return cachedGeometry
+        cachedGeometry = routes.map { path ->
+            val coordinates = path.points.map { Point.fromLngLat(it.lon, it.lat) }
+            if (coordinates.size < 2) null else LineString.fromLngLats(coordinates)
+        }
+        cachedRoutes = routes
+        return cachedGeometry
+    }
+
+    @Synchronized
+    fun sourceNeedsRefresh(routes: List<ResponsePath>, sourceExists: Boolean): Boolean =
+        !sourceExists || sourceRoutes !== routes
+
+    @Synchronized
+    fun markSourceCurrent(routes: List<ResponsePath>) {
+        sourceRoutes = routes
+    }
+
+    @Synchronized
+    fun clearRouteData() {
+        cachedRoutes = null
+        cachedGeometry = emptyList()
+        sourceRoutes = null
+    }
+
+    @Synchronized
+    fun beginDraw(): Long = ++drawGeneration
+
+    @Synchronized
+    fun isCurrent(generation: Long): Boolean = generation == drawGeneration
+
+    @Synchronized
+    fun invalidatePendingDraws() {
+        drawGeneration++
+    }
 }
 
-private fun casingLayer(): LineLayer =
+private fun casingLayer(darkGuidanceMode: Boolean): LineLayer =
     LineLayer(ROUTE_CASING_ID, ROUTE_SOURCE_ID).withProperties(
-        PropertyFactory.lineColor(ROUTE_CASING_COLOR),
+        PropertyFactory.lineColor(if (darkGuidanceMode) "#050505" else ROUTE_CASING_COLOR),
         PropertyFactory.lineOpacity(Expression.get(ROUTE_CASING_OPACITY_PROPERTY)),
         PropertyFactory.lineWidth(Expression.get(ROUTE_CASING_WIDTH_PROPERTY)),
         PropertyFactory.lineSortKey(Expression.get(ROUTE_SORT_PROPERTY)),
@@ -102,102 +139,122 @@ private fun hitLayer(): LineLayer =
         PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
     )
 
+private fun focusedRouteFilter(index: Int): Expression =
+    Expression.eq(Expression.get(ROUTE_INDEX_PROPERTY), Expression.literal(index))
+
+private fun focusedCasingLayer(focusedIndex: Int, darkGuidanceMode: Boolean): LineLayer =
+    LineLayer(ROUTE_FOCUS_CASING_ID, ROUTE_SOURCE_ID)
+        .withFilter(focusedRouteFilter(focusedIndex))
+        .withProperties(
+            PropertyFactory.lineColor(if (darkGuidanceMode) "#050505" else ROUTE_CASING_COLOR),
+            PropertyFactory.lineOpacity(ROUTE_CASING_OPACITY),
+            PropertyFactory.lineWidth(ROUTE_SELECTED_CASING_WIDTH),
+            PropertyFactory.lineSortKey(ROUTE_SELECTED_SORT),
+            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+            PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+        )
+
+private fun focusedVisualLayer(focusedIndex: Int): LineLayer =
+    LineLayer(ROUTE_FOCUS_LINE_ID, ROUTE_SOURCE_ID)
+        .withFilter(focusedRouteFilter(focusedIndex))
+        .withProperties(
+            PropertyFactory.lineColor(Expression.get(ROUTE_COLOR_PROPERTY)),
+            PropertyFactory.lineOpacity(ROUTE_SELECTED_OPACITY),
+            PropertyFactory.lineWidth(ROUTE_SELECTED_WIDTH),
+            PropertyFactory.lineSortKey(ROUTE_SELECTED_SORT),
+            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+            PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+        )
+
 internal fun buildRouteFeatureCollection(
     routes: List<ResponsePath>,
-    focusedIndex: Int,
+    geometryCache: RouteGeometryCache,
+    focusedIndex: Int = 0,
+    darkGuidanceMode: Boolean = false,
 ): FeatureCollection {
     if (routes.isEmpty()) return FeatureCollection.fromFeatures(emptyList())
-    val safeFocusedIndex = focusedIndex.coerceIn(0, routes.lastIndex)
-    val features = routes.mapIndexedNotNull { index, path ->
-        val selected = index == safeFocusedIndex
-        val coordinates = path.points.map { Point.fromLngLat(it.lon, it.lat) }
-        // A GeoJSON LineString needs at least two positions; a same-node
-        // GraphHopper path yields exactly one, which MapLibre would reject.
-        if (coordinates.size < 2) return@mapIndexedNotNull null
-        Feature.fromGeometry(LineString.fromLngLats(coordinates)).apply {
+    val cachedGeometry = geometryCache.geometriesFor(routes)
+    val displayedIndices = if (darkGuidanceMode) {
+        listOf(focusedIndex.coerceIn(routes.indices))
+    } else {
+        routes.indices.toList()
+    }
+    val features = displayedIndices.mapNotNull { index ->
+        val geometry = cachedGeometry[index] ?: return@mapNotNull null
+        Feature.fromGeometry(geometry).apply {
             addNumberProperty(ROUTE_INDEX_PROPERTY, index)
-            addStringProperty(ROUTE_COLOR_PROPERTY, routeColorHex(index))
-            addNumberProperty(
-                ROUTE_OPACITY_PROPERTY,
-                if (selected) ROUTE_SELECTED_OPACITY else ROUTE_UNSELECTED_OPACITY,
-            )
+            addStringProperty(ROUTE_COLOR_PROPERTY, if (darkGuidanceMode) "#FFFFFF" else routeColorHex(index))
+            addNumberProperty(ROUTE_OPACITY_PROPERTY, ROUTE_UNSELECTED_OPACITY)
             addNumberProperty(ROUTE_CASING_OPACITY_PROPERTY, ROUTE_CASING_OPACITY)
-            addNumberProperty(
-                ROUTE_WIDTH_PROPERTY,
-                if (selected) ROUTE_SELECTED_WIDTH else ROUTE_UNSELECTED_WIDTH,
-            )
-            addNumberProperty(
-                ROUTE_CASING_WIDTH_PROPERTY,
-                if (selected) ROUTE_SELECTED_CASING_WIDTH else ROUTE_UNSELECTED_CASING_WIDTH,
-            )
+            addNumberProperty(ROUTE_WIDTH_PROPERTY, ROUTE_UNSELECTED_WIDTH)
+            addNumberProperty(ROUTE_CASING_WIDTH_PROPERTY, ROUTE_UNSELECTED_CASING_WIDTH)
             addNumberProperty(ROUTE_HIT_WIDTH_PROPERTY, ROUTE_HIT_WIDTH)
-            addNumberProperty(
-                ROUTE_SORT_PROPERTY,
-                if (selected) ROUTE_SELECTED_SORT else ROUTE_UNSELECTED_SORT,
-            )
+            addNumberProperty(ROUTE_SORT_PROPERTY, ROUTE_UNSELECTED_SORT)
         }
     }
     return FeatureCollection.fromFeatures(features)
 }
 
-fun MapLibreMap.drawRoutes(routes: List<ResponsePath>, focusedIndex: Int) {
+internal fun MapLibreMap.drawRoutes(
+    routes: List<ResponsePath>,
+    focusedIndex: Int,
+    geometryCache: RouteGeometryCache,
+    requestIsCurrent: () -> Boolean = { true },
+    darkGuidanceMode: Boolean = false,
+) {
     if (routes.isEmpty()) {
-        clearRoutes()
-        return
-    }
-    val collection = buildRouteFeatureCollection(routes, focusedIndex)
-    if (collection.features().isNullOrEmpty()) {
-        clearRoutes()
+        geometryCache.clearRouteData()
+        clearRoutes(requestIsCurrent)
         return
     }
     getStyle { style ->
+        if (!requestIsCurrent()) return@getStyle
         val source = style.getSourceAs<GeoJsonSource>(ROUTE_SOURCE_ID)
-        if (source != null) {
-            source.setGeoJson(collection)
-        } else {
-            style.addSource(GeoJsonSource(ROUTE_SOURCE_ID).apply { setGeoJson(collection) })
+        if (geometryCache.sourceNeedsRefresh(routes, source != null) || darkGuidanceMode) {
+            val collection = buildRouteFeatureCollection(
+                routes,
+                geometryCache,
+                focusedIndex = focusedIndex,
+                darkGuidanceMode = darkGuidanceMode,
+            )
+            if (collection.features().isNullOrEmpty()) {
+                geometryCache.clearRouteData()
+                clearRoutes(requestIsCurrent)
+                return@getStyle
+            }
+            if (source != null) {
+                source.setGeoJson(collection)
+            } else {
+                style.addSource(GeoJsonSource(ROUTE_SOURCE_ID).apply { setGeoJson(collection) })
+            }
+            geometryCache.markSourceCurrent(routes)
         }
 
-        val casing = style.getLayerAs<LineLayer>(ROUTE_CASING_ID)
-        if (casing == null) {
-            style.addLayer(casingLayer())
+        if (style.getLayer(ROUTE_CASING_ID) == null) style.addLayer(casingLayer(darkGuidanceMode))
+        if (style.getLayer(ROUTE_LINE_ID) == null) style.addLayer(visualLayer())
+        if (style.getLayer(ROUTE_HIT_ID) == null) style.addLayer(hitLayer())
+
+        val focusedCasing = style.getLayerAs<LineLayer>(ROUTE_FOCUS_CASING_ID)
+        if (focusedCasing == null) {
+            style.addLayer(focusedCasingLayer(focusedIndex, darkGuidanceMode))
         } else {
-            casing.setRouteProperties(
-                Expression.literal(ROUTE_CASING_COLOR),
-                Expression.get(ROUTE_CASING_OPACITY_PROPERTY),
-                Expression.get(ROUTE_CASING_WIDTH_PROPERTY),
-                Expression.get(ROUTE_SORT_PROPERTY),
-            )
+            focusedCasing.setFilter(focusedRouteFilter(focusedIndex))
         }
 
-        val visual = style.getLayerAs<LineLayer>(ROUTE_LINE_ID)
-        if (visual == null) {
-            style.addLayer(visualLayer())
+        val focusedVisual = style.getLayerAs<LineLayer>(ROUTE_FOCUS_LINE_ID)
+        if (focusedVisual == null) {
+            style.addLayer(focusedVisualLayer(focusedIndex))
         } else {
-            visual.setRouteProperties(
-                Expression.get(ROUTE_COLOR_PROPERTY),
-                Expression.get(ROUTE_OPACITY_PROPERTY),
-                Expression.get(ROUTE_WIDTH_PROPERTY),
-                Expression.get(ROUTE_SORT_PROPERTY),
-            )
-        }
-
-        val hit = style.getLayerAs<LineLayer>(ROUTE_HIT_ID)
-        if (hit == null) {
-            style.addLayer(hitLayer())
-        } else {
-            hit.setRouteProperties(
-                Expression.get(ROUTE_COLOR_PROPERTY),
-                Expression.literal(ROUTE_HIT_OPACITY),
-                Expression.get(ROUTE_HIT_WIDTH_PROPERTY),
-                Expression.get(ROUTE_SORT_PROPERTY),
-            )
+            focusedVisual.setFilter(focusedRouteFilter(focusedIndex))
         }
     }
 }
 
-fun MapLibreMap.clearRoutes() {
+fun MapLibreMap.clearRoutes(requestIsCurrent: () -> Boolean = { true }) {
     getStyle { style ->
+        if (!requestIsCurrent()) return@getStyle
+        style.removeLayer(ROUTE_FOCUS_LINE_ID)
+        style.removeLayer(ROUTE_FOCUS_CASING_ID)
         style.removeLayer(ROUTE_HIT_ID)
         style.removeLayer(ROUTE_LINE_ID)
         style.removeLayer(ROUTE_CASING_ID)
@@ -236,7 +293,11 @@ fun MapLibreMap.fitBounds(paths: Iterable<ResponsePath>) {
     animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), FIT_PADDING))
 }
 
-fun MapLibreMap.findRouteIndexAt(screenPoint: PointF, hitRadiusPx: Float): Int? = runCatching {
+fun MapLibreMap.findRouteIndexAt(
+    screenPoint: PointF,
+    hitRadiusPx: Float,
+    focusedIndex: Int? = null,
+): Int? = runCatching {
     val bounds = RectF(
         screenPoint.x - hitRadiusPx,
         screenPoint.y - hitRadiusPx,
@@ -249,7 +310,7 @@ fun MapLibreMap.findRouteIndexAt(screenPoint: PointF, hitRadiusPx: Float): Int? 
             val routeIndex = feature.getNumberProperty(ROUTE_INDEX_PROPERTY)?.toInt()
                 ?: return@mapNotNull null
             val sort = feature.getNumberProperty(ROUTE_SORT_PROPERTY)?.toDouble() ?: 0.0
-            routeIndex to sort
+            routeIndex to if (routeIndex == focusedIndex) Double.POSITIVE_INFINITY else sort
         }
         .maxByOrNull { it.second }
         ?.first

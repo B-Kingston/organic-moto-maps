@@ -36,6 +36,8 @@ class FuzzExecutor(
             FuzzAction.TapStart -> click(UiTarget.START)
             FuzzAction.OpenSavedRoutes -> click(UiTarget.SAVED_ROUTES)
             FuzzAction.ToggleSettings -> click(UiTarget.SETTINGS_COG)
+            FuzzAction.OpenVoiceSettings -> click(UiTarget.VOICE_SETTINGS)
+            FuzzAction.ToggleDarkRideMap -> click(UiTarget.DARK_RIDE_MAP)
             is FuzzAction.PanMap -> panMap(action.direction)
             FuzzAction.BackgroundForeground -> onBackgroundForeground()
         }
@@ -101,6 +103,10 @@ class FuzzExecutor(
             performIfPresent(hasText("CANCEL")) { it.performClick() }
             return
         }
+        if (present(hasText("Voice guidance"))) {
+            performIfPresent(hasText("CANCEL")) { it.performClick() }
+            return
+        }
         val hasDialog = present(
             SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.IsDialog),
         )
@@ -124,6 +130,10 @@ class FuzzExecutor(
         UiTarget.MAP -> SemanticsMatcher.keyIsDefined(MapReadyKey)
         UiTarget.SAVED_ROUTES -> hasContentDescription("Saved routes")
         UiTarget.SETTINGS_COG -> hasContentDescription("Route settings")
+        UiTarget.VOICE_SETTINGS -> hasContentDescription("Voice guidance settings", substring = true)
+        UiTarget.DARK_RIDE_MAP -> hasContentDescription("Dark ride map", substring = true)
+        UiTarget.RIDE -> hasText("RIDE")
+        UiTarget.END_NAVIGATION -> hasContentDescription("End navigation")
         UiTarget.SAVE_BUTTON -> hasContentDescription("Save route")
         UiTarget.COMMENT_FIELD -> hasText("Add a comment")
         UiTarget.ADD_COMMENT -> hasContentDescription("Add comment")

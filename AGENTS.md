@@ -28,6 +28,8 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew assembleDebug
 
 The test suite is permanent repository infrastructure. It is not a one-off deliverable. Every new feature, UI element, routing, geocoder, storage, or generated-data pipeline change must add or update tests at the same rigor. Pure logic needs JVM invariant or property tests in the matching package. Android-bound behavior needs instrumented tests. Route-visible changes need a corpus entry and recalibration. New composables and controls need content descriptions, 48 dp targets, planner coverage, accessibility coverage, and fuzz-oracle coverage. Weighting or custom-model changes need MotorcycleProfileTest and ComplexityWeightingTest updates together. Storage schema changes need both store-contract suites and repository truthfulness tests.
 
+When a feature can be exercised or judged on the emulator, also add repeatable setup/control and screenshot coverage to `tools/test/visual.py`; keep its CLI and README examples current. Use accessible text/content descriptions instead of hard-coded coordinates when controlling app UI. Cover relevant intermediate states so agents can inspect the behavior as it changes.
+
 ## Route storage (saved rides)
 
 The app persists user-saved routes in device SQLite (`saved_routes.db`, schema v1: `saved_routes` + `saved_route_comments` with an `ON DELETE CASCADE` foreign key). Long-pressing a coloured carousel card opens a save bubble (`SaveRouteBubble.kt`); the bookmark icon stores the exact path (encoded polyline, precision 1e5), geocoded From/To names, distance, duration, and the live routing controls (complexity, road share, block-unpaved). The storage menu is the bookmark button left of the ride-complexity knob; it opens `SavedRoutesSheet` (mini-map banner drawn by `RouteMiniMap.kt` from the decoded polyline — no tiles, no network), per-route comments, and delete-with-confirm.
@@ -145,12 +147,27 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew :geocoder-tool:run --args="data
 
 ## Android emulator / device
 
-- SDK binaries are not on PATH; use full paths: `~/Library/Android/sdk/platform-tools/adb`, `~/Library/Android/sdk/emulator/emulator`.
+- For raw `adb` or emulator calls, SDK binaries are not on PATH; use full paths: `~/Library/Android/sdk/platform-tools/adb`, `~/Library/Android/sdk/emulator/emulator`.
 - Orca's `orca emulator` CLI drives Android too (not iOS-only): backend is adb/emulator/avdmanager. Verified working: `devices` (lists AVDs + adb devices, booted vs shutdown), `attach <serial>`, `tap x y` (normalized 0..1), `type "text"` (US ASCII), `gesture '[{...}]'` (swipe), `button home|back|...`, `rotate landscape_left|portrait`, `ax --json` (uiautomator tree, bounds in physical px — this AVD is 1280x2856), `install ./app-debug.apk` (121 MB APK ok), `launch com.organicmoto.maps` (default activity), `logcat --lines N`, `kill`.
 - Gotchas: `exec` is broken in current Orca (`Cannot use 'in' operator to search for 'screenshotStatus'...` parse bug) — use raw adb instead. `attach` is required once per worktree before unqualified commands. A shutdown AVD lists but must be booted first (`emulator @<avd>`). Tap accuracy can be off when the IME resizes the layout mid-session; re-dump `ax` for fresh bounds.
 - Emulator touch/`tap` attempts are flaky and often fail for reasons unrelated to app code (IME layout shifts, uiautomator bounds drift, adb races). Do not loop retrying taps beyond a handful of attempts, and do not infer a bug in our app code just because a tap "did nothing". After ~3 failed attempts, stop, re-dump `ax` for fresh bounds, or switch to `type`/`launch`/logcat to verify behavior instead of retrying the tap.
 - Debugging logs: `orca emulator logcat --lines 500 --json` for a one-shot parsed dump (fields: timestamp/level/tag/message) — pipe through jq/grep for tags; use raw `adb logcat` for live streaming. App logs use `android.util.Log` under `OrganicMoto.*` tags: `OrganicMoto.RouteScreen` (route submit/success/errors, point resolution), `OrganicMoto.SearchField` (per-keystroke text, debounced searches, picked results), `OrganicMoto.GeocodeCtrl` (first index load), `OrganicMoto.SearchEngine` (per-query timing), `OrganicMoto.GeocoderIndex` (asset copy/mmap), `OrganicMoto.Router` (GraphHopper init + route request), `OrganicMoto.PointParser` (lat,lon fallback). Levels: `I` = user actions/successes, `D` = lifecycle/timing, `V` = per-keystroke, `W` = degradations (geocoder unavailable → fallback), `E` = failures. One-shot filter: `adb logcat OrganicMoto:V com.graphhopper:W *:S`.
 - Emulator workflow: `orca emulator install app/build/outputs/apk/debug/app-debug.apk && orca emulator launch com.organicmoto.maps`, then drive with `tap`/`type`/`ax`.
+
+### Project CLI loop
+
+Use `tools/android.sh` for routine builds, launches, and log debugging. Do not open Android Studio for these tasks.
+
+```sh
+tools/android.sh run      # build, install, and launch
+tools/android.sh debug    # build, launch, and stream app-process logs
+tools/android.sh logs     # stream logs from an already-running app
+tools/android.sh stop     # stop the app
+```
+
+- `run` and `debug` start the `Pixel_10_Pro` AVD when no device is online. Set `ANDROID_AVD` to choose another AVD. Set `ANDROID_SERIAL` to choose a connected device.
+- The helper reads the SDK path from `ANDROID_SDK_ROOT`, `ANDROID_HOME`, `local.properties`, then `~/Library/Android/sdk`. If `JAVA_HOME` is unset, it uses Homebrew JDK 17 when installed. Direct Gradle commands must use `./gradlew`.
+- `debug` streams the app process through `adb logcat --pid`. Ctrl-C stops the log stream. This helper does not attach a source-level debugger; use an IDE debugger for breakpoints.
 
 ## Code facts that differ from defaults
 

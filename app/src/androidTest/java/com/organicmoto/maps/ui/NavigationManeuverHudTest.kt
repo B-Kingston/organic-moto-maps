@@ -41,11 +41,20 @@ class NavigationManeuverHudTest {
                 roundaboutClockwise = true,
             ),
         )
-        composeRule.setContent { NavigationHud(snapshot) }
+        composeRule.setContent {
+            NavigationHud(
+                snapshot,
+                voiceGuidanceReady = false,
+                voiceGuidanceStatusDescription = "checking offline voice",
+            )
+        }
 
         composeRule.onNodeWithContentDescription(
-            "Navigation guidance: take the 2nd exit at the roundabout in 120 m",
+            "Navigation guidance: enter the roundabout in 120 m, then take the 2nd exit onto Abbotsford Road",
         ).assertIsDisplayed()
+        composeRule
+            .onNodeWithContentDescription("Voice guidance settings, enabled, checking offline voice")
+            .assertIsDisplayed()
         composeRule.onNodeWithText("2").assertIsDisplayed()
     }
 
@@ -84,10 +93,10 @@ class NavigationManeuverHudTest {
         }
 
         composeRule
-            .onNodeWithContentDescription("Navigation guidance: keep left in 80 m")
+            .onNodeWithContentDescription("Navigation guidance: keep left in 80 m onto Samford Road")
             .assertIsDisplayed()
         composeRule
-            .onNodeWithContentDescription("Navigation guidance: veer slightly right in 350 m")
+            .onNodeWithContentDescription("Navigation guidance: veer slightly right in 350 m onto Mount Glorious Road")
             .assertIsDisplayed()
     }
 

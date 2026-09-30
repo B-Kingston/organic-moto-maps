@@ -47,6 +47,8 @@ import com.organicmoto.maps.routing.navigation.GpsFix
 import com.organicmoto.maps.routing.navigation.GpsFixSource
 import com.organicmoto.maps.routing.navigation.NavigationState
 import com.organicmoto.maps.routing.navigation.RebuildRequest
+import com.organicmoto.maps.routing.navigation.VoiceDistanceUnit
+import com.organicmoto.maps.routing.navigation.VoiceGuidanceSettings
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
@@ -67,6 +69,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -97,6 +100,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.graphhopper.ResponsePath
 import com.graphhopper.util.PointList
 import com.graphhopper.util.shapes.GHPoint
@@ -109,6 +114,7 @@ import com.organicmoto.maps.map.findRouteIndexAt
 import com.organicmoto.maps.map.fitBounds
 import com.organicmoto.maps.map.hideGpxPreviewMarker
 import com.organicmoto.maps.map.routeColorHex
+import com.organicmoto.maps.map.RouteGeometryCache
 import com.organicmoto.maps.map.showGpxPreviewMarker
 import com.organicmoto.maps.routing.GraphHopperRouter
 import com.organicmoto.maps.routing.PointParser
@@ -119,12 +125,14 @@ import com.organicmoto.maps.storage.GpxPreview
 import com.organicmoto.maps.storage.PolylineCodec
 import com.organicmoto.maps.storage.RouteSimilarity
 import com.organicmoto.maps.storage.SavedRoute
+import java.util.concurrent.atomic.AtomicReference
 import com.organicmoto.maps.storage.SavedRouteDraft
 import com.organicmoto.maps.storage.SavedRouteRepository
 import com.organicmoto.maps.storage.SavedRouteSummary
 import com.organicmoto.maps.storage.GpxGeometry
 import com.organicmoto.maps.tiles.OfflineTileStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -148,10 +156,15 @@ import kotlin.math.roundToInt
 private const val TAG = "OrganicMoto.RouteScreen"
 private const val TAG_SAVED = "OrganicMoto.SavedRoutes"
 private const val STYLE_ASSET = "style.json"
+private const val DARK_RIDE_STYLE_ASSET = "ride-dark-style.json"
 private const val TILES_PATH_PLACEHOLDER = "{tiles_path}"
 private const val ROUTE_PREFS = "route_preferences"
 private const val ROAD_SHARE_PREF = "max_road_share_percent"
 private const val BLOCK_UNPAVED_PREF = "block_unpaved_roads"
+private const val VOICE_ENABLED_PREF = "voice_guidance_enabled"
+private const val VOICE_INTERVAL_METERS_PREF = "voice_guidance_interval_meters"
+private const val VOICE_PREVIEW_COUNT_PREF = "voice_guidance_preview_count"
+private const val DARK_RIDE_MAP_PREF = "dark_ride_map_enabled"
 private const val DEFAULT_ROAD_SHARE = 70f
 
 /**
@@ -166,9 +179,14 @@ private fun isDebugBuild(context: Context): Boolean =
 private fun PointList.toGeoPoints(): List<GeoPoint> =
     List(size()) { index -> GeoPoint(getLat(index), getLon(index)) }
 
-private suspend fun loadOfflineStyle(context: Context, tilesUrl: String): String {
+private suspend fun loadOfflineStyle(
+    context: Context,
+    tilesUrl: String,
+    darkRideMode: Boolean,
+): String {
     val style = withContext(Dispatchers.IO) {
-        context.assets.open(STYLE_ASSET).bufferedReader().use { it.readText() }
+        val asset = if (darkRideMode) DARK_RIDE_STYLE_ASSET else STYLE_ASSET
+        context.assets.open(asset).bufferedReader().use { it.readText() }
     }
     return style.replace(TILES_PATH_PLACEHOLDER, tilesUrl)
 }
@@ -252,6 +270,10 @@ private suspend fun resolvePoint(
 @Composable
 fun RouteScreen() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var screenStarted by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
     val router = remember { GraphHopperRouter(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val debugLogs = remember { isDebugBuild(context.applicationContext) }
@@ -307,6 +329,7 @@ fun RouteScreen() {
     // winding past the eighth level keeps counting (9, 10, ...). The dial
     // has a hard minimum at zero and no maximum.
     var complexity by rememberSaveable { mutableStateOf(0f) }
+    val voiceUnit = remember { VoiceDistanceUnit.forLocale(Locale.getDefault()) }
     val routePreferences = remember {
         context.applicationContext.getSharedPreferences(ROUTE_PREFS, Context.MODE_PRIVATE)
     }
@@ -318,6 +341,31 @@ fun RouteScreen() {
     var blockUnpaved by rememberSaveable {
         mutableStateOf(routePreferences.getBoolean(BLOCK_UNPAVED_PREF, false))
     }
+    var voiceGuidanceEnabled by rememberSaveable {
+        mutableStateOf(routePreferences.getBoolean(VOICE_ENABLED_PREF, true))
+    }
+    var darkRideMapEnabled by rememberSaveable {
+        mutableStateOf(routePreferences.getBoolean(DARK_RIDE_MAP_PREF, false))
+    }
+    var voiceIntervalMeters by rememberSaveable {
+        val defaultInterval = VoiceGuidanceSettings.defaults(voiceUnit).intervalMeters
+        val minimumInterval = voiceUnit.toMetres(voiceUnit.minimumInterval)
+        val maximumInterval = voiceUnit.toMetres(voiceUnit.maximumInterval)
+        val persistedInterval = routePreferences.getFloat(
+            VOICE_INTERVAL_METERS_PREF,
+            defaultInterval.toFloat(),
+        ).toDouble()
+        mutableStateOf(
+            (persistedInterval.takeIf { it.isFinite() } ?: defaultInterval).coerceIn(
+                minimumInterval,
+                maximumInterval,
+            ),
+        )
+    }
+    var voicePreviewCount by rememberSaveable {
+        mutableStateOf(routePreferences.getInt(VOICE_PREVIEW_COUNT_PREF, 2).coerceIn(1, 5))
+    }
+    var voiceSettingsOpen by remember { mutableStateOf(false) }
     var routeSettingsOpen by remember { mutableStateOf(false) }
     // Complete inputs of the most recent submission attempt (START / dial
     // release / settings apply / saved-route load). GPX imports carry bounded
@@ -330,7 +378,20 @@ fun RouteScreen() {
     val geocodeController = remember { GeocodeSearchController(context.applicationContext) }
     // Guidance: pure engine + Android glue. One controller per screen.
     val navigationController = remember { NavigationController(scope) }
-    val navSnapshot by navigationController.snapshot.collectAsState()
+    val navSnapshot by navigationController.snapshot.collectAsStateWithLifecycle()
+    val voiceGuidanceOutput = remember {
+        OfflineVoiceGuidance(context.applicationContext, voiceUnit)
+    }
+    val voiceSpeechStatus by voiceGuidanceOutput.status.collectAsState()
+    val voiceGuidanceSettings = VoiceGuidanceSettings(
+        enabled = voiceGuidanceEnabled,
+        intervalMeters = voiceIntervalMeters,
+        previewCount = voicePreviewCount,
+    )
+    val latestVoiceGuidanceSettings = rememberUpdatedState(voiceGuidanceSettings)
+    DisposableEffect(voiceGuidanceOutput) {
+        onDispose { voiceGuidanceOutput.close() }
+    }
     var guidanceRequested by remember { mutableStateOf(false) }
     var locationPermissionGranted by remember {
         mutableStateOf(LocationPermission.isGranted(context))
@@ -361,21 +422,10 @@ fun RouteScreen() {
     }
     // Refresh the cached UI state after returning from Settings, where a user
     // may grant or revoke location access without going through our launcher.
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
-            val granted = LocationPermission.isGranted(context)
-            locationPermissionGranted = granted
-            if (!granted) {
-                pendingGuidanceStart = false
-                guidanceRequested = false
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
     val mapRef = remember { mutableStateOf<MapLibreMap?>(null) }
+    val guidanceBearingTracker = remember { GuidanceBearingTracker() }
+    var planningCameraBeforeGuidance by remember { mutableStateOf<CameraPosition?>(null) }
+    var guidanceWasActive by remember { mutableStateOf(false) }
     // Saved-route storage: repository over device SQLite plus the menu flag.
     val savedRouteRepository = remember { SavedRouteRepository(context.applicationContext) }
     var savedRoutesOpen by remember { mutableStateOf(false) }
@@ -392,8 +442,11 @@ fun RouteScreen() {
         val map = mapRef.value ?: return@DisposableEffect onDispose { }
         val listener = MapLibreMap.OnMapClickListener { point ->
             val screenPoint = runCatching { map.projection.toScreenLocation(point) }.getOrNull()
-            val routeIndex = screenPoint?.let { map.findRouteIndexAt(it, routeHitRadiusPx) }
             val current = coordinator.state.value
+            val focusedIndex = (current as? RouteUiState.Success)?.selectedIndex
+            val routeIndex = screenPoint?.let {
+                map.findRouteIndexAt(it, routeHitRadiusPx, focusedIndex)
+            }
             if (routeIndex != null && current is RouteUiState.Success &&
                 routeIndex in current.result.routes.indices
             ) {
@@ -406,23 +459,134 @@ fun RouteScreen() {
         map.addOnMapClickListener(listener)
         onDispose { map.removeOnMapClickListener(listener) }
     }
-    // Always-on map tracking: a bare fix stream (no guidance engine) that
-    // keeps the position dot visible whenever permission is granted. The
+    // Planning only needs live location while the map is on screen. During
+    // active guidance keep the existing stream alive when the activity stops
+    // so background speech can continue within Android's location limits.
+    // Keep background fixes out of Compose state; navigation and speech still
+    // receive each fix, while the map and screen remain quiescent.
     var trackedFix by remember { mutableStateOf<GpsFix?>(null) }
+    var trackingActive by remember { mutableStateOf(false) }
+    val latestFix = remember { AtomicReference<GpsFix?>(null) }
+    val latestGuidanceRequested = rememberUpdatedState(guidanceRequested)
     var initialLocationCentered by remember { mutableStateOf(false) }
-    LaunchedEffect(locationPermissionGranted) {
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    screenStarted = true
+                    trackedFix = latestFix.get()
+                }
+                Lifecycle.Event.ON_STOP -> screenStarted = false
+                Lifecycle.Event.ON_RESUME -> {
+                    val granted = LocationPermission.isGranted(context)
+                    locationPermissionGranted = granted
+                    if (!granted) {
+                        latestFix.set(null)
+                        trackedFix = null
+                        pendingGuidanceStart = false
+                        guidanceRequested = false
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(locationPermissionGranted, guidanceRequested) {
         if (!locationPermissionGranted) {
+            latestFix.set(null)
             trackedFix = null
+            trackingActive = false
             initialLocationCentered = false
             return@LaunchedEffect
         }
-        GpsFixSource.fixes(context.applicationContext).collect { fix ->
-            trackedFix = fix
+
+        suspend fun collectFixes() {
+            trackingActive = true
+            var streamEnded = false
+            try {
+                GpsFixSource.fixes(context.applicationContext).collect { fix ->
+                    latestFix.set(fix)
+                    navigationController.onFix(fix)
+                    val snapshot = navigationController.snapshot.value
+                    if (latestGuidanceRequested.value && snapshot.state != NavigationState.Idle) {
+                        voiceGuidanceOutput.onSnapshot(
+                            snapshot,
+                            latestVoiceGuidanceSettings.value,
+                        )
+                    }
+                    if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                        trackedFix = fix
+                    }
+                }
+                streamEnded = true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                streamEnded = true
+                Log.w(TAG, "Location fix stream ended", failure)
+            } finally {
+                // A guidance-mode effect replacement can briefly cancel this
+                // collector; retain its last fix until the replacement starts.
+                if (streamEnded || !latestGuidanceRequested.value) {
+                    latestFix.set(null)
+                    trackedFix = null
+                    trackingActive = false
+                }
+            }
+        }
+
+        if (guidanceRequested) {
+            collectFixes()
+        } else {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                collectFixes()
+            }
+        }
+    }
+    // The debug visual runner uses an app-private queued fix to move the real
+    // NavigationSession deterministically. This seam is absent from release
+    // builds and avoids emulator GPS provider throttling during route jumps.
+    LaunchedEffect(guidanceRequested, debugLogs) {
+        if (!guidanceRequested || !debugLogs) return@LaunchedEffect
+        while (true) {
+            val request = withContext(Dispatchers.IO) {
+                VisualRouteSnapshot.takeQueuedFix(context.cacheDir)
+            }
+            if (request == null) {
+                delay(40)
+                continue
+            }
+            val fix = GpsFix(
+                lat = request.lat,
+                lon = request.lon,
+                // A percentage jump is a test teleport, not a speed sample.
+                // Keep it stationary so pace-delta metrics stay truthful.
+                speedMps = 0.0,
+                accuracyM = 1.0,
+                timestampMs = SystemClock.elapsedRealtime(),
+            )
+            latestFix.set(fix)
             navigationController.onFix(fix)
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                trackedFix = fix
+            }
+            val snapshot = navigationController.snapshot.value
+            if (snapshot.state != NavigationState.Idle) {
+                voiceGuidanceOutput.onSnapshot(snapshot, latestVoiceGuidanceSettings.value)
+            }
+            withContext(Dispatchers.IO) {
+                VisualRouteSnapshot.acknowledgeFix(context.cacheDir, request.requestId)
+            }
         }
     }
     DisposableEffect(Unit) {
-        onDispose { trackedFix = null }
+        onDispose {
+            latestFix.set(null)
+            trackedFix = null
+            trackingActive = false
+        }
     }
 
     // Location lock: when on, the camera re-centres on each fix but keeps
@@ -437,6 +601,7 @@ fun RouteScreen() {
     var mapImportError by remember { mutableStateOf<String?>(null) }
     var mapRevision by remember { mutableStateOf(0) }
     var styleJson by remember { mutableStateOf<String?>(null) }
+    val darkGuidanceStyle = guidanceRequested && darkRideMapEnabled
     LaunchedEffect(Unit) {
         try {
             mapUrl = OfflineTileStore.installedUrl(context.applicationContext)
@@ -447,7 +612,7 @@ fun RouteScreen() {
             mapFileChecked = true
         }
     }
-    LaunchedEffect(mapUrl, mapRevision) {
+    LaunchedEffect(mapUrl, mapRevision, darkGuidanceStyle) {
         // Force a style reload when a replacement is imported at the same
         // private path; the URL string itself intentionally stays stable.
         styleJson = null
@@ -455,7 +620,11 @@ fun RouteScreen() {
             return@LaunchedEffect
         }
         try {
-            styleJson = loadOfflineStyle(context.applicationContext, url)
+            styleJson = loadOfflineStyle(
+                context.applicationContext,
+                url,
+                darkRideMode = darkGuidanceStyle,
+            )
         } catch (e: Exception) {
             mapImportError = "The offline map style could not be loaded"
             Log.e(TAG, "Offline map style failed to load", e)
@@ -489,16 +658,77 @@ fun RouteScreen() {
 
     val mapView = rememberMapView(context) { mapRef.value = it }
 
-    LaunchedEffect(styleJson, mapRef.value) {
+    var styledMap by remember { mutableStateOf<MapLibreMap?>(null) }
+    var appliedStyleJson by remember { mutableStateOf<String?>(null) }
+    var appliedMapRevision by remember { mutableStateOf<Int?>(null) }
+    var loadedStyleJson by remember { mutableStateOf<String?>(null) }
+    var styleLoadGeneration by remember { mutableIntStateOf(0) }
+    val latestStyleJson by rememberUpdatedState(styleJson)
+    LaunchedEffect(styleJson, mapRef.value, screenStarted, mapRevision) {
+        if (!screenStarted) return@LaunchedEffect
         val json = styleJson ?: return@LaunchedEffect
         val map = mapRef.value ?: return@LaunchedEffect
-        map.setStyle(Style.Builder().fromJson(json))
-        map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(-23.0, 145.5), 4.5))
+        if (styledMap === map && appliedStyleJson == json && appliedMapRevision == mapRevision) {
+            return@LaunchedEffect
+        }
+        loadedStyleJson = null
+        val generation = ++styleLoadGeneration
+        if (styledMap !== map) {
+            // Set an initial Queensland view once for each MapLibreMap. Style
+            // changes on the same map retain the live planning/guidance camera.
+            map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(-23.0, 145.5), 4.5))
+        }
+        map.setStyle(Style.Builder().fromJson(json)) {
+            if (mapRef.value === map && styleLoadGeneration == generation &&
+                latestStyleJson == json
+            ) {
+                loadedStyleJson = json
+            }
+        }
+        styledMap = map
+        appliedStyleJson = json
+        appliedMapRevision = mapRevision
     }
 
     val routeResult = (state as? RouteUiState.Success)?.result
     val selectedIndex = (state as? RouteUiState.Success)?.selectedIndex ?: 0
     val routeCount = routeResult?.routes?.size ?: 0
+    LaunchedEffect(routeResult, selectedIndex, debugLogs) {
+        if (!debugLogs) return@LaunchedEffect
+        val paths = routeResult?.routes
+        if (paths == null) {
+            withContext(Dispatchers.IO) {
+                VisualRouteSnapshot.clear(context.cacheDir)
+            }
+        } else {
+            val geometry = paths.map { path -> path.points.toGeoPoints() }
+            withContext(Dispatchers.IO) {
+                VisualRouteSnapshot.write(context.cacheDir, geometry, selectedIndex)
+            }
+        }
+    }
+    LaunchedEffect(guidanceRequested, mapRef.value) {
+        val map = mapRef.value
+        if (guidanceRequested && !guidanceWasActive && map != null) {
+            planningCameraBeforeGuidance = map.cameraPosition
+            guidanceBearingTracker.reset()
+            guidanceWasActive = true
+        } else if (!guidanceRequested && guidanceWasActive) {
+            guidanceWasActive = false
+            guidanceBearingTracker.reset()
+            planningCameraBeforeGuidance?.let { camera ->
+                map?.animateCamera(CameraUpdateFactory.newCameraPosition(camera), 500)
+            }
+            planningCameraBeforeGuidance = null
+        }
+    }
+    LaunchedEffect(guidanceRequested, routeResult, selectedIndex, voiceGuidanceEnabled) {
+        if (guidanceRequested && voiceGuidanceEnabled &&
+            routeResult?.routes?.getOrNull(selectedIndex) != null
+        ) {
+            voiceGuidanceOutput.ensureAvailability()
+        }
+    }
     val routeStateName = when (state) {
         RouteUiState.Idle -> "idle"
         RouteUiState.Loading -> "loading"
@@ -506,21 +736,48 @@ fun RouteScreen() {
         is RouteUiState.Error -> "error"
     }
 
-    LaunchedEffect(routeResult, styleJson, mapRef.value) {
+    val routeGeometryCache = remember { RouteGeometryCache() }
+    var fittedRouteSet by remember { mutableStateOf<List<ResponsePath>?>(null) }
+    var fittedMap by remember { mutableStateOf<MapLibreMap?>(null) }
+    DisposableEffect(routeGeometryCache) {
+        onDispose { routeGeometryCache.invalidatePendingDraws() }
+    }
+    LaunchedEffect(
+        routeResult,
+        selectedIndex,
+        styleJson,
+        loadedStyleJson,
+        darkGuidanceStyle,
+        mapRef.value,
+        screenStarted,
+    ) {
+        val generation = routeGeometryCache.beginDraw()
+        if (!screenStarted) return@LaunchedEffect
         val map = mapRef.value ?: return@LaunchedEffect
+        val requestIsCurrent = { routeGeometryCache.isCurrent(generation) }
         if (routeResult == null) {
-            map.clearRoutes()
+            routeGeometryCache.clearRouteData()
+            map.clearRoutes(requestIsCurrent)
+            fittedRouteSet = null
+            fittedMap = null
             return@LaunchedEffect
         }
+        if (loadedStyleJson == null || loadedStyleJson != styleJson) return@LaunchedEffect
         Log.d(TAG, "Drawing ${routeResult.routes.size} route(s)")
-        map.drawRoutes(routeResult.routes, selectedIndex)
-        map.fitBounds(routeResult.routes)
-        Log.d(TAG, "Route drawn and camera fitted")
-    }
-
-    LaunchedEffect(selectedIndex) {
-        val map = mapRef.value ?: return@LaunchedEffect
-        routeResult?.let { map.drawRoutes(it.routes, selectedIndex) }
+        map.drawRoutes(
+            routeResult.routes,
+            selectedIndex,
+            routeGeometryCache,
+            requestIsCurrent,
+            darkGuidanceMode = darkGuidanceStyle,
+        )
+        val needsInitialRouteFit = fittedRouteSet !== routeResult.routes || fittedMap !== map
+        if (needsInitialRouteFit && !guidanceRequested) {
+            map.fitBounds(routeResult.routes)
+            Log.d(TAG, "Route drawn and camera fitted")
+        }
+        fittedRouteSet = routeResult.routes
+        fittedMap = map
     }
 
     /** Submits one route request through the generation-safe coordinator. */
@@ -784,7 +1041,7 @@ fun RouteScreen() {
     LaunchedEffect(routeResult, selectedIndex, guidanceRequested, locationPermissionGranted) {
         if (!guidanceRequested || !locationPermissionGranted) {
             navigationController.stop()
-            mapRef.value?.hideNavPosition()
+            voiceGuidanceOutput.reset()
             return@LaunchedEffect
         }
         val path = routeResult?.routes?.getOrNull(selectedIndex)
@@ -806,44 +1063,52 @@ fun RouteScreen() {
 
     // Follow the rider while guidance runs: the camera re-centres on the
     // snapped position and eases out as speed rises so the view ahead stays
-    // readable at pace. Zoom only changes on band crossings, so the map does
-    // not pulse on every fix.
-    LaunchedEffect(navSnapshot) {
-        val map = mapRef.value ?: return@LaunchedEffect
-        val snap = navSnapshot
-        if (snap.state == NavigationState.Idle || snap.lat.isNaN()) {
-            map.hideNavPosition()
-            return@LaunchedEffect
-        }
-
-        map.updateNavPosition(snap.lat, snap.lon, snap.bearingDeg)
-        if (guidanceRequested) {
-            val zoom = guidanceZoomFor(if (snap.speedMps.isNaN()) 0.0 else snap.speedMps)
-            map.animateCamera(
-                CameraUpdateFactory.newLatLngZoom(LatLng(snap.lat, snap.lon), zoom),
-                600,
-            )
-        }
-    }
+    // readable at pace. Small stationary fixes do not restart camera motion.
     // Location lock: re-centre on each fix at the user's zoom (followZoom),
     // never re-asserting a fixed level, so manual zoom works while locked.
     // Guidance already owns the camera; the lock only matters in planning
     // mode.
-    LaunchedEffect(trackedFix, followMe, followZoom) {
+    LaunchedEffect(trackedFix, followMe, followZoom, guidanceRequested, screenStarted) {
+        if (!screenStarted) return@LaunchedEffect
         if (!followMe || guidanceRequested) return@LaunchedEffect
         val map = mapRef.value ?: return@LaunchedEffect
         val fix = trackedFix ?: return@LaunchedEffect
         if (fix.lat.isNaN() || fix.lon.isNaN()) return@LaunchedEffect
-        map.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(LatLng(fix.lat, fix.lon), followZoom),
-            400,
-        )
+        val camera = map.cameraPosition
+        val cameraTarget = camera.target ?: return@LaunchedEffect
+        if (shouldFollowCamera(
+                cameraTarget.latitude,
+                cameraTarget.longitude,
+                camera.zoom,
+                fix.lat,
+                fix.lon,
+                followZoom,
+                followMovementThresholdMeters(fix.speedMps),
+            )
+        ) {
+            map.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(LatLng(fix.lat, fix.lon), followZoom),
+                400,
+            )
+        }
     }
     // On the first usable fix, move the initial map viewport to the rider.
     // This is intentionally one-shot: later fixes update the position marker,
     // while the rider can pan freely until they explicitly enable the lock.
-    LaunchedEffect(trackedFix, styleJson, mapRef.value, routeResult) {
-        if (initialLocationCentered || routeResult != null) return@LaunchedEffect
+    LaunchedEffect(
+        trackedFix,
+        styleJson,
+        loadedStyleJson,
+        mapRef.value,
+        routeResult,
+        followMe,
+        guidanceRequested,
+        screenStarted,
+    ) {
+        if (!screenStarted) return@LaunchedEffect
+        if (initialLocationCentered || routeResult != null || followMe || guidanceRequested) {
+            return@LaunchedEffect
+        }
         val map = mapRef.value ?: return@LaunchedEffect
         val fix = trackedFix ?: return@LaunchedEffect
         if (fix.lat.isNaN() || fix.lon.isNaN()) return@LaunchedEffect
@@ -856,27 +1121,148 @@ fun RouteScreen() {
     }
     // Manual zoom (pinch or the +/- pill) while locked: adopt the new zoom
     // into followZoom so the re-centre effect keeps the user's level.
+    val latestFollowMe = rememberUpdatedState(followMe)
     DisposableEffect(mapRef.value) {
         val map = mapRef.value ?: return@DisposableEffect onDispose { }
-        val listener = MapLibreMap.OnCameraMoveListener {
-            if (followMe) {
-                mapRef.value?.cameraPosition?.zoom?.let { followZoom = it }
+        var gestureStart: CameraPosition? = null
+        val moveStarted = MapLibreMap.OnCameraMoveStartedListener { reason ->
+            gestureStart = if (
+                reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE &&
+                latestFollowMe.value
+            ) {
+                map.cameraPosition
+            } else {
+                null
             }
         }
+        val listener = MapLibreMap.OnCameraMoveListener {
+            if (latestFollowMe.value) {
+                val camera = map.cameraPosition
+                val start = gestureStart
+                val startTarget = start?.target
+                val currentTarget = camera.target
+                if (startTarget != null && currentTarget != null &&
+                    isManualPan(
+                        startTarget.latitude,
+                        startTarget.longitude,
+                        start.zoom,
+                        currentTarget.latitude,
+                        currentTarget.longitude,
+                        camera.zoom,
+                    )
+                ) {
+                    // A rider who drags the map has explicitly released the
+                    // lock; later fixes should not pull the view back.
+                    followMe = false
+                    gestureStart = null
+                }
+            }
+        }
+        val idle = MapLibreMap.OnCameraIdleListener {
+            val userGesture = gestureStart != null
+            gestureStart = null
+            if (userGesture && latestFollowMe.value) {
+                // Capture a manual pinch's final zoom once. Programmatic
+                // follow animations have no gestureStart and cannot feed a
+                // camera -> state -> animation loop.
+                followZoom = map.cameraPosition.zoom
+            }
+        }
+        map.addOnCameraMoveStartedListener(moveStarted)
         map.addOnCameraMoveListener(listener)
-        onDispose { map.removeOnCameraMoveListener(listener) }
+        map.addOnCameraIdleListener(idle)
+        onDispose {
+            map.removeOnCameraMoveStartedListener(moveStarted)
+            map.removeOnCameraMoveListener(listener)
+            map.removeOnCameraIdleListener(idle)
+        }
     }
-    // Always-on tracking render: when guidance is idle the position dot
-    // still follows the raw tracked fix (GPS bearing when available). During
-    // guidance the snapshot effect below owns the dot.
-    LaunchedEffect(trackedFix, guidanceRequested, navSnapshot) {
-        if (guidanceRequested && navSnapshot.state != NavigationState.Idle) return@LaunchedEffect
-        val map = mapRef.value ?: return@LaunchedEffect
-        val fix = trackedFix
-        if (fix == null || fix.lat.isNaN() || fix.lon.isNaN()) {
-            map.hideNavPosition()
+
+    fun zoomFromPill(delta: Double) {
+        val map = mapRef.value ?: return
+        val camera = map.cameraPosition
+        val target = camera.target ?: return
+        val targetZoom = (camera.zoom + delta)
+            .coerceIn(map.minZoomLevel, map.maxZoomLevel)
+        if (followMe && !guidanceRequested) {
+            followZoom = targetZoom
+            // Let the follow effect combine the new zoom with the latest
+            // rider position. Without a fix, apply the zoom at the current
+            // target directly.
+            if (trackedFix == null) {
+                map.animateCamera(CameraUpdateFactory.newLatLngZoom(target, targetZoom), 250)
+            }
         } else {
-            map.updateNavPosition(fix.lat, fix.lon, fix.bearingDeg)
+            map.animateCamera(CameraUpdateFactory.newLatLngZoom(target, targetZoom), 250)
+        }
+    }
+    // This is the only position-marker owner. It collects navigation
+    // snapshots directly while started, so returning from background renders
+    // the current position once without waking RouteScreen per fix.
+    LaunchedEffect(
+        trackingActive,
+        guidanceRequested,
+        loadedStyleJson,
+        mapRef.value,
+        screenStarted,
+    ) {
+        if (!screenStarted) return@LaunchedEffect
+        val map = mapRef.value ?: return@LaunchedEffect
+        if (loadedStyleJson == null || loadedStyleJson != styleJson) return@LaunchedEffect
+        if (!trackingActive) {
+            map.hideNavPosition()
+            return@LaunchedEffect
+        }
+        if (guidanceRequested) {
+            navigationController.snapshot.collect { snap ->
+                if (snap.state == NavigationState.Idle || !snap.lat.isFinite() || !snap.lon.isFinite()) {
+                    map.hideNavPosition()
+                    return@collect
+                }
+                val camera = map.cameraPosition
+                val bearing = guidanceBearingTracker.resolve(snap.bearingDeg, camera.bearing)
+                map.updateNavPosition(snap.lat, snap.lon, bearing)
+                val speed = if (snap.speedMps.isFinite()) snap.speedMps else 0.0
+                val zoom = guidanceZoomFor(speed)
+                val cameraTarget = camera.target ?: return@collect
+                val needsPositionOrZoom = shouldFollowCamera(
+                    cameraTarget.latitude,
+                    cameraTarget.longitude,
+                    camera.zoom,
+                    snap.lat,
+                    snap.lon,
+                    zoom,
+                    followMovementThresholdMeters(speed),
+                )
+                if (needsPositionOrZoom || guidanceOrientationNeedsUpdate(
+                        cameraBearing = camera.bearing,
+                        targetBearing = bearing,
+                        cameraTilt = camera.tilt,
+                    )
+                ) {
+                    val topPadding = (mapView.height.coerceAtLeast(0) * GUIDANCE_TOP_PADDING_FRACTION)
+                    map.animateCamera(
+                        CameraUpdateFactory.newCameraPosition(
+                            CameraPosition.Builder()
+                                .target(LatLng(snap.lat, snap.lon))
+                                .zoom(zoom)
+                                .bearing(bearing)
+                                .tilt(GUIDANCE_TILT_DEGREES)
+                                .padding(0.0, topPadding, 0.0, 0.0)
+                                .build(),
+                        ),
+                        600,
+                    )
+                }
+            }
+        } else {
+            snapshotFlow { trackedFix }.collect { fix ->
+                if (fix == null || !fix.lat.isFinite() || !fix.lon.isFinite()) {
+                    map.hideNavPosition()
+                } else {
+                    map.updateNavPosition(fix.lat, fix.lon, fix.bearingDeg)
+                }
+            }
         }
     }
 
@@ -894,6 +1280,10 @@ fun RouteScreen() {
                 this[RouteCountKey] = routeCount
                 this[LocationPermissionKey] = locationPermissionGranted
                 this[MapInstalledKey] = mapUrl != null
+                this[GuidanceActiveKey] = guidanceRequested && navSnapshot.state != NavigationState.Idle
+                this[DarkRideMapEnabledKey] = darkRideMapEnabled
+                this[DarkGuidanceStyleReadyKey] = darkGuidanceStyle &&
+                    styleJson != null && loadedStyleJson == styleJson
             }
     ) {
         Box(
@@ -903,13 +1293,28 @@ fun RouteScreen() {
                 .semantics {
                     this[FocusedRouteIndexKey] = selectedIndex
                     this[MapRouteCountKey] = routeCount
-                    this[MapReadyKey] = mapRef.value != null && styleJson != null
+                    this[MapReadyKey] = mapRef.value != null &&
+                        styleJson != null && loadedStyleJson == styleJson
                 }
         ) {
             AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
             if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
                 NavigationHud(
                     snapshot = navSnapshot,
+                    voiceGuidanceEnabled = voiceGuidanceEnabled,
+                    voiceGuidanceReady = voiceSpeechStatus is OfflineSpeechStatus.Ready,
+                    voiceGuidanceStatusDescription = voiceSpeechStatus.hudDescription(),
+                    onVoiceSettings = {
+                        voiceGuidanceOutput.refreshAvailability()
+                        voiceSettingsOpen = true
+                    },
+                    darkRideMapEnabled = darkRideMapEnabled,
+                    onDarkRideMapToggle = {
+                        darkRideMapEnabled = !darkRideMapEnabled
+                        routePreferences.edit()
+                            .putBoolean(DARK_RIDE_MAP_PREF, darkRideMapEnabled)
+                            .apply()
+                    },
                     modifier = Modifier.align(Alignment.TopStart),
                 )
             }
@@ -928,6 +1333,12 @@ fun RouteScreen() {
                         )
                     },
                     onRouteSettings = { routeSettingsOpen = true },
+                    onVoiceSettings = {
+                        voiceGuidanceOutput.refreshAvailability()
+                        voiceSettingsOpen = true
+                    },
+                    voiceGuidanceEnabled = voiceGuidanceEnabled,
+                    voiceSpeechStatus = voiceSpeechStatus,
                     onOpenSavedRoutes = { savedRoutesOpen = true },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -956,7 +1367,13 @@ fun RouteScreen() {
             CentreOnMeButton(
                 visible = true,
                 active = followMe,
-                onClick = { followMe = !followMe },
+                onClick = {
+                    val enableFollow = !followMe
+                    if (enableFollow) {
+                        mapRef.value?.cameraPosition?.zoom?.let { followZoom = it }
+                    }
+                    followMe = enableFollow
+                },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 8.dp, bottom = 8.dp)
@@ -980,8 +1397,8 @@ fun RouteScreen() {
             // stays hidden while the IME is visible.
             if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) {
                 ZoomPill(
-                    onZoomIn = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
-                    onZoomOut = { mapRef.value?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
+                    onZoomIn = { zoomFromPill(1.0) },
+                    onZoomOut = { zoomFromPill(-1.0) },
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         // In ride mode the data bar occupies the bottom of the
@@ -1114,6 +1531,33 @@ fun RouteScreen() {
         )
     }
 
+    if (voiceSettingsOpen) {
+        VoiceGuidanceSettingsDialog(
+            current = voiceGuidanceSettings,
+            unit = voiceUnit,
+            speechStatus = voiceSpeechStatus,
+            onDismiss = { voiceSettingsOpen = false },
+            onApply = { settings ->
+                voiceGuidanceEnabled = settings.enabled
+                voiceIntervalMeters = settings.intervalMeters
+                voicePreviewCount = settings.previewCount
+                routePreferences.edit()
+                    .putBoolean(VOICE_ENABLED_PREF, settings.enabled)
+                    .putFloat(VOICE_INTERVAL_METERS_PREF, settings.intervalMeters.toFloat())
+                    .putInt(VOICE_PREVIEW_COUNT_PREF, settings.previewCount)
+                    .apply()
+                // Applying while riding takes effect immediately; enabling
+                // speech also previews the current next turns right away.
+                if (guidanceRequested &&
+                    (navSnapshot.state != NavigationState.Idle || !settings.enabled)
+                ) {
+                    voiceGuidanceOutput.onSnapshot(navSnapshot, settings)
+                }
+                voiceSettingsOpen = false
+            },
+        )
+    }
+
     if (savedRoutesOpen) {
         SavedRoutesSheet(
             summariesProvider = { savedRouteRepository.summaries() },
@@ -1187,16 +1631,118 @@ private fun milestoneEndpointLabel(milestone: GpxMilestone): String =
 /**
  * Camera zoom for the current riding speed, in discrete bands so the map
  * eases out as the rider speeds up and back in when they slow down. The
- * thresholds are deliberate: below 7 m/s (~25 km/h) riders read street
- * detail; above 31 m/s (~110 km/h) a highway corridor fits the screen.
+ * closer low-speed levels keep turns readable; the heading-up tilt shows a
+ * useful distance ahead as the rider speeds up.
  */
 internal fun guidanceZoomFor(speedMps: Double): Double = when {
-    speedMps < 7.0 -> 16.5
-    speedMps < 14.0 -> 15.5
-    speedMps < 22.0 -> 14.5
-    speedMps < 31.0 -> 13.5
-    else -> 12.5
+    speedMps < 7.0 -> 17.0
+    speedMps < 14.0 -> 16.0
+    speedMps < 22.0 -> 15.0
+    speedMps < 31.0 -> 14.0
+    else -> 13.0
 }
+
+internal const val GUIDANCE_TILT_DEGREES = 48.0
+internal const val GUIDANCE_RIDER_VERTICAL_FRACTION = 0.68
+internal const val GUIDANCE_TOP_PADDING_FRACTION =
+    2.0 * GUIDANCE_RIDER_VERTICAL_FRACTION - 1.0
+
+/** Keeps the last usable course when GPS temporarily stops reporting heading. */
+internal class GuidanceBearingTracker {
+    private var lastReliableBearing: Double? = null
+
+    fun resolve(incomingBearing: Double, cameraBearing: Double): Double {
+        if (incomingBearing.isFinite()) {
+            lastReliableBearing = normalizeBearing(incomingBearing)
+        }
+        return lastReliableBearing
+            ?: normalizeBearing(cameraBearing.takeIf(Double::isFinite) ?: 0.0)
+    }
+
+    fun reset() {
+        lastReliableBearing = null
+    }
+}
+
+internal fun bearingDistanceDegrees(first: Double, second: Double): Double {
+    if (!first.isFinite() || !second.isFinite()) return Double.POSITIVE_INFINITY
+    val difference = (normalizeBearing(first) - normalizeBearing(second) + 540.0) % 360.0
+    return kotlin.math.abs(difference - 180.0)
+}
+
+internal fun guidanceOrientationNeedsUpdate(
+    cameraBearing: Double,
+    targetBearing: Double,
+    cameraTilt: Double,
+): Boolean = bearingDistanceDegrees(cameraBearing, targetBearing) >= 6.0 ||
+    !cameraTilt.isFinite() || kotlin.math.abs(cameraTilt - GUIDANCE_TILT_DEGREES) >= 1.0
+
+private fun normalizeBearing(bearing: Double): Double = ((bearing % 360.0) + 360.0) % 360.0
+
+/**
+ * Suppresses camera churn from stationary GPS jitter while retaining a
+ * movement-dependent follow cadence. The distance is measured from the
+ * camera's current target, so a moving camera does not restart an animation
+ * for every small location update; [desiredZoom] still honors the caller's
+ * current follow zoom or guidance speed band.
+ */
+internal fun shouldFollowCamera(
+    cameraLat: Double,
+    cameraLon: Double,
+    cameraZoom: Double,
+    targetLat: Double,
+    targetLon: Double,
+    desiredZoom: Double,
+    minimumMovementMeters: Double,
+): Boolean {
+    if (!cameraLat.isFinite() || !cameraLon.isFinite() || !cameraZoom.isFinite() ||
+        !targetLat.isFinite() || !targetLon.isFinite() || !desiredZoom.isFinite()
+    ) {
+        return true
+    }
+    val movement = RouteSimilarity.haversineMeters(
+        GeoPoint(cameraLat, cameraLon),
+        GeoPoint(targetLat, targetLon),
+    )
+    return movement >= minimumMovementMeters.coerceAtLeast(0.0) ||
+        abs(cameraZoom - desiredZoom) >= CAMERA_ZOOM_FOLLOW_THRESHOLD
+}
+
+/** Detects an intentional pan gesture while the zoom stayed effectively fixed. */
+internal fun isManualPan(
+    startLat: Double,
+    startLon: Double,
+    startZoom: Double,
+    currentLat: Double,
+    currentLon: Double,
+    currentZoom: Double,
+): Boolean {
+    if (!startLat.isFinite() || !startLon.isFinite() || !startZoom.isFinite() ||
+        !currentLat.isFinite() || !currentLon.isFinite() || !currentZoom.isFinite()
+    ) {
+        return false
+    }
+    val movedMeters = RouteSimilarity.haversineMeters(
+        GeoPoint(startLat, startLon),
+        GeoPoint(currentLat, currentLon),
+    )
+    return movedMeters >= MANUAL_PAN_RELEASE_METERS &&
+        abs(startZoom - currentZoom) < CAMERA_ZOOM_FOLLOW_THRESHOLD
+}
+
+/** Stationary jitter needs to accumulate; actual motion gets a faster cadence. */
+internal fun followMovementThresholdMeters(speedMps: Double): Double =
+    if (speedMps.isFinite() && speedMps >= 1.0) {
+        (speedMps * 0.5).coerceIn(MOVING_FOLLOW_MIN_METERS, MOVING_FOLLOW_MAX_METERS)
+    } else {
+        STATIONARY_FOLLOW_MIN_METERS
+    }
+
+private const val CAMERA_ZOOM_FOLLOW_THRESHOLD = 0.15
+private const val STATIONARY_FOLLOW_MIN_METERS = 15.0
+private const val MOVING_FOLLOW_MIN_METERS = 5.0
+private const val MOVING_FOLLOW_MAX_METERS = 30.0
+private const val MANUAL_PAN_RELEASE_METERS = 12.0
 
 /** Fixed camera zoom the crosshair lock uses; 12.5 keeps several blocks of
  * street context visible while following. */
@@ -1444,4 +1990,11 @@ private fun rememberMapView(
         }
     }
     return mapView
+}
+
+private fun OfflineSpeechStatus.hudDescription(): String = when (this) {
+    OfflineSpeechStatus.NotStarted -> "offline voice not checked yet"
+    OfflineSpeechStatus.Checking -> "checking for English offline voice"
+    is OfflineSpeechStatus.Ready -> "English offline voice ready"
+    is OfflineSpeechStatus.Unavailable -> "English offline voice unavailable"
 }

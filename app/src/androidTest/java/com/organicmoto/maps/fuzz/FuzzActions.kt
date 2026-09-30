@@ -12,6 +12,8 @@ sealed interface FuzzAction {
     data object Back : FuzzAction
     data object OpenSavedRoutes : FuzzAction
     data object ToggleSettings : FuzzAction
+    data object OpenVoiceSettings : FuzzAction
+    data object ToggleDarkRideMap : FuzzAction
     data class PanMap(val direction: Direction) : FuzzAction
     data object BackgroundForeground : FuzzAction
 }
@@ -27,6 +29,10 @@ enum class UiTarget {
     MAP,
     SAVED_ROUTES,
     SETTINGS_COG,
+    VOICE_SETTINGS,
+    DARK_RIDE_MAP,
+    RIDE,
+    END_NAVIGATION,
     SAVE_BUTTON,
     CARD_0,
     CARD_1,
@@ -63,6 +69,8 @@ class FuzzRandom(seed: Long) {
             FuzzAction.Back::class.java -> FuzzAction.Back
             FuzzAction.OpenSavedRoutes::class.java -> FuzzAction.OpenSavedRoutes
             FuzzAction.ToggleSettings::class.java -> FuzzAction.ToggleSettings
+            FuzzAction.OpenVoiceSettings::class.java -> FuzzAction.OpenVoiceSettings
+            FuzzAction.ToggleDarkRideMap::class.java -> FuzzAction.ToggleDarkRideMap
             FuzzAction.PanMap::class.java -> FuzzAction.PanMap(nextDirection())
             FuzzAction.BackgroundForeground::class.java -> FuzzAction.BackgroundForeground
             else -> error("unsupported fuzz action ${type.name}")

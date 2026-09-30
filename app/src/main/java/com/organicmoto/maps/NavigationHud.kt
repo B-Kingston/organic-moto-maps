@@ -12,10 +12,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -29,10 +31,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.graphhopper.util.Instruction
@@ -49,7 +54,16 @@ import kotlin.math.sqrt
  * image assets.
  */
 @Composable
-fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
+fun NavigationHud(
+    snapshot: NavigationSnapshot,
+    modifier: Modifier = Modifier,
+    voiceGuidanceEnabled: Boolean = true,
+    voiceGuidanceReady: Boolean? = null,
+    voiceGuidanceStatusDescription: String? = null,
+    onVoiceSettings: () -> Unit = {},
+    darkRideMapEnabled: Boolean = false,
+    onDarkRideMapToggle: () -> Unit = {},
+) {
     Surface(
         color = Color(0xFF1C1C1E),
         shape = RoundedCornerShape(18.dp),
@@ -57,6 +71,7 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
         modifier = modifier
             .statusBarsPadding()
             .padding(start = 12.dp, top = 8.dp)
+            .widthIn(max = 300.dp)
             .semantics {
                 contentDescription = "Navigation guidance: " +
                     NavigationHudFormat.turnDescription(snapshot.turn)
@@ -66,41 +81,76 @@ fun NavigationHud(snapshot: NavigationSnapshot, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            Box(
-                modifier = Modifier.size(width = 44.dp, height = 44.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
-                    drawTurnArrow(snapshot.turn, size.width, size.height)
-                }
-                snapshot.turn?.roundaboutExitNumber?.takeIf { it > 0 }?.let { exitNumber ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1f, fill = false),
+                ) {
+                    Box(
+                        modifier = Modifier.size(width = 44.dp, height = 44.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
+                            drawTurnArrow(snapshot.turn, size.width, size.height)
+                        }
+                        snapshot.turn?.roundaboutExitNumber?.takeIf { it > 0 }?.let { exitNumber ->
+                            Text(
+                                text = exitNumber.toString(),
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF249CF2))
+                                    .padding(horizontal = 3.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        text = exitNumber.toString(),
+                        text = snapshot.turn?.let { NavigationHudFormat.distanceText(it.distanceM) } ?: "—",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .clip(CircleShape)
-                            .background(Color(0xFF249CF2))
-                            .padding(horizontal = 3.dp, vertical = 1.dp),
                     )
+                    if (!snapshot.turn?.streetName.isNullOrBlank()) {
+                        Text(
+                            text = snapshot.turn!!.streetName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xB3FFFFFF),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = snapshot.turn?.let { NavigationHudFormat.distanceText(it.distanceM) } ?: "—",
-                fontSize = 22.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White,
-            )
-            if (!snapshot.turn?.streetName.isNullOrBlank()) {
-                Text(
-                    text = snapshot.turn!!.streetName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xB3FFFFFF),
-                    maxLines = 1,
-                )
+                Spacer(Modifier.width(4.dp))
+                IconButton(
+                    onClick = onVoiceSettings,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .semantics {
+                            contentDescription = NavigationHudFormat.voiceSettingsDescription(
+                                enabled = voiceGuidanceEnabled,
+                                statusDescription = voiceGuidanceStatusDescription,
+                            )
+                        },
+                ) {
+                    VoiceGuidanceIcon(enabled = voiceGuidanceEnabled && (voiceGuidanceReady ?: true))
+                }
+                IconButton(
+                    onClick = onDarkRideMapToggle,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .semantics {
+                            contentDescription = NavigationHudFormat.darkRideMapDescription(
+                                darkRideMapEnabled,
+                            )
+                            stateDescription = if (darkRideMapEnabled) "on" else "off"
+                        },
+                ) {
+                    DarkRideMapIcon(enabled = darkRideMapEnabled)
+                }
             }
         }
     }
@@ -173,6 +223,66 @@ fun NavigationDataBar(
     }
 }
 
+/** Balanced 24 dp speaker, with circular waves contained inside its canvas. */
+@Composable
+internal fun VoiceGuidanceIcon(enabled: Boolean, color: Color = Color.White) {
+    Canvas(Modifier.size(24.dp)) {
+        val unit = size.width / 24f
+        val speaker = Path().apply {
+            moveTo(3f * unit, 9f * unit)
+            lineTo(7f * unit, 9f * unit)
+            lineTo(12f * unit, 5f * unit)
+            lineTo(12f * unit, 19f * unit)
+            lineTo(7f * unit, 15f * unit)
+            lineTo(3f * unit, 15f * unit)
+            close()
+        }
+        drawPath(speaker, color)
+        val stroke = Stroke(width = 1.8f * unit, cap = StrokeCap.Round)
+        if (enabled) {
+            for (radius in listOf(5f, 9f)) {
+                drawArc(
+                    color = color,
+                    startAngle = -45f,
+                    sweepAngle = 90f,
+                    useCenter = false,
+                    topLeft = Offset((12f - radius) * unit, (12f - radius) * unit),
+                    size = Size(radius * 2f * unit, radius * 2f * unit),
+                    style = stroke,
+                )
+            }
+        } else {
+            // The cross sits beside the speaker rather than merging into its body.
+            drawLine(color, Offset(16f * unit, 9f * unit), Offset(21f * unit, 15f * unit),
+                strokeWidth = stroke.width, cap = StrokeCap.Round)
+            drawLine(color, Offset(16f * unit, 15f * unit), Offset(21f * unit, 9f * unit),
+                strokeWidth = stroke.width, cap = StrokeCap.Round)
+        }
+    }
+}
+
+/** Crescent moon: a familiar night-map control, filled when active. */
+@Composable
+internal fun DarkRideMapIcon(enabled: Boolean, color: Color = Color.White) {
+    Canvas(Modifier.size(24.dp)) {
+        val unit = size.width / 24f
+        val moon = Path().apply {
+            moveTo(15f * unit, 3f * unit)
+            cubicTo(8f * unit, 1f * unit, 2f * unit, 7f * unit, 3f * unit, 14f * unit)
+            cubicTo(4f * unit, 21f * unit, 13f * unit, 24f * unit, 19f * unit, 19f * unit)
+            cubicTo(21f * unit, 17f * unit, 21f * unit, 15f * unit, 21f * unit, 14f * unit)
+            cubicTo(17f * unit, 17f * unit, 11f * unit, 15f * unit, 10f * unit, 10f * unit)
+            cubicTo(9f * unit, 7f * unit, 11f * unit, 4f * unit, 15f * unit, 3f * unit)
+            close()
+        }
+        if (enabled) drawPath(moon, color)
+        else drawPath(
+            moon, color,
+            style = Stroke(width = 1.8f * unit, cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
+    }
+}
+
 
 
 @Composable
@@ -217,17 +327,18 @@ private fun DeltaCell(deltaS: Double, modifier: Modifier = Modifier) {
 }
 
 /** Hand-drawn maneuver symbol, shaped from GraphHopper's instruction and route geometry. */
-private fun DrawScope.drawTurnArrow(turn: NavigationSnapshot.TurnInfo?, w: Float, h: Float) {
-    val stroke = Stroke(width = w * 0.09f, cap = StrokeCap.Round)
+internal fun DrawScope.drawTurnArrow(turn: NavigationSnapshot.TurnInfo?, w: Float, h: Float) {
+    val stroke = Stroke(width = w * 0.09f, cap = StrokeCap.Round, join = StrokeJoin.Round)
     val paint = Color.White
     val sign = turn?.sign
     if (sign == null) {
-        // No turn pending: draw a straight placeholder stem.
+        // Keep a recognizable forward arrow while waiting for the next instruction.
         val path = Path().apply {
             moveTo(w * 0.5f, h * 0.2f)
-            lineTo(w * 0.5f, h * 0.8f)
+            lineTo(w * 0.5f, h * 0.85f)
         }
         drawPath(path, paint, style = stroke)
+        drawArrowHead(w * 0.5f, h * 0.2f, 0f, -1f, w, paint, stroke)
         return
     }
     val isUTurn = sign == Instruction.U_TURN_UNKNOWN ||
@@ -307,7 +418,7 @@ private fun DrawScope.drawTurnArrow(turn: NavigationSnapshot.TurnInfo?, w: Float
     val uy = dy / length
     val baseX = headX - ux * w * 0.16f
     val baseY = headY - uy * w * 0.16f
-    val wing = w * 0.075f
+    val wing = w * 0.12f
     val head = Path().apply {
         moveTo(baseX - uy * wing, baseY + ux * wing)
         lineTo(headX, headY)
@@ -490,7 +601,7 @@ private fun DrawScope.drawArrowHead(
     val ux = directionX / length
     val uy = directionY / length
     val headLength = w * 0.15f
-    val wing = w * 0.075f
+    val wing = w * 0.12f
     val baseX = tipX - ux * headLength
     val baseY = tipY - uy * headLength
     val head = Path().apply {
@@ -504,6 +615,15 @@ private fun DrawScope.drawArrowHead(
 
 /** Pure formatting helpers, JVM-testable. */
 object NavigationHudFormat {
+    fun darkRideMapDescription(enabled: Boolean): String =
+        "Dark ride map, ${if (enabled) "on" else "off"}"
+
+    fun voiceSettingsDescription(enabled: Boolean, statusDescription: String? = null): String {
+        val base = if (enabled) "Voice guidance settings, enabled" else "Voice guidance settings, disabled"
+        val status = statusDescription?.trim()?.takeIf { enabled && it.isNotEmpty() }
+        return if (status == null) base else "$base, $status"
+    }
+
     fun speedKmh(speedMps: Double): String =
         if (speedMps.isNaN()) "—" else "${(speedMps * 3.6).toInt()}"
 
@@ -542,15 +662,22 @@ object NavigationHudFormat {
             Instruction.TURN_RIGHT -> "turn right"
             Instruction.TURN_SLIGHT_RIGHT -> "veer slightly right"
             Instruction.KEEP_RIGHT -> "keep right"
-            Instruction.USE_ROUNDABOUT -> turn.roundaboutExitNumber
-                ?.takeIf { it > 0 }
-                ?.let { "take the ${ordinal(it)} exit at the roundabout" }
-                ?: "enter the roundabout"
+            Instruction.USE_ROUNDABOUT -> "enter the roundabout"
             Instruction.LEAVE_ROUNDABOUT -> "exit the roundabout"
             Instruction.FERRY -> "take the ferry"
             else -> "continue ahead"
         }
-        return "$action in ${distanceText(turn.distanceM)}"
+        val description = buildString {
+            append("$action in ${distanceText(turn.distanceM)}")
+            if (turn.sign == Instruction.USE_ROUNDABOUT) {
+                turn.roundaboutExitNumber?.takeIf { it > 0 }?.let {
+                    append(", then take the ${ordinal(it)} exit")
+                }
+            }
+        }
+        return if (turn.streetName.isBlank()) description else {
+            "$description onto ${turn.streetName.trim()}"
+        }
     }
 
     /** Returns the route's slight-turn angle when it agrees with the sign. */

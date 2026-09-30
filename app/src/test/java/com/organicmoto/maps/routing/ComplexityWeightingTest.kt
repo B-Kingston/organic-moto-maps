@@ -11,6 +11,8 @@ import com.graphhopper.storage.BaseGraph
 import com.graphhopper.util.EdgeIteratorState
 import com.graphhopper.util.FetchMode
 import com.graphhopper.util.PointList
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -114,6 +116,27 @@ class ComplexityWeightingTest {
         assertEquals(4.0, weighting.calcEdgeWeight(curved, false), 1e-6)
         assertEquals(4321L, weighting.calcEdgeMillis(straight, false))
         assertEquals(0.75, weighting.calcMinWeightPerDistance(), 0.0)
+    }
+
+    @Test
+    fun repeatedDirectionalReadsReuseTheCachedCurveFactor() {
+        val fixture = fixture()
+        val geometryReads = intArrayOf(0)
+        val edge = countingGeometryReads(fixture.edge(), geometryReads)
+        val weighting = weighting(
+            fixture,
+            custom = FakeWeighting(edgeWeight = 4.0),
+            fastest = FakeWeighting(edgeWeight = 4.0),
+            complexity = 1.0,
+        )
+
+        val forward = weighting.calcEdgeWeight(edge, reverse = false)
+        val repeatedForward = weighting.calcEdgeWeight(edge, reverse = false)
+        val reverse = weighting.calcEdgeWeight(edge, reverse = true)
+
+        assertEquals(forward, repeatedForward, 0.0)
+        assertEquals(forward, reverse, 0.0)
+        assertEquals("one geometry read for both directions of one edge", 1, geometryReads[0])
     }
 
     @Test
@@ -234,6 +257,21 @@ class ComplexityWeightingTest {
         override fun hasTurnCosts(): Boolean = false
         override fun getName(): String = "fake"
     }
+
+    private fun countingGeometryReads(
+        edge: EdgeIteratorState,
+        reads: IntArray,
+    ): EdgeIteratorState = Proxy.newProxyInstance(
+        EdgeIteratorState::class.java.classLoader,
+        arrayOf(EdgeIteratorState::class.java),
+    ) { _, method, args ->
+        if (method.name == "fetchWayGeometry") reads[0]++
+        try {
+            method.invoke(edge, *(args ?: emptyArray()))
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+    } as EdgeIteratorState
 
     private companion object {
         const val METERS_PER_DEGREE = 111_320.0

@@ -74,6 +74,34 @@ class RouteTrackTest {
     }
 
     @Test
+    fun upcomingTurnsKeepsRouteOrderAndDistancesForPreviews() {
+        val track = straightTrack(listOf(-2, 2))
+
+        val upcoming = track.upcomingTurns(150.0, limit = 2)
+
+        assertEquals(2, upcoming.size)
+        assertEquals(-2, upcoming[0].first.sign)
+        assertEquals(2, upcoming[1].first.sign)
+        assertEquals(150.0, upcoming[0].second, 8.0)
+        assertEquals(450.0, upcoming[1].second, 8.0)
+    }
+
+    @Test
+    fun roundaboutExitMetadataSurvivesTrackConstruction() {
+        val track = RouteTrack.fromPath(
+            latitudes = doubleArrayOf(0.0, 0.0, 0.0),
+            longitudes = doubleArrayOf(0.0, 0.001, 0.002),
+            instructionSigns = listOf(0, com.graphhopper.util.Instruction.LEAVE_ROUNDABOUT, 0),
+            instructionNames = listOf("depart", "High Street", "finish"),
+            instructionPointCounts = listOf(1, 1, 1),
+            instructionTimesS = listOf(10.0, 30.0, 0.0),
+            instructionRoundaboutExitNumbers = listOf(null, 2, null),
+        )
+
+        assertEquals(2, track.turns.single().roundaboutExitNumber)
+    }
+
+    @Test
     fun `synthetic instructions are excluded from turns`() {
         val track = straightTrack(listOf(4)) // FINISH is not a real turn
         assertFalse(track.turns.any { RouteTrack.isRealTurn(it.sign) })

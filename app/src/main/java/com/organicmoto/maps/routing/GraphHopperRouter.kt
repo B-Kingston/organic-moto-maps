@@ -209,6 +209,7 @@ class GraphHopperRouter(context: Context) {
                 ?.toList()
                 .orEmpty()
         }
+        val previousEdgeIds = previous.flatMapTo(mutableSetOf()) { it.edgeDistances.keys }
 
         // The first returned path of the first attempt is this detent's own
         // softly diversified optimum: it defines the ride the dial position
@@ -237,7 +238,7 @@ class GraphHopperRouter(context: Context) {
                 blockUnpaved = blockUnpaved,
                 maxRoadShare = safeMaxRoadShare,
                 attempt = attempt,
-                previousEdgeIds = previous.flatMapTo(mutableSetOf()) { it.edgeDistances.keys },
+                previousEdgeIds = previousEdgeIds,
                 viaPoints = viaPoints,
             )
             Log.i(TAG, "Requesting route detent $detent (diversification attempt $attempt)")

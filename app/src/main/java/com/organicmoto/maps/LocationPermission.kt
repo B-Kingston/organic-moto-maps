@@ -18,4 +18,11 @@ internal object LocationPermission {
     fun isGranted(context: Context): Boolean = requestedPermissions.any { permission ->
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
     }
+
+    /** GPS_PROVIDER requires precise access; approximate access can still use network/passive. */
+    fun isFineGranted(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
 }

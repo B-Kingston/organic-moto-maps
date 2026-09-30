@@ -106,13 +106,23 @@ class RouteTrack(
      * distance in metres from that offset, or null when none remains.
      */
     fun nextTurn(offsetM: Double): Pair<TurnNode, Double>? {
-        for (turn in turns) {
-            val turnOffset = cumulativeDistanceM[turn.vertexIndex.coerceIn(0, lastIndex)]
-            if (turnOffset >= offsetM - TURN_SNAP_TOLERANCE_M) {
-                return turn to (turnOffset - offsetM).coerceAtLeast(0.0)
+        return upcomingTurns(offsetM, 1).firstOrNull()
+    }
+
+    /** Upcoming turns in route order, with each distance measured from [offsetM]. */
+    fun upcomingTurns(offsetM: Double, limit: Int): List<Pair<TurnNode, Double>> {
+        if (limit <= 0) return emptyList()
+        return turns.asSequence()
+            .mapNotNull { turn ->
+                val turnOffset = cumulativeDistanceM[turn.vertexIndex.coerceIn(0, lastIndex)]
+                if (turnOffset >= offsetM - TURN_SNAP_TOLERANCE_M) {
+                    turn to (turnOffset - offsetM).coerceAtLeast(0.0)
+                } else {
+                    null
+                }
             }
-        }
-        return null
+            .take(limit)
+            .toList()
     }
 
     private val lastIndex: Int get() = latitudes.size - 1

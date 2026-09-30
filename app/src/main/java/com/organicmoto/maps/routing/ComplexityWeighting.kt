@@ -8,6 +8,7 @@ import com.graphhopper.routing.weighting.Weighting
 import com.graphhopper.util.EdgeIteratorState
 import com.graphhopper.util.FetchMode
 import com.graphhopper.util.PointList
+import java.util.LinkedHashMap
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -82,6 +83,17 @@ class ComplexityWeighting(
     private val previousEdgePenalty: Double,
 ) : Weighting {
 
+    /**
+     * Edge IDs are unique inside a request's graph, including QueryGraph's
+     * virtual edges; each request gets its own weighting. Directional reads
+     * share an edge ID and curve exposure is symmetric, so one value is valid
+     * for both directions. Keep only recent factors to cap per-request memory.
+     */
+    private val curveFactorCache = object : LinkedHashMap<Int, Double>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Double>?): Boolean =
+            size > MAX_CACHED_CURVE_FACTORS
+    }
+
     override fun calcMinWeightPerDistance(): Double = fastest.calcMinWeightPerDistance()
 
     override fun calcEdgeWeight(edgeState: EdgeIteratorState, reverse: Boolean): Double {
@@ -137,11 +149,18 @@ class ComplexityWeighting(
      * sustained-bend signal that keeps broad, curved roads competitive.
      */
     private fun curvePenaltyFactor(edgeState: EdgeIteratorState): Double {
+        val edgeId = edgeState.edge
+        synchronized(curveFactorCache) {
+            curveFactorCache[edgeId]?.let { return it }
+        }
         val exposure = combinedCurveExposure(
             edgeState.fetchWayGeometry(FetchMode.ALL),
             edgeState.distance,
         )
-        return 1.0 - exposure
+        val computed = 1.0 - exposure
+        synchronized(curveFactorCache) {
+            return curveFactorCache[edgeId] ?: computed.also { curveFactorCache[edgeId] = it }
+        }
     }
 
     // Must match Weighting.isValidName's regex [|_a-z]+.
@@ -150,6 +169,9 @@ class ComplexityWeighting(
     private companion object {
         /** Added multiplier for a perfectly straight edge at complexity 1. */
         const val STRAIGHT_ROAD_PENALTY = 1.5
+
+        /** Bounded LRU cap for request-local edge curve factors. */
+        const val MAX_CACHED_CURVE_FACTORS = 4_096
 
         /**
          * Explicitly unpaved GraphHopper surfaces. MISSING and OTHER stay

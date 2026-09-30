@@ -53,6 +53,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,6 +100,9 @@ internal fun RouteActionsPill(
     onLoadMap: () -> Unit,
     onImportGpx: () -> Unit,
     onRouteSettings: () -> Unit,
+    onVoiceSettings: () -> Unit,
+    voiceGuidanceEnabled: Boolean,
+    voiceSpeechStatus: OfflineSpeechStatus,
     onOpenSavedRoutes: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -143,6 +147,27 @@ internal fun RouteActionsPill(
                 modifier = Modifier.padding(horizontal = 12.dp),
             )
             RouteActionsPillButton(
+                contentDescription = "Voice guidance settings",
+                stateDescription = when {
+                    !voiceGuidanceEnabled -> "Disabled"
+                    voiceSpeechStatus is OfflineSpeechStatus.Ready -> "English offline voice ready"
+                    voiceSpeechStatus is OfflineSpeechStatus.Checking -> "Checking for an English offline voice"
+                    voiceSpeechStatus is OfflineSpeechStatus.NotStarted -> "English offline voice not checked yet"
+                    else -> "English offline voice unavailable"
+                },
+                onClick = onVoiceSettings,
+            ) {
+                VoiceGuidanceIcon(
+                    enabled = voiceGuidanceEnabled && voiceSpeechStatus is OfflineSpeechStatus.Ready,
+                    color = Color(0xFF616161),
+                )
+            }
+            HorizontalDivider(
+                color = Color(0x1A000000),
+                thickness = 1.dp,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
+            RouteActionsPillButton(
                 contentDescription = "Saved routes",
                 onClick = onOpenSavedRoutes,
             ) { BookmarkIcon(filled = false) }
@@ -154,13 +179,17 @@ internal fun RouteActionsPill(
 private fun RouteActionsPillButton(
     contentDescription: String,
     onClick: () -> Unit,
+    stateDescription: String? = null,
     icon: @Composable () -> Unit,
 ) {
     IconButton(
         onClick = onClick,
         modifier = Modifier
             .size(48.dp)
-            .semantics { this.contentDescription = contentDescription },
+            .semantics {
+                this.contentDescription = contentDescription
+                if (stateDescription != null) this.stateDescription = stateDescription
+            },
     ) {
         icon()
     }

@@ -34,8 +34,97 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew assembleDebug
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-The Gradle wrapper jar is not committed — run `gradle wrapper` once, or let
-Android Studio repair it on open.
+The repository includes the Gradle wrapper and its wrapper JAR.
+
+## Running and debugging from the CLI
+
+`tools/android.sh` builds, installs, launches, and logs the app.
+
+```sh
+tools/android.sh run
+```
+
+If no Android device is online, `run` starts the `Pixel_10_Pro` emulator.
+Set `ANDROID_AVD` to choose another installed emulator. Set `ANDROID_SERIAL`
+to choose a connected device.
+
+To build and launch the app, then stream its logs:
+
+```sh
+tools/android.sh debug
+```
+
+To stream logs from an app that is already running:
+
+```sh
+tools/android.sh logs
+```
+
+Press Ctrl-C to stop the log stream. This CLI shows app-process logs. It does
+not attach a source-level debugger for breakpoints. The script reads the SDK
+path from `ANDROID_SDK_ROOT`, `ANDROID_HOME`, or `local.properties`. It uses
+Homebrew JDK 17 when `JAVA_HOME` is unset and that JDK is installed.
+
+### Agent-driven visual routing
+
+`tools/test/visual.py` boots or reuses the ADB emulator, installs the debug app,
+and provides repeatable UI controls that leave the app open for inspection.
+To route the default Brisbane CBD to Mount Glorious corridor and enter ride
+mode:
+
+```sh
+tools/test/visual.py route \
+  --from '-27.4698,153.0251' \
+  --to '-27.3353,152.7720'
+```
+
+Use place names or coordinates, and set the route controls on the same command:
+
+```sh
+tools/test/visual.py route \
+  --from 'Brisbane' \
+  --to 'Mount Glorious' \
+  --complexity 2 \
+  --road-share 45 \
+  --block-unpaved
+```
+
+The route command captures the launch, entered endpoints, routing progress,
+ready route, and active ride. Screenshots and an event log go under
+`build/visual-inspection/<run-id>/`; `build/visual-inspection/latest.png` is
+updated after every capture. Add `--plan-only` to leave the route ready at the
+planner. A subsequent run can reuse the built APK with `--no-build`.
+
+Set initial progress on the same command, or move an active ride later:
+
+```sh
+tools/test/visual.py route --from Brisbane --to 'Mount Glorious' --progress 50
+tools/test/visual.py progress --percent 75
+tools/test/visual.py route --from Brisbane --to 'Mount Glorious' --black-and-white both
+tools/test/visual.py map-mode --black-and-white on
+tools/test/visual.py icon-states
+```
+
+Progress follows the selected route geometry through the live navigation
+session. The runner captures intermediate route positions and the final frame,
+and updates `latest.png` after each capture. Backward jumps restart
+guidance at the route start and advance to the requested point. This requires a
+debug build and an Android emulator; route geometry and the ADB control bridge
+exist only in debug builds.
+
+`--black-and-white on|off` sets the ride map style during a route run. Use
+`both` to save screenshots of both styles for comparison. `map-mode` changes
+the style on an already active ride and saves a screenshot for each requested
+state. `icon-states` captures the moon outline/fill, voice settings dialog, and
+speaker enabled/muted states during an active ride, then restores both preferences.
+
+For step-by-step exploration, use `launch`, then call `tree`, `screenshot`,
+`tap`, `type`, `key`, `swipe`, or `options` as needed. `watch` records changing
+screens while another gesture or command runs. These commands use accessible
+text and content descriptions, so route settings, saved routes, voice options,
+GPX import, and other visible app controls can be inspected and operated
+without fixed screen coordinates. Set `ANDROID_SERIAL` when more than one
+device is online; set `ANDROID_AVD` to select another emulator.
 
 ## Data pipelines (required before first build)
 

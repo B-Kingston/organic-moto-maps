@@ -56,6 +56,8 @@ data class NavigationSnapshot(
     val paceDeltaS: Double,
     /** Next turn, or null when none remains. */
     val turn: TurnInfo?,
+    /** Current turn followed by later turns for concise spoken previews. */
+    val upcomingTurns: List<TurnInfo> = emptyList(),
 ) {
     data class TurnInfo(
         /** GraphHopper instruction sign; see [com.graphhopper.util.Instruction]. */
@@ -70,6 +72,8 @@ data class NavigationSnapshot(
         val roundaboutExitNumber: Int? = null,
         /** True for clockwise circulation, false for counterclockwise, null when ambiguous. */
         val roundaboutClockwise: Boolean? = null,
+        /** Stable identity within this route, used to avoid repeated prompts. */
+        val maneuverId: Int = -1,
     )
 }
 
@@ -233,6 +237,7 @@ class NavigationSession(
             completionPercent = lastCompletionPercent,
             paceDeltaS = paceDeltaS,
             turn = null,
+            upcomingTurns = emptyList(),
         )
     }
 
@@ -407,7 +412,7 @@ class NavigationSession(
         lon: Double,
         bearing: Double,
     ) {
-        val turn = activeTrack.nextTurn(offset)?.let { (node, distance) ->
+        val upcomingTurns = activeTrack.upcomingTurns(offset, SPOKEN_PREVIEW_LIMIT).map { (node, distance) ->
             NavigationSnapshot.TurnInfo(
                 sign = node.sign,
                 streetName = node.streetName,
@@ -415,15 +420,16 @@ class NavigationSession(
                 turnAngleDeg = node.turnAngleDeg,
                 roundaboutExitNumber = node.roundaboutExitNumber,
                 roundaboutClockwise = node.roundaboutClockwise,
+                maneuverId = node.vertexIndex,
             )
         }
-        emit(fix, lat, lon, bearing, offset, turn)
+        emit(fix, lat, lon, bearing, offset, upcomingTurns)
     }
 
     private fun publishRaw(fix: GpsFix) {
         val heading = direction.headingDeg()
         val bearing = if (heading.isNaN()) Double.NaN else heading
-        emit(fix, fix.lat, fix.lon, bearing, matcher?.currentOffsetM ?: 0.0, null)
+        emit(fix, fix.lat, fix.lon, bearing, matcher?.currentOffsetM ?: 0.0, emptyList())
     }
 
     private fun emit(
@@ -432,7 +438,7 @@ class NavigationSession(
         lon: Double,
         bearing: Double,
         offset: Double,
-        turn: NavigationSnapshot.TurnInfo?,
+        upcomingTurns: List<NavigationSnapshot.TurnInfo>,
     ) {
         val activeTrack = track ?: return
         val remainingDistance = activeTrack.remainingDistanceM(offset)
@@ -448,7 +454,8 @@ class NavigationSession(
             remainingTimeS = kotlin.math.max(settings.minimumEtaS, remainingTime),
             completionPercent = completionPercent(offset, activeTrack),
             paceDeltaS = paceDeltaS,
-            turn = turn,
+            turn = upcomingTurns.firstOrNull(),
+            upcomingTurns = upcomingTurns,
         )
     }
 
@@ -480,6 +487,9 @@ class NavigationSession(
         /** Organic Maps' kRunawayDistanceSensitivityMeters. */
         const val RUNAWAY_SENSITIVITY_M = 0.01
 
+        /** Leave room for the selected preview count without rebuilding per-fix buffers. */
+        private const val SPOKEN_PREVIEW_LIMIT = 5
+
         /** Organic Maps' kCompletionPercentAccuracy. */
         const val COMPLETION_STEP_PERCENT = 5
 
@@ -495,6 +505,7 @@ class NavigationSession(
             completionPercent = 0,
             paceDeltaS = Double.NaN,
             turn = null,
+            upcomingTurns = emptyList(),
         )
     }
 }

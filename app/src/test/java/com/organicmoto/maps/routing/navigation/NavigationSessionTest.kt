@@ -50,6 +50,7 @@ class NavigationSessionTest {
         assertTrue(turn != null)
         assertEquals(2, turn!!.sign)
         assertEquals(500.0, turn.distanceM, 60.0)
+        assertEquals(turn, session.snapshot.value.upcomingTurns.first())
     }
 
     @Test
