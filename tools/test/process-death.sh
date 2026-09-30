@@ -16,8 +16,8 @@ PACKAGE="com.organicmoto.maps"
 "$ADB" shell am kill "$PACKAGE"
 "$ADB" shell am start -n "$PACKAGE/.MainActivity"
 sleep 5
-"$ADB" shell uiautomator dump /sdcard/organic-moto-window.xml >/dev/null
-XML="$("$ADB" shell cat /sdcard/organic-moto-window.xml | tr -d '\r')"
+"$ADB" shell uiautomator dump /sdcard/curvemaps-window.xml >/dev/null
+XML="$("$ADB" shell cat /sdcard/curvemaps-window.xml | tr -d '\r')"
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT

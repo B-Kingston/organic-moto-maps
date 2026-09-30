@@ -269,7 +269,7 @@ for path in (root / "build/test-report").glob("*.log"):
 state_count = max(state_count, log_state_count)
 
 lines = [
-    "Organic Moto Maps test summary",
+    "curveMaps test summary",
     f"JUnit XML files: {len(xml_paths)}",
     f"tests: {tests}",
     f"failures: {failures}",

@@ -1,4 +1,4 @@
-# Organic Moto Maps
+# curveMaps
 
 Offline-first motorcycle routing for Android.
 Kotlin + Jetpack Compose + MapLibre Android SDK (map) + GraphHopper core (routing).

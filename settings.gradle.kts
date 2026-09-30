@@ -23,6 +23,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "OrganicMotoMaps"
+rootProject.name = "curveMaps"
 include(":app")
 include(":geocoder-tool")
