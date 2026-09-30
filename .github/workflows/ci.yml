@@ -93,9 +93,16 @@ jobs:
           assert b'OSMHeader' in blob_header, blob_header[:80]
           print('queensland.osm.pbf has a valid OSMHeader blob')
           PY
+          jar_asset_url="$(
+            curl -fsSL --retry 3 --retry-delay 5 \
+              "https://api.github.com/repos/graphhopper/graphhopper/releases/tags/${GRAPHHOPPER_VERSION}" |
+              python3 -c 'import json,sys; name=sys.argv[1]; release=json.load(sys.stdin); print(next(asset["url"] for asset in release["assets"] if asset["name"] == name))' \
+                "graphhopper-web-${GRAPHHOPPER_VERSION}.jar"
+          )"
           curl -fL --retry 3 --retry-delay 5 \
-            -o tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar \
-            https://github.com/graphhopper/graphhopper/releases/download/${{ env.GRAPHHOPPER_VERSION }}/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
+            -H 'Accept: application/octet-stream' \
+            -o "tools/gh/graphhopper-web-${GRAPHHOPPER_VERSION}.jar" \
+            "$jar_asset_url"
       - name: Verify GraphHopper jar checksum
         run: |
           echo "${{ env.GRAPHHOPPER_JAR_SHA256 }}  tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" | sha256sum -c -
