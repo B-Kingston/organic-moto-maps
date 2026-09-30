@@ -27,7 +27,8 @@ on:
 
 env:
   # Keep in lockstep with `graphhopper` in gradle/libs.versions.toml (stored
-  # graph format is version-bound). Used for the jar URL and cache path below.
+  # graph format is version-bound). Used for the Maven Central URL and cache
+  # path below.
   GRAPHHOPPER_VERSION: "11.0"
   GRAPHHOPPER_JAR_SHA256: b59c024afe172ec6ec85b6327006c3138ec58c7d0bcd26253d0e42853f613def
   CACHE_SEED: v1
@@ -93,16 +94,9 @@ jobs:
           assert b'OSMHeader' in blob_header, blob_header[:80]
           print('queensland.osm.pbf has a valid OSMHeader blob')
           PY
-          jar_asset_url="$(
-            curl -fsSL --retry 3 --retry-delay 5 \
-              "https://api.github.com/repos/graphhopper/graphhopper/releases/tags/${GRAPHHOPPER_VERSION}" |
-              python3 -c 'import json,sys; name=sys.argv[1]; release=json.load(sys.stdin); print(next(asset["url"] for asset in release["assets"] if asset["name"] == name))' \
-                "graphhopper-web-${GRAPHHOPPER_VERSION}.jar"
-          )"
           curl -fL --retry 3 --retry-delay 5 \
-            -H 'Accept: application/octet-stream' \
             -o "tools/gh/graphhopper-web-${GRAPHHOPPER_VERSION}.jar" \
-            "$jar_asset_url"
+            "https://repo.maven.apache.org/maven2/com/graphhopper/graphhopper-web/${GRAPHHOPPER_VERSION}/graphhopper-web-${GRAPHHOPPER_VERSION}.jar"
       - name: Verify GraphHopper jar checksum
         run: |
           echo "${{ env.GRAPHHOPPER_JAR_SHA256 }}  tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" | sha256sum -c -
