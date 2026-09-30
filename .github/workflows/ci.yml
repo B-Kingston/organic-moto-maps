@@ -7,9 +7,8 @@ name: light-ci
 # pinned pipeline before invoking tools/test/ci.sh — whose preflight step
 # then validates every artifact exactly like it does locally.
 #
-# Determinism note: the OSM extract and the GraphHopper jar are cached by
-# key. When the data should be refreshed (e.g. after a graph re-import),
-# bump CACHE_SEED below — that forces one full rebuild and re-caches.
+# Determinism note: the dated OSM extract and GraphHopper jar are cached by
+# key. Update OSM_EXTRACT_DATE and bump CACHE_SEED when refreshing map data.
 #
 # The instrumented/emulator tier stays manual per AGENTS.md
 # (tools/test/run-all.sh on a machine with an AVD).
@@ -27,11 +26,13 @@ on:
 
 env:
   # Keep in lockstep with `graphhopper` in gradle/libs.versions.toml (stored
-  # graph format is version-bound). Used for the Maven Central URL and cache
-  # path below.
+  # graph format is version-bound). Used for the jar URL and cache path below.
   GRAPHHOPPER_VERSION: "11.0"
   GRAPHHOPPER_JAR_SHA256: b59c024afe172ec6ec85b6327006c3138ec58c7d0bcd26253d0e42853f613def
-  CACHE_SEED: v1
+  # Geofabrik's `latest` alias currently loops through a cached slash redirect.
+  # Pin the current dated Queensland extract until that alias is healthy again.
+  OSM_EXTRACT_DATE: "260928"
+  CACHE_SEED: v2
 
 jobs:
   light-tier:
@@ -69,7 +70,7 @@ jobs:
             tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
             app/src/main/assets/graph-cache
             app/src/main/assets/geocoder
-          key: offline-${{ runner.os }}-${{ env.CACHE_SEED }}-gh${{ env.GRAPHHOPPER_VERSION }}-${{ hashFiles('tools/gh/config.yml', 'tools/gh/motorcycle.json', 'tools/tiles/build-tiles.sh', 'geocoder-tool/**') }}
+          key: offline-${{ runner.os }}-${{ env.CACHE_SEED }}-qld${{ env.OSM_EXTRACT_DATE }}-gh${{ env.GRAPHHOPPER_VERSION }}-${{ hashFiles('tools/gh/config.yml', 'tools/gh/motorcycle.json', 'tools/tiles/build-tiles.sh', 'geocoder-tool/**') }}
 
       - name: Download OSM extract and GraphHopper import jar
         if: steps.data-cache.outputs.cache-hit != 'true'
@@ -77,7 +78,7 @@ jobs:
           mkdir -p data tools/gh
           curl -fL --retry 3 --retry-delay 5 \
             -o data/queensland.osm.pbf \
-            https://download.geofabrik.de/australia-oceania/australia/queensland-latest.osm.pbf
+            "https://download.geofabrik.de/australia-oceania/australia/queensland-${OSM_EXTRACT_DATE}.osm.pbf"
           # Verify the download is really a PBF: shallow paths return their
           # HTML index with HTTP 200 (see AGENTS.md).
           python3 - <<'PY'
@@ -95,8 +96,8 @@ jobs:
           print('queensland.osm.pbf has a valid OSMHeader blob')
           PY
           curl -fL --retry 3 --retry-delay 5 \
-            -o "tools/gh/graphhopper-web-${GRAPHHOPPER_VERSION}.jar" \
-            "https://repo.maven.apache.org/maven2/com/graphhopper/graphhopper-web/${GRAPHHOPPER_VERSION}/graphhopper-web-${GRAPHHOPPER_VERSION}.jar"
+            -o tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar \
+            https://github.com/graphhopper/graphhopper/releases/download/${{ env.GRAPHHOPPER_VERSION }}/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
       - name: Verify GraphHopper jar checksum
         run: |
           echo "${{ env.GRAPHHOPPER_JAR_SHA256 }}  tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" | sha256sum -c -
