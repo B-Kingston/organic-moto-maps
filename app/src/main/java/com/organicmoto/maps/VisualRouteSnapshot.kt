@@ -16,6 +16,46 @@ internal object VisualRouteSnapshot {
     const val FILE_NAME = "visual-route.json"
     const val CAMERA_FILE_NAME = "visual-camera.json"
     const val FIX_ACTION = "com.organicmoto.maps.DEBUG_VISUAL_ROUTE_FIX"
+    const val CAMERA_ACTION = "com.organicmoto.maps.DEBUG_VISUAL_CAMERA"
+    const val MAP_PROBE_ACTION = "com.organicmoto.maps.DEBUG_VISUAL_MAP_PROBE"
+    private const val PENDING_CAMERA_FILE = "visual-camera-request.json"
+    private const val PENDING_MAP_PROBE_FILE = "visual-map-probe-request.json"
+
+    fun queueMapProbe(cacheDir: File, id: Long) {
+        writeAtomically(File(cacheDir, PENDING_MAP_PROBE_FILE), id.toString())
+    }
+
+    fun takeQueuedMapProbe(cacheDir: File): Long? {
+        val file = File(cacheDir, PENDING_MAP_PROBE_FILE)
+        if (!file.isFile) return null
+        return runCatching { file.readText().toLongOrNull() }.getOrNull().also { file.delete() }
+    }
+
+    fun writeMapProbe(cacheDir: File, id: Long, dark: Boolean, basemap: Int, routeReady: Boolean, rider: Int) {
+        writeAtomically(File(cacheDir, "visual-map-probe.json"), JSONObject()
+            .put("requestId", id).put("dark", dark).put("basemapFeatures", basemap)
+            .put("routeReady", routeReady).put("riderFeatures", rider).toString())
+    }
+
+    data class CameraRequest(val requestId: Long, val camera: CameraPosition)
+
+    fun queueCamera(cacheDir: File, id: Long, lat: Double, lon: Double, zoom: Double, tilt: Double, bearing: Double) {
+        writeAtomically(File(cacheDir, PENDING_CAMERA_FILE), JSONObject()
+            .put("requestId", id).put("lat", lat).put("lon", lon)
+            .put("zoom", zoom).put("tilt", tilt).put("bearing", bearing).toString())
+    }
+
+    fun takeQueuedCamera(cacheDir: File): CameraRequest? {
+        val file = File(cacheDir, PENDING_CAMERA_FILE)
+        if (!file.isFile) return null
+        return runCatching {
+            val json = JSONObject(file.readText())
+            CameraRequest(json.getLong("requestId"), CameraPosition.Builder()
+                .target(org.maplibre.android.geometry.LatLng(json.getDouble("lat"), json.getDouble("lon")))
+                .zoom(json.getDouble("zoom")).tilt(json.getDouble("tilt"))
+                .bearing(json.getDouble("bearing")).padding(0.0, 0.0, 0.0, 0.0).build())
+        }.getOrNull().also { file.delete() }
+    }
 
     private const val PENDING_FIX_FILE = "visual-fix.json"
     private const val FIX_ACK_FILE = "visual-fix-ack.json"

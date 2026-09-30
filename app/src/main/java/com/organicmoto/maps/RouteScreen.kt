@@ -678,6 +678,33 @@ fun RouteScreen() {
     var appliedMapRevision by remember { mutableStateOf<Int?>(null) }
     var loadedStyleJson by remember { mutableStateOf<String?>(null) }
     var styleLoadGeneration by remember { mutableIntStateOf(0) }
+    // Debug-only, request-driven inspection. No production camera change and
+    // no building queries per GPS update. The runner waits for actual rendered
+    // basemap/rider buckets and installed route layers before capturing a
+    // style transition. Pitched line queries alone are not reliable ink proof.
+    LaunchedEffect(debugLogs, mapRef.value, loadedStyleJson, darkGuidanceStyle) {
+        if (!debugLogs) return@LaunchedEffect
+        val map = mapRef.value ?: return@LaunchedEffect
+        while (true) {
+            val (camera, probeId) = withContext(Dispatchers.IO) {
+                VisualRouteSnapshot.takeQueuedCamera(context.cacheDir) to
+                    VisualRouteSnapshot.takeQueuedMapProbe(context.cacheDir)
+            }
+            camera?.let { map.moveCamera(CameraUpdateFactory.newCameraPosition(it.camera)) }
+            if (probeId != null && loadedStyleJson != null) {
+                val bounds = android.graphics.RectF(0f, 0f, mapView.width.toFloat(), mapView.height.toFloat())
+                val basemap = map.queryRenderedFeatures(bounds, if (darkGuidanceStyle) "ride-roads" else "building").size
+                val routeReady = map.style?.let { style ->
+                    style.getSource("route") != null && style.getLayer("route-focus-line") != null
+                } == true
+                val rider = map.queryRenderedFeatures(bounds, "nav-position-dot").size
+                withContext(Dispatchers.IO) {
+                    VisualRouteSnapshot.writeMapProbe(context.cacheDir, probeId, darkGuidanceStyle, basemap, routeReady, rider)
+                }
+            }
+            delay(40)
+        }
+    }
     LaunchedEffect(styleJson, mapRef.value, screenStarted, mapRevision) {
         if (!screenStarted) return@LaunchedEffect
         val json = styleJson ?: return@LaunchedEffect

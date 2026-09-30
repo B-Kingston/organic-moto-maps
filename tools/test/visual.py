@@ -85,6 +85,7 @@ class VisualHarness:
         self.run_dir = self.output_dir / self.run_id
         self.serial: str | None = None
         self.sequence = 0
+        self.last_replay_fix: tuple[float, float, float | None] | None = None
 
     def command(
         self,
@@ -627,9 +628,11 @@ class VisualHarness:
             self.tap_node("description", opposite)
             self.wait_for_node("description", target, timeout=10)
 
-        # The accessibility state changes before MapLibre finishes loading the
-        # alternate local style; allow the style and route line to repaint.
-        time.sleep(2)
+        # Accessibility changes before style/tile/overlay loading completes.
+        # Request-driven native queries are only a readiness gate; the captured
+        # pixels still need inspection to prove readability and visibility.
+        self.wait_for_ride_map(dark=enabled)
+        time.sleep(0.5)
         self.capture(f"ride-map-black-and-white-{mode}")
         emit("ride_map_mode", black_and_white=enabled, screenshot=str(self.output_dir / "latest.png"))
 
@@ -734,6 +737,8 @@ class VisualHarness:
         start = point_at_percent(selected_route["points"], 0.0)
         if not self.serial or not self.serial.startswith("emulator-"):
             emit("gps_start_not_changed", reason="selected ADB device is not an Android emulator")
+        else:
+            self.device_command("emu", "geo", "fix", str(start[1]), str(start[0]))
         if before_ride is not None:
             before_ride()
         self.tap_node("text", "RIDE")
@@ -817,6 +822,12 @@ class VisualHarness:
                 )
                 ack = json.loads(raw_ack.decode("utf-8"))
                 if ack.get("requestId") == request_id:
+                    # Keep this owned emulator's parked provider on the same
+                    # point. UI inspection can exceed the 20 s debug authority
+                    # window; a stale California fix must not pull the camera
+                    # out of the offline Queensland map between screenshots.
+                    self.device_command("emu", "geo", "fix", f"{lon:.7f}", f"{lat:.7f}")
+                    self.last_replay_fix = (lat, lon, speed_mps)
                     return
             except (VisualError, UnicodeDecodeError, json.JSONDecodeError):
                 pass
@@ -836,6 +847,151 @@ class VisualHarness:
         except (VisualError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         return camera if isinstance(camera, dict) else None
+
+    def inspect_camera(self, lat: float, lon: float, zoom: float, tilt: float, bearing: float = 0.0) -> None:
+        """Debug-only deterministic view, without synthetic map gestures."""
+        self.device_command(
+            "shell", "am", "broadcast", "-a", "com.organicmoto.maps.DEBUG_VISUAL_CAMERA", "-p", APP_ID,
+            "--es", "request_id", str(time.time_ns()), "--es", "lat", str(lat), "--es", "lon", str(lon),
+            "--es", "zoom", str(zoom), "--es", "tilt", str(tilt), "--es", "bearing", str(bearing),
+        )
+        camera = self.wait_for_camera("inspection view", lambda probe: camera_near(probe, lat, lon)
+            and abs(probe_number(probe, "zoom") - zoom) < 0.1
+            and abs(probe_number(probe, "tilt") - tilt) < 0.5)
+        time.sleep(2)
+        emit("inspection_camera", camera=camera)
+
+    def wait_for_ride_map(self, *, dark: bool, timeout: float = 30.0) -> dict[str, Any]:
+        # A style switch is asynchronous. Keep the replay's real session/camera
+        # authoritative and exercise its first post-reload location update.
+        if self.last_replay_fix is not None:
+            lat, lon, speed = self.last_replay_fix
+            self.inject_location(lat, lon, speed_mps=speed)
+        deadline = time.monotonic() + timeout
+        probe: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            request_id = time.time_ns()
+            self.device_command("shell", "am", "broadcast", "-a", "com.organicmoto.maps.DEBUG_VISUAL_MAP_PROBE",
+                                "-p", APP_ID, "--es", "request_id", str(request_id))
+            time.sleep(0.25)
+            try:
+                probe = json.loads(self.raw_device_bytes("exec-out", "run-as", APP_ID, "cat", "cache/visual-map-probe.json"))
+                if (probe.get("requestId") == request_id and probe.get("dark") == dark
+                        and probe.get("basemapFeatures", 0) > 0 and probe.get("routeReady") is True
+                        and probe.get("riderFeatures", 0) > 0):
+                    emit("ride_map_ready", probe=probe)
+                    return probe
+            except (VisualError, json.JSONDecodeError):
+                pass
+        raise VisualError(f"Ride map/route/rider never finished rendering after style switch: {probe}")
+
+    def buildings(self, args: argparse.Namespace) -> None:
+        """Offline house/city/occlusion/style/lifecycle evidence on an explicitly owned AVD."""
+        if not self.requested_serial:
+            raise VisualError("buildings requires --serial or ANDROID_SERIAL for an exclusively owned device.")
+        self.ensure_device(start_if_missing=False)
+        original = {key: self.device_command("shell", "settings", "get", "system", key).stdout.strip()
+                    for key in ("accelerometer_rotation", "user_rotation")}
+        airplane = self.device_command("shell", "settings", "get", "global", "airplane_mode_on").stdout.strip()
+        permissions = ("android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION")
+        package_state = self.device_command("shell", "dumpsys", "package", APP_ID, check=False).stdout
+        originally_granted = {permission: bool(re.search(re.escape(permission) + r": granted=true", package_state))
+                              for permission in permissions}
+        original_dark: bool | None = None
+        locations = self.device_command("shell", "dumpsys", "location", check=False).stdout
+        parked_gps = re.search(r"last location=Location\[gps (-?[\d.]+),(-?[\d.]+)", locations)
+        try:
+            self.device_command("shell", "settings", "put", "system", "accelerometer_rotation", "0")
+            self.device_command("shell", "settings", "put", "system", "user_rotation", "0")
+            self.launch_app(build=not args.no_build, skip_map=False, refresh_map=False)
+            time.sleep(5)  # Allow the first live-location centring to finish before inspection.
+            self.device_command("shell", "cmd", "connectivity", "airplane-mode", "enable")
+            for label, lat, lon, zoom, tilt in (
+                ("buildings-flat-overview", -27.4679, 153.0281, 13.0, 0.0),
+                ("buildings-below-threshold", -27.4679, 153.0281, 13.9, 58.0),
+                ("buildings-threshold", -27.4679, 153.0281, 14.0, 58.0),
+                ("buildings-city-intermediate", -27.4679, 153.0281, 16.0, 58.0),
+                ("buildings-city-towers", -27.4679, 153.0281, 18.0, 58.0),
+                ("buildings-residential-houses", -27.4616, 153.0466, 18.5, 58.0),
+            ):
+                self.inspect_camera(lat, lon, zoom, tilt)
+                self.capture(label)
+            # A short real GraphHopper route through the dense CBD. All controls
+            # are selected through semantics; fixes drive the real navigation session.
+            route_args = argparse.Namespace(from_text="-27.4698,153.0251", to_text="-27.4570,153.0350",
+                complexity=0, road_share=None, block_unpaved=None, route_index=1, timeout=300,
+                progress_interval=5, progress_percent=None, step_delay=0.2, black_and_white=None,
+                plan_only=False, reuse_app=True, no_build=True, skip_map=False, refresh_map=False)
+            self.route(route_args)
+            original_dark = bool(self.matching_nodes("description", "Dark ride map, on"))
+            self.set_black_and_white("off")
+            snapshot = self.read_route_snapshot()
+            points = snapshot["routes"][snapshot["selectedIndex"]]["points"]
+            cumulative, distance = cumulative_distance(points)
+            for index, speed in enumerate((0.0, 8.0, 15.0, 23.0, 32.0)):
+                offset = min(100.0 + index * 120.0, distance * 0.65)
+                lat, lon = self.inject_route_fix(points, cumulative, offset, speed_mps=speed)
+                self.wait_for_camera("navigation speed band", lambda p: p.get("guidance") is True
+                    and camera_near(p, lat, lon) and abs(probe_number(p, "zoom") - guidance_zoom_band(speed)) < 0.25)
+                time.sleep(2)
+                self.wait_for_node("text", "END", timeout=10)
+                self.wait_for_node("description", "Ride data: ", contains=True, timeout=10)
+                self.capture(f"buildings-city-navigation-speed-{speed:g}")
+            # Deliberately put towers between camera and street; pitched viewpoints
+            # expose depth occlusion that layer-order checks cannot prove away.
+            offset = min(580.0, distance * 0.65)
+            lat, lon = self.inject_route_fix(points, cumulative, offset, speed_mps=0.0)
+            time.sleep(1)
+            for bearing in (45.0, 225.0):
+                self.inject_route_fix(points, cumulative, offset, speed_mps=0.0)
+                time.sleep(1)
+                self.inspect_camera(lat, lon, 17.0, 58.0, bearing)
+                self.capture(f"buildings-route-silhouette-{bearing:g}")
+            self.progress_to(65.0, 0.2)
+            self.set_black_and_white("on")
+            self.set_black_and_white("off")
+            self.device_command("shell", "settings", "put", "system", "user_rotation", "1")
+            time.sleep(3)
+            # This main-base app recreates the planner on orientation change
+            # (navigation is not persisted). Start a fresh landscape ride rather
+            # than pretending a stale session survived, or changing that policy.
+            self.route(route_args)
+            self.set_black_and_white("off")
+            self.wait_for_node("text", "END", timeout=15)
+            self.capture("buildings-landscape-navigation")
+            self.tap_node("text", "END")
+            self.wait_for_node("text", "START", timeout=15)
+            self.capture("buildings-landscape-end-reachable")
+            self.device_command("shell", "settings", "put", "system", "user_rotation", "0")
+            time.sleep(3)
+            self.route(route_args)
+            self.set_black_and_white("on" if original_dark else "off")
+            self.tap_node("text", "END")
+            self.wait_for_node("text", "START", timeout=15)
+            self.capture("buildings-end-planning-restore")
+            self.device_command("shell", "am", "force-stop", APP_ID)
+            self.device_command("shell", "am", "start", "-n", ACTIVITY)
+            self.wait_for_node("text", "START", timeout=30)
+            self.inspect_camera(-27.4616, 153.0466, 18.5, 58.0)
+            self.capture("buildings-relaunch-installed-map-houses")
+        finally:
+            if original_dark is not None:
+                try:
+                    if self.matching_nodes("description", "Dark ride map, ", contains=True):
+                        self.set_black_and_white("on" if original_dark else "off")
+                except (VisualError, subprocess.TimeoutExpired, OSError) as error:
+                    emit("appearance_restore_warning", message=str(error))
+            self.device_command("shell", "cmd", "connectivity", "airplane-mode", "enable" if airplane == "1" else "disable", check=False)
+            for key, value in original.items():
+                if value == "null":
+                    self.device_command("shell", "settings", "delete", "system", key, check=False)
+                else:
+                    self.device_command("shell", "settings", "put", "system", key, value, check=False)
+            for permission, granted in originally_granted.items():
+                if not granted:
+                    self.device_command("shell", "pm", "revoke", APP_ID, permission, check=False)
+            if parked_gps and self.serial and self.serial.startswith("emulator-"):
+                self.device_command("emu", "geo", "fix", parked_gps.group(2), parked_gps.group(1), check=False)
 
     def wait_for_camera(
         self,
@@ -1428,6 +1584,16 @@ def create_parser() -> argparse.ArgumentParser:
     route = commands.add_parser("route", help="Load endpoints, apply options, route, and optionally enter ride mode.")
     add_route_options(route)
 
+    buildings = commands.add_parser("buildings", help="Offline 3D houses, city navigation, silhouettes, style switches and landscape (explicit owned serial required).")
+    buildings.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+
+    camera = commands.add_parser("camera", help="Set a deterministic debug inspection camera, not a production camera policy.")
+    camera.add_argument("--lat", type=float, required=True)
+    camera.add_argument("--lon", type=float, required=True)
+    camera.add_argument("--zoom", type=float, required=True)
+    camera.add_argument("--tilt", type=float, default=58.0)
+    camera.add_argument("--bearing", type=float, default=0.0)
+
     nav_camera = commands.add_parser(
         "nav-camera",
         help="Start a ride and capture the guidance camera states plus the exit restore.",
@@ -1529,6 +1695,12 @@ def main() -> int:
             harness.route(args)
         elif args.command == "nav-camera":
             harness.navigation_camera(args)
+        elif args.command == "buildings":
+            harness.buildings(args)
+        elif args.command == "camera":
+            harness.ensure_device(start_if_missing=False)
+            harness.inspect_camera(args.lat, args.lon, args.zoom, args.tilt, args.bearing)
+            harness.capture("inspection-camera")
         elif args.command in {"options", "progress", "map-mode", "icon-states", "screenshot", "tree", "status", "tap", "type", "key", "swipe", "watch", "logs", "stop"}:
             harness.ensure_device(start_if_missing=False)
             if args.command == "options":

@@ -140,6 +140,64 @@ GPX import, and other visible app controls can be inspected and operated
 without fixed screen coordinates. Set `ANDROID_SERIAL` when more than one
 device is online; set `ANDROID_AVD` to select another emulator.
 
+### Transparent offline 3D buildings
+
+The normal map keeps flat building footprints at zoom 13 and adds translucent
+3D boxes at zoom 14 and above (including overzoom beyond the archive's z14).
+Ordinary houses without an explicit height use 5 m; bases/heights are bounded
+to prevent malformed features creating giant or inverted boxes. `hide_3d=true`
+outlines stay flat. Planning remains flat, and riding keeps its existing tilt,
+bearing and speed-dependent zoom. The minimal black-and-white ride map
+deliberately has **no buildings**. No dataset rebuild or network access is needed.
+
+Use an **exclusively owned AVD**, with distinct emulator/debugger ports. Never
+run these examples against another agent's device. The `buildings` scenario
+requires an explicit serial and does not auto-select or boot a device:
+
+```sh
+ANDROID_SERIAL=emulator-5580 tools/test/visual.py --serial emulator-5580 \
+  --output-dir build/visual-buildings buildings
+# Inspect another deterministic pitched view in a debug APK:
+ANDROID_SERIAL=emulator-5580 tools/test/visual.py --serial emulator-5580 camera \
+  --lat=-27.4616 --lon=153.0466 --zoom=18.5 --tilt=58
+```
+
+The scenario captures flat overview, both sides of the z14 threshold, CBD
+towers, default-height residential houses near James/Hawthorne Streets,
+a real CBD route at all five navigation zoom bands, opposing tower-silhouette
+views, moving progress, B&W/normal switches, landscape navigation with END,
+and installed-map reuse after relaunch. It runs in airplane mode and restores
+airplane mode, rotation settings, initial location grants, parked GPS position
+and ride appearance. Queued fixes also update the owned emulator's GPS provider
+so a long UI inspection cannot fall back to its old parked location.
+Style-switch captures wait for a debug-only, request-driven native probe to
+find basemap/rider render features and the selected-route source/layers before saving pixels;
+they do not assume that an accessibility toggle means tiles finished repainting.
+This base resets navigation on rotation, so the bounded landscape check starts
+a fresh ride rather than claiming session persistence. PNGs, accessibility
+states and camera probes are emitted under the chosen output directory.
+The `camera` command is a debug-only inspection seam, not a production control.
+
+`BuildingStyleTest` evaluates the shipped height/base/filter expressions.
+`BuildingRenderingTest` requires a seeded PMTiles map and compares native
+snapshot pixels with extrusions shown/hidden for real towers and fallback-height
+houses; it also checks route/rider ink at z14/16/18 and normal → B&W → normal
+style reloads. Run `visual.py launch` on the explicit owned serial first, build
+`:app:assembleDebugAndroidTest`, install its APK with `adb -s <serial>`, then:
+
+```sh
+~/Library/Android/sdk/platform-tools/adb -s emulator-5580 shell am instrument -w -r \
+  -e class com.organicmoto.maps.map.BuildingRenderingTest \
+  com.organicmoto.maps.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Rendered screenshots remain necessary: feature queries alone do not prove
+visibility, and layer order alone does not guarantee 3D occlusion safety.
+The CBD visual corridor also has a committed routing-corpus gold baseline and
+an on-device full guidance replay (upcoming turns through arrival).
+See [validation results and screenshot inventory](tools/test/buildings-validation.md)
+for the isolated-AVD evidence and remaining limitations.
+
 ## Data pipelines (required before first build)
 
 The generated assets are gitignored; a fresh clone has none of them until the

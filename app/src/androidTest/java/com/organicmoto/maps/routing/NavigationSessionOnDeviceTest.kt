@@ -50,6 +50,26 @@ class NavigationSessionOnDeviceTest {
     }
 
     @Test(timeout = 300_000)
+    fun denseCityBuildingCorridorHasTurnsAndFinishesWithoutLosingGuidance() {
+        val entry = ROUTE_CORPUS.single { it.name == "Brisbane CBD transparent building corridor" }
+        val path = GraphHopperRouter(context).route(entry.from, entry.to).routes.first()
+        android.util.Log.i("BuildingCorpusGold", "distance=${path.distance} duration=${path.time}")
+        val track = RouteTrackFactory.fromPath(path)
+        assertTrue("Dense-city visual corridor needs real upcoming turns", track.turns.isNotEmpty())
+        val session = NavigationSession()
+        session.startRoute(track)
+        session.beginFollowing()
+        var sawUpcomingTurn = false
+        for (fix in fixesAlongTrack(track)) {
+            session.onFix(fix)
+            if (session.snapshot.value.turn != null) sawUpcomingTurn = true
+        }
+        assertTrue("City ride must expose upcoming guidance", sawUpcomingTurn)
+        assertEquals(NavigationState.Finished, session.snapshot.value.state)
+        assertEquals(100, session.snapshot.value.completionPercent)
+    }
+
+    @Test(timeout = 300_000)
     fun ridingTheRoutedTrackStaysOnRouteAndFinishes() {
         val entry = ROUTE_CORPUS.first()
         val router = GraphHopperRouter(context)

@@ -326,8 +326,23 @@
       "type": "fill",
       "source": "omt",
       "source-layer": "building",
-      "paint": { "fill-color": "#dcd5cb", "fill-opacity": 0.9 },
+      "paint": { "fill-color": "#dcd5cb", "fill-opacity": ["interpolate", ["linear"], ["zoom"], 13, 0.9, 14, 0.45] },
       "minzoom": 13
+    },
+    {
+      "id": "building-3d",
+      "type": "fill-extrusion",
+      "source": "omt",
+      "source-layer": "building",
+      "minzoom": 14,
+      "filter": ["!=", ["get", "hide_3d"], true],
+      "paint": {
+        "fill-extrusion-color": "#918b82",
+        "fill-extrusion-opacity": 0.28,
+        "fill-extrusion-vertical-gradient": true,
+        "fill-extrusion-height": ["min", 400, ["max", 0, ["number", ["get", "render_height"], 5]]],
+        "fill-extrusion-base": ["min", ["min", 400, ["max", 0, ["number", ["get", "render_height"], 5]]], ["max", 0, ["number", ["get", "render_min_height"], 0]]]
+      }
     },
     {
       "id": "housenumber-labels",

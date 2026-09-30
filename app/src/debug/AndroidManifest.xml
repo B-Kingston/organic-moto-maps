@@ -6,6 +6,8 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.organicmoto.maps.DEBUG_VISUAL_ROUTE_FIX" />
+                <action android:name="com.organicmoto.maps.DEBUG_VISUAL_CAMERA" />
+                <action android:name="com.organicmoto.maps.DEBUG_VISUAL_MAP_PROBE" />
             </intent-filter>
         </receiver>
     </application>

@@ -138,4 +138,16 @@ internal val ROUTE_CORPUS: List<RouteCorpusEntry> = listOf(
         baselineHours = 0.0,
         alternativesExpected = false,
     ),
+    // Same dense-city corridor replayed by visual.py buildings. Keep it at
+    // the end so the existing corpus's positional edge cases remain stable.
+    RouteCorpusEntry(
+        "Brisbane CBD transparent building corridor",
+        GHPoint(-27.4698, 153.0251),
+        GHPoint(-27.4570, 153.0350),
+        baselineKm = 2.4,
+        baselineHours = 0.067,
+        alternativesExpected = false,
+        goldDistanceMeters = 2_431.4543,
+        goldDurationMillis = 238_865L,
+    ),
 )
