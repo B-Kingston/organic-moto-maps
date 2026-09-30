@@ -103,6 +103,7 @@ tools/test/visual.py progress --percent 75
 tools/test/visual.py route --from Brisbane --to 'Mount Glorious' --black-and-white both
 tools/test/visual.py map-mode --black-and-white on
 tools/test/visual.py icon-states
+tools/test/visual.py nav-camera --from Brisbane --to 'Mount Glorious'
 ```
 
 Progress follows the selected route geometry through the live navigation
@@ -111,6 +112,19 @@ and updates `latest.png` after each capture. Backward jumps restart
 guidance at the route start and advance to the requested point. This requires a
 debug build and an Android emulator; route geometry and the ADB control bridge
 exist only in debug builds.
+
+`nav-camera` starts a ride and captures the immersive guidance camera as a
+repeatable sequence: navigation start, street-close framing (stationary),
+one frame per speed band (`--speed-cases`, default `0,8,15,23,32` m/s), a real
+heading turn (`--turn-threshold`, `--turn-step`, `--turn-speed`), and the
+planning-camera restore after END. Each step reads the debug camera probe and
+fails when the settled camera does not reach the injected fix or does not
+match the expected zoom band, forward tilt, heading, or restore, so the
+screenshots come with assertions instead of only pixels. Queued debug fixes
+own the guidance session while they flow, so the emulator's live provider
+cannot pull the camera away between injections. It drives only accessible
+text controls (RIDE/END) and the existing debug fix bridge, and it needs an
+emulator plus a debug build.
 
 `--black-and-white on|off` sets the ride map style during a route run. Use
 `both` to save screenshots of both styles for comparison. `map-mode` changes

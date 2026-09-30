@@ -31,8 +31,21 @@ DEFAULT_AVD = "Pixel_10_Pro"
 WINDOW_DUMP = "/sdcard/organic-moto-visual-window.xml"
 ROUTE_SNAPSHOT = "cache/visual-route.json"
 FIX_ACK = "cache/visual-fix-ack.json"
+CAMERA_SNAPSHOT = "cache/visual-camera.json"
 LEVEL_PREFIX = "Ride complexity level "
 DEFAULT_OUTPUT = Path("build/visual-inspection")
+
+# Mirrors RouteScreen's guidance camera policy. CameraFollowPolicyTest pins the
+# Kotlin side, so drift shows up as a failed JVM suite before a visual run.
+GUIDANCE_TILT_DEGREES = 58.0
+GUIDANCE_RIDER_VERTICAL_FRACTION = 0.70
+GUIDANCE_ZOOM_BANDS = ((7.0, 18.0), (14.0, 17.0), (22.0, 16.0), (31.0, 15.0), (math.inf, 14.0))
+DEFAULT_SPEED_CASES = "0,8,15,23,32"
+
+# Distance between injected fixes while riding the route. NavigationSession
+# searches at most 40 vertices ahead of the matched position, so the runner
+# advances in small steps (as progress_to does) instead of teleporting.
+ROUTE_FOLLOW_STEP_M = 100.0
 
 
 class VisualError(RuntimeError):
@@ -459,7 +472,7 @@ class VisualHarness:
                         "shell", "input", "keyevent",
                         *("KEYCODE_DEL" for _ in visible_text),
                     )
-        adb_text = value.replace(" ", "%s").replace("%", "%25")
+        adb_text = value.replace("%", "%25").replace(" ", "%s")
         remote = "input text " + shlex.quote(adb_text)
         self.device_command("shell", remote)
 
@@ -641,7 +654,12 @@ class VisualHarness:
             if index < 2:
                 self.tap_node("description", "Voice guidance settings", contains=True)
 
-    def route(self, args: argparse.Namespace) -> None:
+    def route(
+        self,
+        args: argparse.Namespace,
+        *,
+        before_ride: Any = None,
+    ) -> None:
         if args.plan_only and args.black_and_white is not None:
             raise VisualError("--black-and-white requires ride mode; omit --plan-only.")
         if not args.reuse_app:
@@ -716,6 +734,8 @@ class VisualHarness:
         start = point_at_percent(selected_route["points"], 0.0)
         if not self.serial or not self.serial.startswith("emulator-"):
             emit("gps_start_not_changed", reason="selected ADB device is not an Android emulator")
+        if before_ride is not None:
+            before_ride()
         self.tap_node("text", "RIDE")
         self.wait_for_node("text", "END", timeout=30)
         if self.serial and self.serial.startswith("emulator-"):
@@ -762,22 +782,33 @@ class VisualHarness:
             time.sleep(0.25)
         raise VisualError(f"Timed out waiting for route geometry: {last_error}")
 
-    def inject_location(self, lat: float, lon: float) -> None:
+    def inject_location(
+        self,
+        lat: float,
+        lon: float,
+        *,
+        speed_mps: float | None = None,
+        timeout: float = 20,
+    ) -> None:
         if not self.serial or not self.serial.startswith("emulator-"):
             raise VisualError(
                 "Percentage route progress needs an Android emulator; ADB location injection "
                 "is not available on a physical device."
             )
         request_id = time.time_ns()
-        self.device_command(
+        arguments = [
             "shell", "am", "broadcast",
             "-a", "com.organicmoto.maps.DEBUG_VISUAL_ROUTE_FIX",
             "-p", APP_ID,
             "--es", "request_id", str(request_id),
             "--es", "lat", f"{lat:.7f}",
             "--es", "lon", f"{lon:.7f}",
-            timeout=20,
-        )
+        ]
+        if speed_mps is not None:
+            if not math.isfinite(speed_mps) or speed_mps < 0.0:
+                raise VisualError("Injected speed must be finite and non-negative metres/second.")
+            arguments += ["--ef", "speed", f"{speed_mps:.4f}"]
+        self.device_command(*arguments, timeout=timeout)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             try:
@@ -793,6 +824,41 @@ class VisualHarness:
         raise VisualError(
             "The app did not acknowledge the debug route fix. Start ride mode first and "
             "make sure the installed app is a debug build."
+        )
+
+    def read_camera(self) -> dict[str, Any] | None:
+        """Reads the debug camera probe; None until the map has settled once."""
+        try:
+            raw = self.raw_device_bytes(
+                "exec-out", "run-as", APP_ID, "cat", CAMERA_SNAPSHOT, timeout=15
+            )
+            camera = json.loads(raw.decode("utf-8"))
+        except (VisualError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return camera if isinstance(camera, dict) else None
+
+    def wait_for_camera(
+        self,
+        description: str,
+        predicate: Any,
+        *,
+        timeout: float = 10.0,
+        not_before_ms: int | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        camera: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            candidate = self.read_camera()
+            if candidate is not None:
+                camera = candidate
+                if not_before_ms is not None and candidate.get("createdAtMillis", 0) < not_before_ms:
+                    time.sleep(0.25)
+                    continue
+                if predicate(candidate):
+                    return candidate
+            time.sleep(0.25)
+        raise VisualError(
+            f"The guidance camera never matched {description}. Last probe: {camera}"
         )
 
     def ride_progress_percent(self, total_distance_m: float) -> float:
@@ -933,6 +999,225 @@ class VisualHarness:
             coordinate=point_at_offset(points, cumulative, target_offset),
         )
 
+    def inject_route_fix(
+        self,
+        points: list[list[float]],
+        cumulative: list[float],
+        offset_m: float,
+        *,
+        speed_mps: float | None = None,
+    ) -> tuple[float, float]:
+        lat, lon = point_at_offset(points, cumulative, offset_m)
+        self.inject_location(lat, lon, speed_mps=speed_mps)
+        return lat, lon
+
+    def inject_route_span(
+        self,
+        points: list[list[float]],
+        cumulative: list[float],
+        start_m: float,
+        end_m: float,
+        *,
+        step_m: float,
+        speed_mps: float | None,
+    ) -> tuple[float, float]:
+        if step_m <= 0.0:
+            raise VisualError("The turn step must be a positive distance in metres.")
+        steps = max(1, int(round(abs(end_m - start_m) / step_m)))
+        position = (0.0, 0.0)
+        for index in range(steps + 1):
+            offset = start_m + (end_m - start_m) * index / steps
+            position = self.inject_route_fix(points, cumulative, offset, speed_mps=speed_mps)
+            time.sleep(0.2)
+        return position
+
+    @staticmethod
+    def settle_for_capture(args: argparse.Namespace) -> None:
+        """Lets the 600 ms camera animation and the repaint frame land before capturing."""
+        time.sleep(max(0.0, args.settle))
+
+    def navigation_camera(self, args: argparse.Namespace) -> None:
+        """Captures the immersive guidance camera states on a real ride.
+
+        Repeatable frames: navigation start, street-close framing, one frame
+        per speed band, a heading turn, and the planning-camera restore after
+        END. The debug camera probe makes each state checkable, not only
+        viewable. Queued debug fixes own the guidance session while they flow,
+        so the emulator's live provider cannot pull the camera away.
+        """
+        self.navigation_camera_steps(args)
+
+    def navigation_camera_steps(self, args: argparse.Namespace) -> None:
+        if args.plan_only:
+            raise VisualError("nav-camera starts guidance; omit --plan-only.")
+        speeds = parse_speed_cases(args.speed_cases)
+        run_started_ms = time.time_ns() // 1_000_000
+        planning_holder: list[dict[str, Any] | None] = []
+        self.route(args, before_ride=lambda: planning_holder.append(self.read_camera()))
+        planning_camera = planning_holder[0] if planning_holder else None
+        self.capture("nav-camera-00-guidance-start")
+
+        snapshot = self.read_route_snapshot()
+        index = int(snapshot.get("selectedIndex", 0))
+        route = snapshot["routes"][index]
+        points = route["points"]
+        cumulative, total_distance = cumulative_distance(points)
+        if total_distance <= 0.0:
+            raise VisualError("The selected route has no measurable length.")
+
+        # Street-close framing: stationary at the closest band, rider low in
+        # the viewport, forward tilt. This is the frame the reference view
+        # describes. Ride the first metres rather than teleporting, so the
+        # session's forward vertex window always contains the next fix.
+        street_offset = min(max(40.0, total_distance * 0.01), total_distance * 0.5)
+        street_lat, street_lon = self.inject_route_span(
+            points,
+            cumulative,
+            min(40.0, street_offset),
+            street_offset,
+            step_m=ROUTE_FOLLOW_STEP_M,
+            speed_mps=0.0,
+        )
+        camera = self.wait_for_camera(
+            "street-close framing",
+            lambda probe: probe.get("guidance") is True
+            and camera_near(probe, street_lat, street_lon)
+            and abs(probe_number(probe, "zoom") - guidance_zoom_band(0.0)) <= 0.25
+            and abs(probe_number(probe, "tilt") - GUIDANCE_TILT_DEGREES) <= 1.0,
+            not_before_ms=run_started_ms - 2_000,
+        )
+        self.settle_for_capture(args)
+        self.capture("nav-camera-01-street-close")
+        emit("nav_camera", stage="street-close", camera=camera)
+
+        # One frame per speed band; the rider keeps moving along the route so
+        # the camera also has to re-centre, not just re-zoom.
+        speed_offset = min(max(street_offset + 150.0, total_distance * 0.03), total_distance * 0.5)
+        zoom_step = max(120.0, total_distance * 0.01)
+        for speed in speeds:
+            expected_zoom = guidance_zoom_band(speed)
+            next_offset = min(speed_offset + zoom_step, total_distance * 0.8)
+            fix_lat, fix_lon = self.inject_route_span(
+                points,
+                cumulative,
+                speed_offset,
+                next_offset,
+                step_m=ROUTE_FOLLOW_STEP_M,
+                speed_mps=speed,
+            )
+            camera = self.wait_for_camera(
+                f"zoom band {expected_zoom:g} at {speed:g} m/s",
+                lambda probe, expected_zoom=expected_zoom, lat=fix_lat, lon=fix_lon: probe.get("guidance") is True
+                and camera_near(probe, lat, lon)
+                and abs(probe_number(probe, "zoom") - expected_zoom) <= 0.25,
+            )
+            self.settle_for_capture(args)
+            self.capture(f"nav-camera-02-speed-{speed:g}")
+            emit(
+                "nav_camera",
+                stage="speed-band",
+                speed_mps=speed,
+                expected_zoom=expected_zoom,
+                camera=camera,
+            )
+            speed_offset = next_offset
+
+        # Heading turn: ride a straight approach, then through a real corner,
+        # so the heading-up camera and the rider chevron both rotate.
+        turn = find_route_turn(
+            points,
+            cumulative,
+            threshold_deg=args.turn_threshold,
+            min_offset_m=max(speed_offset + args.turn_step, total_distance * 0.05),
+            max_offset_m=total_distance * 0.95,
+        )
+        if turn is None:
+            emit("nav_camera", stage="heading-turn", status="no-turn-found")
+            self.capture("nav-camera-03-straight-heading")
+        else:
+            turn_offset, incoming, outgoing = turn
+            approach_end = max(0.0, turn_offset - 25.0)
+            approach_lat, approach_lon = self.inject_route_span(
+                points,
+                cumulative,
+                max(speed_offset, max(0.0, turn_offset - 200.0)),
+                approach_end,
+                step_m=args.turn_step,
+                speed_mps=args.turn_speed,
+            )
+            camera = self.wait_for_camera(
+                "turn approach heading",
+                lambda probe, lat=approach_lat, lon=approach_lon: probe.get("guidance") is True
+                and camera_near(probe, lat, lon)
+                and bearing_distance_degrees(probe_number(probe, "bearing"), incoming) <= 30.0,
+            )
+            self.settle_for_capture(args)
+            self.capture("nav-camera-03-turn-approach")
+            emit("nav_camera", stage="turn-approach", camera=camera, expected_bearing=incoming)
+
+            self.inject_route_fix(
+                points, cumulative, turn_offset + args.turn_step * 0.5, speed_mps=args.turn_speed
+            )
+            self.settle_for_capture(args)
+            self.capture("nav-camera-04-turn-mid")
+
+            exit_end = turn_offset + args.turn_step * 5.0
+            exit_lat, exit_lon = self.inject_route_span(
+                points,
+                cumulative,
+                turn_offset + args.turn_step,
+                exit_end,
+                step_m=args.turn_step,
+                speed_mps=args.turn_speed,
+            )
+            camera = self.wait_for_camera(
+                "post-turn heading",
+                lambda probe, lat=exit_lat, lon=exit_lon: probe.get("guidance") is True
+                and camera_near(probe, lat, lon)
+                and bearing_distance_degrees(probe_number(probe, "bearing"), outgoing) <= 35.0,
+            )
+            self.settle_for_capture(args)
+            self.capture("nav-camera-05-turn-exited")
+            observed_delta = abs(
+                bearing_delta_degrees(incoming, probe_number(camera, "bearing"))
+            )
+            expected_delta = abs(bearing_delta_degrees(incoming, outgoing))
+            emit(
+                "nav_camera",
+                stage="turn-exited",
+                camera=camera,
+                observed_delta_deg=round(observed_delta, 1),
+                expected_delta_deg=round(expected_delta, 1),
+            )
+            if observed_delta < max(10.0, expected_delta / 3.0):
+                raise VisualError(
+                    "The guidance camera did not follow the route heading through the turn "
+                    f"(observed {observed_delta:.1f} deg of an expected {expected_delta:.1f} deg)."
+                )
+
+        # Exit restores the planning camera: no tilt, no heading lock.
+        self.tap_node("text", "END")
+        self.wait_for_node("text", "START", timeout=20)
+        camera = self.wait_for_camera(
+            "planning camera restore",
+            lambda probe: probe.get("guidance") is not True
+            and abs(probe_number(probe, "tilt")) <= 1.0,
+            timeout=15.0,
+        )
+        self.settle_for_capture(args)
+        self.capture("nav-camera-06-exit-restored-planning")
+        emit("nav_camera", stage="exit-restore", camera=camera, planning_camera=planning_camera)
+        if planning_camera is not None:
+            zoom_drift = abs(probe_number(camera, "zoom") - probe_number(planning_camera, "zoom"))
+            bearing_drift = bearing_distance_degrees(
+                probe_number(camera, "bearing"), probe_number(planning_camera, "bearing")
+            )
+            if zoom_drift > 1.5 or (math.isfinite(bearing_drift) and bearing_drift > 15.0):
+                raise VisualError(
+                    "Exit did not restore the planning camera: "
+                    f"zoom drift {zoom_drift:.2f}, bearing drift {bearing_drift:.2f}."
+                )
+
     def app_logs(self, *, lines: int) -> str:
         result = self.device_command(
             "logcat", "-d", "-t", str(lines),
@@ -986,12 +1271,128 @@ def point_at_percent(points: list[list[float]], percent: float) -> tuple[float, 
     return point_at_offset(points, cumulative, total * percent / 100.0)
 
 
+def guidance_zoom_band(speed_mps: float) -> float:
+    """Mirrors RouteScreen.guidanceZoomFor / CameraFollowPolicyTest bands."""
+    if not math.isfinite(speed_mps) or speed_mps < 0.0:
+        return GUIDANCE_ZOOM_BANDS[0][1]
+    for limit, zoom in GUIDANCE_ZOOM_BANDS:
+        if speed_mps < limit:
+            return zoom
+    return GUIDANCE_ZOOM_BANDS[-1][1]
+
+
+def parse_speed_cases(value: str) -> list[float]:
+    speeds: list[float] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            speed = float(part)
+        except ValueError as error:
+            raise VisualError(f"Invalid speed case {part!r}: {error}") from error
+        if not math.isfinite(speed) or speed < 0.0:
+            raise VisualError(f"Speed cases must be finite and non-negative: {part!r}.")
+        speeds.append(speed)
+    if not speeds:
+        raise VisualError("At least one speed case is required.")
+    return speeds
+
+
+def probe_number(probe: dict[str, Any], key: str) -> float:
+    value = probe.get(key)
+    return float(value) if isinstance(value, (int, float)) else float("nan")
+
+
+def distance_metres(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    if not all(map(math.isfinite, (lat1, lon1, lat2, lon2))):
+        return math.inf
+    mean_lat = math.radians((lat1 + lat2) / 2.0)
+    north = math.radians(lat2 - lat1) * 6_371_008.8
+    east = math.radians(lon2 - lon1) * 6_371_008.8 * math.cos(mean_lat)
+    return math.hypot(north, east)
+
+
+def camera_near(probe: dict[str, Any], lat: float, lon: float, *, tolerance_m: float = 30.0) -> bool:
+    """True when the settled camera target sits on the injected fix."""
+    return distance_metres(
+        probe_number(probe, "lat"), probe_number(probe, "lon"), lat, lon
+    ) <= tolerance_m
+
+
+def bearing_degrees(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    lat1, lon1 = map(math.radians, first)
+    lat2, lon2 = map(math.radians, second)
+    delta_lon = lon2 - lon1
+    y = math.sin(delta_lon) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(
+        delta_lon
+    )
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def bearing_delta_degrees(first: float, second: float) -> float:
+    return (second - first + 540.0) % 360.0 - 180.0
+
+
+def bearing_distance_degrees(first: float, second: float) -> float:
+    if not (math.isfinite(first) and math.isfinite(second)):
+        return math.inf
+    return abs(bearing_delta_degrees(first, second))
+
+
+def find_route_turn(
+    points: list[list[float]],
+    cumulative: list[float],
+    *,
+    threshold_deg: float,
+    min_offset_m: float,
+    max_offset_m: float,
+) -> tuple[float, float, float] | None:
+    """First pronounced corner: (offset_m, incoming bearing, outgoing bearing)."""
+    if not math.isfinite(threshold_deg) or threshold_deg <= 0.0:
+        raise VisualError("The turn threshold must be a positive number of degrees.")
+    sample = max(0.0, min_offset_m)
+    while sample <= max_offset_m:
+        before = point_at_offset(points, cumulative, max(0.0, sample - 40.0))
+        at = point_at_offset(points, cumulative, sample)
+        after = point_at_offset(points, cumulative, min(cumulative[-1], sample + 40.0))
+        incoming = bearing_degrees(before, at)
+        outgoing = bearing_degrees(at, after)
+        if abs(bearing_delta_degrees(incoming, outgoing)) >= threshold_deg:
+            return sample, incoming, outgoing
+        sample += 20.0
+    return None
+
+
 def add_selector(parser: argparse.ArgumentParser) -> None:
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--text", help="Match visible UI text.")
     selector.add_argument("--description", help="Match a content description.")
     parser.add_argument("--contains", action="store_true", help="Match a substring.")
     parser.add_argument("--index", type=int, default=0, help="Choose one match when there are duplicates.")
+
+
+def add_route_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--from", dest="from_text", required=True, help="Place name or lat,lon.")
+    parser.add_argument("--to", dest="to_text", required=True, help="Place name or lat,lon.")
+    parser.add_argument("--complexity", type=int, default=0, help="Ride-complexity detent (default: 0).")
+    parser.add_argument("--road-share", type=int, default=70, help="Maximum shared roads, 10–90 by 5%% (default: 70).")
+    parser.add_argument("--block-unpaved", action="store_true", help="Block unpaved roads for this route.")
+    parser.add_argument("--route-index", type=int, default=1, help="Choose a 1-based route card after routing.")
+    parser.add_argument("--timeout", type=float, default=300, help="Maximum route wait in seconds.")
+    parser.add_argument("--progress-interval", type=float, default=2.0, help="Seconds between screenshots while routing.")
+    parser.add_argument("--progress", "--progress-percent", dest="progress_percent", type=float, help="Enter ride mode and jump to this route percentage.")
+    parser.add_argument("--step-delay", type=float, default=0.15, help="Delay between simulated GPS fixes in seconds.")
+    parser.add_argument("--black-and-white", choices=("on", "off", "both"), help="Set ride-map style; 'both' captures both styles.")
+    parser.add_argument("--plan-only", action="store_true", help="Stop after the route is ready; leave the planner visible.")
+    parser.add_argument("--reuse-app", action="store_true", help="Use the running app without rebuilding or relaunching it.")
+    parser.add_argument("--no-build", action="store_true", help="Use the existing debug APK when launching.")
+    parser.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
+    parser.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -1002,6 +1403,7 @@ def create_parser() -> argparse.ArgumentParser:
             "  tools/test/visual.py launch\n"
             "  tools/test/visual.py route --from '-27.4698,153.0251' --to '-27.3353,152.7720'\n"
             "  tools/test/visual.py route --from 'Brisbane' --to 'Mount Glorious' --complexity 2 --road-share 45 --block-unpaved\n"
+            "  tools/test/visual.py nav-camera --from 'Brisbane' --to 'Mount Glorious'\n"
             "  tools/test/visual.py route --from 'Brisbane' --to 'Mount Glorious' --black-and-white both\n"
             "  tools/test/visual.py map-mode --black-and-white on\n"
             "  tools/test/visual.py screenshot --label before-change\n"
@@ -1024,22 +1426,42 @@ def create_parser() -> argparse.ArgumentParser:
     launch.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
 
     route = commands.add_parser("route", help="Load endpoints, apply options, route, and optionally enter ride mode.")
-    route.add_argument("--from", dest="from_text", required=True, help="Place name or lat,lon.")
-    route.add_argument("--to", dest="to_text", required=True, help="Place name or lat,lon.")
-    route.add_argument("--complexity", type=int, default=0, help="Ride-complexity detent (default: 0).")
-    route.add_argument("--road-share", type=int, default=70, help="Maximum shared roads, 10–90 by 5%% (default: 70).")
-    route.add_argument("--block-unpaved", action="store_true", help="Block unpaved roads for this route.")
-    route.add_argument("--route-index", type=int, default=1, help="Choose a 1-based route card after routing.")
-    route.add_argument("--timeout", type=float, default=300, help="Maximum route wait in seconds.")
-    route.add_argument("--progress-interval", type=float, default=2.0, help="Seconds between screenshots while routing.")
-    route.add_argument("--progress", "--progress-percent", dest="progress_percent", type=float, help="Enter ride mode and jump to this route percentage.")
-    route.add_argument("--step-delay", type=float, default=0.15, help="Delay between simulated GPS fixes in seconds.")
-    route.add_argument("--black-and-white", choices=("on", "off", "both"), help="Set ride-map style; 'both' captures both styles.")
-    route.add_argument("--plan-only", action="store_true", help="Stop after the route is ready; leave the planner visible.")
-    route.add_argument("--reuse-app", action="store_true", help="Use the running app without rebuilding or relaunching it.")
-    route.add_argument("--no-build", action="store_true", help="Use the existing debug APK when launching.")
-    route.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
-    route.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
+    add_route_options(route)
+
+    nav_camera = commands.add_parser(
+        "nav-camera",
+        help="Start a ride and capture the guidance camera states plus the exit restore.",
+    )
+    add_route_options(nav_camera)
+    nav_camera.add_argument(
+        "--speed-cases",
+        default=DEFAULT_SPEED_CASES,
+        help=f"Comma-separated m/s cases to capture (default: {DEFAULT_SPEED_CASES}).",
+    )
+    nav_camera.add_argument(
+        "--turn-threshold",
+        type=float,
+        default=40.0,
+        help="Minimum turn angle in degrees to use for the heading-turn frames (default: 40).",
+    )
+    nav_camera.add_argument(
+        "--turn-step",
+        type=float,
+        default=25.0,
+        help="Metres between heading-turn GPS fixes (default: 25).",
+    )
+    nav_camera.add_argument(
+        "--turn-speed",
+        type=float,
+        default=12.0,
+        help="Speed in m/s used through the heading-turn frames (default: 12).",
+    )
+    nav_camera.add_argument(
+        "--settle",
+        type=float,
+        default=0.7,
+        help="Seconds to let the camera animation and repaint settle before a capture (default: 0.7).",
+    )
 
     options = commands.add_parser("options", help="Set route options on the current screen.")
     options.add_argument("--complexity", type=int, help="Set the ride-complexity detent.")
@@ -1105,6 +1527,8 @@ def main() -> int:
             )
         elif args.command == "route":
             harness.route(args)
+        elif args.command == "nav-camera":
+            harness.navigation_camera(args)
         elif args.command in {"options", "progress", "map-mode", "icon-states", "screenshot", "tree", "status", "tap", "type", "key", "swipe", "watch", "logs", "stop"}:
             harness.ensure_device(start_if_missing=False)
             if args.command == "options":

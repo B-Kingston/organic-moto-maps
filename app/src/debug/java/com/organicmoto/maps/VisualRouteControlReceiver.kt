@@ -14,6 +14,9 @@ class VisualRouteControlReceiver : BroadcastReceiver() {
         if (!lat.isFinite() || lat !in -90.0..90.0 || !lon.isFinite() || lon !in -180.0..180.0) {
             return
         }
-        VisualRouteSnapshot.queueFix(context.cacheDir, requestId, lat, lon)
+        val speedMps = intent.getFloatExtra("speed", Float.NaN)
+            .takeIf { it.isFinite() && it >= 0f }
+            ?.toDouble()
+        VisualRouteSnapshot.queueFix(context.cacheDir, requestId, lat, lon, speedMps)
     }
 }

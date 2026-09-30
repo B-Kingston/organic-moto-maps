@@ -42,6 +42,7 @@ import androidx.compose.foundation.pager.PagerDefaults
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.organicmoto.maps.map.hideNavPosition
+import com.organicmoto.maps.map.updateGuidancePosition
 import com.organicmoto.maps.map.updateNavPosition
 import com.organicmoto.maps.routing.navigation.GpsFix
 import com.organicmoto.maps.routing.navigation.GpsFixSource
@@ -125,6 +126,7 @@ import com.organicmoto.maps.storage.GpxPreview
 import com.organicmoto.maps.storage.PolylineCodec
 import com.organicmoto.maps.storage.RouteSimilarity
 import com.organicmoto.maps.storage.SavedRoute
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import com.organicmoto.maps.storage.SavedRouteDraft
 import com.organicmoto.maps.storage.SavedRouteRepository
@@ -467,6 +469,10 @@ fun RouteScreen() {
     var trackedFix by remember { mutableStateOf<GpsFix?>(null) }
     var trackingActive by remember { mutableStateOf(false) }
     val latestFix = remember { AtomicReference<GpsFix?>(null) }
+    // Debug runner authority: while queued visual fixes are flowing, the live
+    // GPS stream must not pull guidance back to the emulator's parked provider
+    // position between injections.
+    val lastDebugFixAt = remember { AtomicLong(0L) }
     val latestGuidanceRequested = rememberUpdatedState(guidanceRequested)
     var initialLocationCentered by remember { mutableStateOf(false) }
     DisposableEffect(lifecycleOwner) {
@@ -494,6 +500,7 @@ fun RouteScreen() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(locationPermissionGranted, guidanceRequested) {
+        if (!guidanceRequested) lastDebugFixAt.set(0L)
         if (!locationPermissionGranted) {
             latestFix.set(null)
             trackedFix = null
@@ -508,7 +515,12 @@ fun RouteScreen() {
             try {
                 GpsFixSource.fixes(context.applicationContext).collect { fix ->
                     latestFix.set(fix)
-                    navigationController.onFix(fix)
+                    val debugAgeMs = lastDebugFixAt.get().takeIf { it > 0L }?.let {
+                        SystemClock.elapsedRealtime() - it
+                    }
+                    if (!debugFixOwnsGuidance(debugLogs, debugAgeMs)) {
+                        navigationController.onFix(fix)
+                    }
                     val snapshot = navigationController.snapshot.value
                     if (latestGuidanceRequested.value && snapshot.state != NavigationState.Idle) {
                         voiceGuidanceOutput.onSnapshot(
@@ -561,13 +573,16 @@ fun RouteScreen() {
             val fix = GpsFix(
                 lat = request.lat,
                 lon = request.lon,
-                // A percentage jump is a test teleport, not a speed sample.
-                // Keep it stationary so pace-delta metrics stay truthful.
-                speedMps = 0.0,
+                // A percentage jump is a test teleport, not a speed sample:
+                // without a runner-requested speed it stays stationary so
+                // pace-delta metrics stay truthful. The camera runner can
+                // request a speed to capture a zoom band.
+                speedMps = request.speedMps ?: 0.0,
                 accuracyM = 1.0,
                 timestampMs = SystemClock.elapsedRealtime(),
             )
             latestFix.set(fix)
+            lastDebugFixAt.set(SystemClock.elapsedRealtime())
             navigationController.onFix(fix)
             if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                 trackedFix = fix
@@ -663,7 +678,6 @@ fun RouteScreen() {
     var appliedMapRevision by remember { mutableStateOf<Int?>(null) }
     var loadedStyleJson by remember { mutableStateOf<String?>(null) }
     var styleLoadGeneration by remember { mutableIntStateOf(0) }
-    val latestStyleJson by rememberUpdatedState(styleJson)
     LaunchedEffect(styleJson, mapRef.value, screenStarted, mapRevision) {
         if (!screenStarted) return@LaunchedEffect
         val json = styleJson ?: return@LaunchedEffect
@@ -672,6 +686,8 @@ fun RouteScreen() {
             return@LaunchedEffect
         }
         loadedStyleJson = null
+        // Check the live style state as well as the generation: a callback
+        // can arrive after the desired style is cleared, before a new request.
         val generation = ++styleLoadGeneration
         if (styledMap !== map) {
             // Set an initial Queensland view once for each MapLibreMap. Style
@@ -679,9 +695,7 @@ fun RouteScreen() {
             map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(-23.0, 145.5), 4.5))
         }
         map.setStyle(Style.Builder().fromJson(json)) {
-            if (mapRef.value === map && styleLoadGeneration == generation &&
-                latestStyleJson == json
-            ) {
+            if (mapRef.value === map && styleLoadGeneration == generation && styleJson == json) {
                 loadedStyleJson = json
             }
         }
@@ -1167,6 +1181,16 @@ fun RouteScreen() {
                 // camera -> state -> animation loop.
                 followZoom = map.cameraPosition.zoom
             }
+            if (debugLogs) {
+                // Debug seam for tools/test/visual.py: publish the settled
+                // camera so the runner can check guidance framing and the
+                // planning-camera restore after END.
+                val settled = map.cameraPosition
+                val guidanceActive = latestGuidanceRequested.value
+                scope.launch(Dispatchers.IO) {
+                    VisualRouteSnapshot.writeCamera(context.cacheDir, settled, guidanceActive)
+                }
+            }
         }
         map.addOnCameraMoveStartedListener(moveStarted)
         map.addOnCameraMoveListener(listener)
@@ -1199,12 +1223,14 @@ fun RouteScreen() {
     // This is the only position-marker owner. It collects navigation
     // snapshots directly while started, so returning from background renders
     // the current position once without waking RouteScreen per fix.
+    val markerDensity = LocalDensity.current.density
     LaunchedEffect(
         trackingActive,
         guidanceRequested,
         loadedStyleJson,
         mapRef.value,
         screenStarted,
+        markerDensity,
     ) {
         if (!screenStarted) return@LaunchedEffect
         val map = mapRef.value ?: return@LaunchedEffect
@@ -1221,9 +1247,8 @@ fun RouteScreen() {
                 }
                 val camera = map.cameraPosition
                 val bearing = guidanceBearingTracker.resolve(snap.bearingDeg, camera.bearing)
-                map.updateNavPosition(snap.lat, snap.lon, bearing)
-                val speed = if (snap.speedMps.isFinite()) snap.speedMps else 0.0
-                val zoom = guidanceZoomFor(speed)
+                map.updateGuidancePosition(snap.lat, snap.lon, bearing, markerDensity)
+                val zoom = guidanceZoomFor(snap.speedMps)
                 val cameraTarget = camera.target ?: return@collect
                 val needsPositionOrZoom = shouldFollowCamera(
                     cameraTarget.latitude,
@@ -1232,7 +1257,7 @@ fun RouteScreen() {
                     snap.lat,
                     snap.lon,
                     zoom,
-                    followMovementThresholdMeters(speed),
+                    followMovementThresholdMeters(snap.speedMps),
                 )
                 if (needsPositionOrZoom || guidanceOrientationNeedsUpdate(
                         cameraBearing = camera.bearing,
@@ -1632,20 +1657,34 @@ private fun milestoneEndpointLabel(milestone: GpxMilestone): String =
  * Camera zoom for the current riding speed, in discrete bands so the map
  * eases out as the rider speeds up and back in when they slow down. The
  * closer low-speed levels keep turns readable; the heading-up tilt shows a
- * useful distance ahead as the rider speeds up.
+ * useful distance ahead as the rider speeds up. Invalid or missing speed
+ * (NaN, infinity, negative) reads as stationary, which is the closest band,
+ * so a dropped speed sample can never zoom the rider out mid-corner.
  */
 internal fun guidanceZoomFor(speedMps: Double): Double = when {
-    speedMps < 7.0 -> 17.0
-    speedMps < 14.0 -> 16.0
-    speedMps < 22.0 -> 15.0
-    speedMps < 31.0 -> 14.0
-    else -> 13.0
+    !speedMps.isFinite() || speedMps < 7.0 -> 18.0
+    speedMps < 14.0 -> 17.0
+    speedMps < 22.0 -> 16.0
+    speedMps < 31.0 -> 15.0
+    else -> 14.0
 }
 
-internal const val GUIDANCE_TILT_DEGREES = 48.0
-internal const val GUIDANCE_RIDER_VERTICAL_FRACTION = 0.68
+/** Forward pitch the guidance view holds; the low rider stays at [GUIDANCE_RIDER_VERTICAL_FRACTION] of the map viewport. */
+internal const val GUIDANCE_TILT_DEGREES = 58.0
+internal const val GUIDANCE_RIDER_VERTICAL_FRACTION = 0.70
 internal const val GUIDANCE_TOP_PADDING_FRACTION =
     2.0 * GUIDANCE_RIDER_VERTICAL_FRACTION - 1.0
+
+/**
+ * How long a queued debug fix owns guidance. The emulator's live provider
+ * keeps replaying its parked position, so between runner injections it would
+ * yank the camera off the injected path. Release builds never enable debug
+ * logging and always follow live GPS.
+ */
+internal const val DEBUG_FIX_AUTHORITY_MS = 20_000L
+
+internal fun debugFixOwnsGuidance(debugLogs: Boolean, sinceDebugFixMs: Long?): Boolean =
+    debugLogs && sinceDebugFixMs != null && sinceDebugFixMs in 0..DEBUG_FIX_AUTHORITY_MS
 
 /** Keeps the last usable course when GPS temporarily stops reporting heading. */
 internal class GuidanceBearingTracker {
