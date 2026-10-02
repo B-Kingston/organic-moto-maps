@@ -1,0 +1,19 @@
+{
+  "seed": 0,
+  "comment": "Deterministic replay of the actions the seeded campaign can now reach: route settings, the road-share dial, block-unpaved, then the media panel's transport and volume.",
+  "actions": [
+    {"type": "OpenRouteSettings"},
+    {"type": "AdjustRoadShare", "percent": 45},
+    {"type": "AdjustRoadShare", "percent": 90},
+    {"type": "ToggleBlockUnpaved"},
+    {"type": "ApplyRouteSettings"},
+    {"type": "Back"},
+    {"type": "StartRide"},
+    {"type": "ToggleMediaPanel"},
+    {"type": "PressMedia", "command": "PLAY"},
+    {"type": "PressMedia", "command": "NEXT"},
+    {"type": "AdjustVolume", "increase": true},
+    {"type": "AdjustVolume", "increase": false},
+    {"type": "Back"}
+  ]
+}
