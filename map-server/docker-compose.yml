@@ -1,0 +1,37 @@
+services:
+  map-server:
+    build:
+      context: ..
+      dockerfile: map-server/Dockerfile
+    image: ${MOTO_IMAGE:-curvemaps-map-server:local}
+    container_name: ${MOTO_CONTAINER_NAME:-curvemaps-map-server}
+    ports:
+      # Default to loopback; deployments set MOTO_BIND to their LAN address.
+      - "${MOTO_BIND:-127.0.0.1}:${MOTO_PORT:-8080}:8080"
+    volumes:
+      - map-data:/data
+      # Read-only OSM extracts for catalog entries that use source.path.
+      - ${MOTO_INPUT_DIR:-./input}:/input:ro
+      # Operator catalog; defaults to the example catalog next to this file.
+      - ${MOTO_CATALOG_FILE:-./catalog.example.json}:/app/catalog.json:ro
+    environment:
+      MOTO_ADDR: ":8080"
+      MOTO_CATALOG: /app/catalog.json
+      # Only enable when the container really sits behind a reverse proxy.
+      MOTO_TRUSTED_PROXIES: "${MOTO_TRUSTED_PROXIES:-}"
+      # MOTO_ADMIN_TOKEN: change-me
+    # The baked /app/config.json carries conservative heaps; override the
+    # command and mount another config to change them.
+    command: ["serve", "--config", "/app/config.json"]
+    # Keep a generation from starving the host's other services.
+    mem_limit: "${MOTO_MEM_LIMIT:-13g}"
+    cpus: "${MOTO_CPUS:-2.5}"
+    labels:
+      # This is a locally built image with no registry; keep the host's
+      # watchtower from trying to update it.
+      com.centurylinklabs.watchtower.enable: "false"
+    restart: unless-stopped
+
+volumes:
+  map-data:
+    name: ${MOTO_VOLUME:-curvemaps-map-data}

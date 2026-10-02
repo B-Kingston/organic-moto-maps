@@ -1,0 +1,60 @@
+{{define "index"}}{{template "head" .}}
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<section class="card">
+  <h2>Server</h2>
+  <div class="grid-2">
+    <div class="kv"><span class="k">Generation</span><span>{{if .GenerationEnabled}}enabled{{else}}unavailable — {{.JavaMessage}}{{end}}</span></div>
+    <div class="kv"><span class="k">Queue</span><span>{{.QueueDepth}} queued / {{.MaxQueued}} max</span></div>
+    <div class="kv"><span class="k">Artifact cache</span><span>{{.ArtifactRoot}}</span></div>
+    <div class="kv"><span class="k">Rate limits</span><span>per-IP token buckets; not authentication</span></div>
+  </div>
+  <p class="muted">
+    Build requests only reference operator-approved regions. The server never
+    accepts URLs, paths, or commands from callers. Generated packages are cached
+    by a verified pipeline fingerprint, so an identical request is a download,
+    not a rebuild.
+  </p>
+</section>
+
+{{if .RequestsEnabled}}<section class="card">
+  <h2>Request a region</h2>
+  <form method="post" action="/ui/requests" class="request-form">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label for="place">Place name or lat,lon</label>
+    <input id="place" name="place" type="text" maxlength="100" required placeholder="Tasmania, or -42.88,147.33">
+    <button type="submit" class="primary">Request region</button>
+  </form>
+  <p class="muted">
+    The server finds the matching Geofabrik extract and builds it if it is no
+    larger than {{.MaxExtract}}. Pick a state or smaller; continents are refused.
+  </p>
+</section>
+
+{{end}}<section class="card">
+  <h2>Regions</h2>
+  <div id="regions" hx-get="/ui/regions" hx-trigger="every 5s" hx-swap="innerHTML">
+    {{template "regionTable" .}}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Build queue</h2>
+  <div id="jobs" hx-get="/ui/jobs" hx-trigger="every 2s" hx-swap="innerHTML">
+    {{template "jobsTable" .}}
+  </div>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "regionTable"}}
+<table>
+  <thead><tr><th>Region</th><th>Source</th><th>Status</th><th></th></tr></thead>
+  <tbody>{{template "regionRows" .}}</tbody>
+</table>
+{{end}}
+
+{{define "jobsTable"}}
+<table>
+  <thead><tr><th>Request</th><th>State</th><th>Progress</th><th></th></tr></thead>
+  <tbody>{{template "jobRows" .}}</tbody>
+</table>
+{{end}}

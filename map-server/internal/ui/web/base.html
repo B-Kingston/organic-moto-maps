@@ -1,0 +1,105 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>curveMaps map server</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="site">
+  <h1>curveMaps map server</h1>
+  <div class="sub">Regional package generation and download · version {{.Version}}</div>
+</header>
+<main>
+{{end}}
+
+{{define "foot"}}
+</main>
+<footer class="site">
+  Generated packages contain OpenStreetMap data. Map rendering uses
+  © OpenMapTiles.org © OpenStreetMap contributors; fonts are Noto (OFL).
+</footer>
+</body>
+</html>
+{{end}}
+
+{{define "jobRows"}}
+{{range .Jobs}}
+<tr>
+  <td>
+    <div class="region-name">{{.RegionName}}</div>
+    <div class="muted">{{.ID}}{{if .Step}} · step: {{.Step}}{{end}}</div>
+  </td>
+  <td><span class="badge {{.State}}">{{.State}}</span></td>
+  <td>
+    {{if .Active}}<progress value="{{.ProgressPercent}}" max="100"></progress>{{end}}
+    <div class="muted">{{.Message}}</div>
+  </td>
+  <td>
+    <div class="actions">
+      {{if .DownloadURL}}<a class="button primary" href="{{.DownloadURL}}">Download</a>{{end}}
+      {{if .Cancelable}}
+      <form class="inline" method="post" action="/ui/builds/{{.ID}}/cancel">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <button type="submit">Cancel</button>
+      </form>
+      {{end}}
+      <span class="muted">{{.CreatedAt}}</span>
+    </div>
+  </td>
+</tr>
+{{else}}
+<tr><td colspan="4" class="muted">No build requests yet.</td></tr>
+{{end}}
+{{end}}
+
+{{define "regionRows"}}
+{{range .Regions}}
+<tr>
+  <td>
+    <div class="region-name">{{.Name}}</div>
+    <div class="muted">{{.ID}}{{if .Coverage}} · {{.Coverage}}{{end}}</div>
+    {{if .Notes}}<div class="muted">{{.Notes}}</div>{{end}}
+  </td>
+  <td>
+    <div>{{.SourceKind}} · {{.SourceDate}}</div>
+    <div class="muted">{{.SourceSHA}}</div>
+  </td>
+  <td>
+    {{if .Disabled}}
+      <span class="badge canceled">disabled</span>
+    {{else if .Cached}}
+      <span class="badge completed">cached</span>
+      <div class="muted">{{.CachedSize}}{{if .CachedAt}} · {{.CachedAt}}{{end}}</div>
+    {{else if .ActiveJob}}
+      <span class="badge {{.ActiveJob.State}}">{{.ActiveJob.State}}</span>
+      <div class="muted">{{.ActiveJob.Message}}</div>
+    {{else}}
+      <span class="badge">not built</span>
+    {{end}}
+  </td>
+  <td>
+    <div class="actions">
+      {{if .DownloadURL}}<a class="button primary" href="{{.DownloadURL}}">Download</a>{{end}}
+      {{if .ActiveJob}}
+        {{if .ActiveJob.Cancelable}}
+        <form class="inline" method="post" action="/ui/builds/{{.ActiveJob.ID}}/cancel">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <button type="submit">Cancel</button>
+        </form>
+        {{end}}
+      {{else if .Disabled}}
+      {{else}}
+        <form class="inline" method="post" action="/ui/builds">
+          <input type="hidden" name="regionId" value="{{.ID}}">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <button type="submit" class="primary">Request build</button>
+        </form>
+      {{end}}
+    </div>
+  </td>
+</tr>
+{{end}}
+{{end}}

@@ -1,0 +1,8 @@
+{
+  "pipeline": {
+    "graphHeap": "8g",
+    "tilesHeap": "8g",
+    "geocoderHeap": "6g",
+    "minFreeDiskBytes": 8589934592
+  }
+}

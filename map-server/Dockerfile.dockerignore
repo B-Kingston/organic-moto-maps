@@ -1,0 +1,34 @@
+# Keep the build context small: only the Go server, the standalone geocoder
+# sources, and the pinned pipeline inputs are needed.
+#
+# Docker evaluates these patterns with parent-directory matching (moby
+# patternmatcher's MatchesOrParentMatches): a file is included only when every
+# ancestor directory is also re-included. A bare `!dir/**` therefore does NOT
+# re-include files under `dir` when `**` matched `dir` itself — each parent
+# needs its own `!dir` line before `!dir/**`. `map-server/Dockerfile` and the
+# runtime `geocoder-tool/` copies depend on this.
+**
+!map-server
+!map-server/**
+# Runtime state and local exports never belong in an image.
+map-server/state/**
+map-server/dist/**
+!gradlew
+!gradle
+!gradle/**
+!geocoder-tool
+!geocoder-tool/build.gradle.kts
+!geocoder-tool/src
+!geocoder-tool/src/**
+!geocoder-tool/standalone
+!geocoder-tool/standalone/settings.gradle.kts
+!tools
+!tools/gh
+!tools/gh/config.yml
+!tools/gh/motorcycle.json
+!tools/gh/MotoGraphImport.java
+!tools/tiles
+!tools/tiles/build-tiles.sh
+**/build/**
+**/.gradle/**
+**/__pycache__/**

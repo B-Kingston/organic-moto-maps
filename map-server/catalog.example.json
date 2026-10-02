@@ -1,0 +1,26 @@
+{
+  "regions": [
+    {
+      "id": "queensland",
+      "name": "Queensland",
+      "coverage": "Queensland, Australia",
+      "maxZoom": 14,
+      "notes": "Pinned to the dated Geofabrik extract the app's CI pipeline uses.",
+      "source": {
+        "url": "https://download.geofabrik.de/australia-oceania/australia/queensland-260928.osm.pbf",
+        "date": "260928"
+      }
+    },
+    {
+      "id": "monaco",
+      "name": "Monaco",
+      "coverage": "Monaco",
+      "maxZoom": 14,
+      "notes": "Small extract for end-to-end pipeline validation. The latest alias is fine for a development region; pin a dated extract for hosting.",
+      "source": {
+        "url": "https://download.geofabrik.de/europe/monaco-latest.osm.pbf",
+        "date": "260928"
+      }
+    }
+  ]
+}
