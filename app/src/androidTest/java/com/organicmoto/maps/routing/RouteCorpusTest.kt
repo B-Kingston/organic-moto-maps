@@ -29,6 +29,12 @@ class RouteCorpusTest {
                     assertTrue("${entry.name} has too few points", path.points.size() >= 2)
                     assertTrue("${entry.name} has no distance", path.distance > 0.0)
                     assertTrue("${entry.name} has no duration", path.time > 0L)
+                    val roadClasses = path.pathDetails["road_class"].orEmpty()
+                    assertTrue("${entry.name} must provide road classes for full-width ride highlighting", roadClasses.isNotEmpty())
+                    assertEquals(0, roadClasses.first().first)
+                    assertEquals(path.points.size() - 1, roadClasses.last().last)
+                    assertTrue(roadClasses.all { it.last > it.first })
+                    assertTrue(roadClasses.zipWithNext().all { (before, after) -> before.last == after.first })
                     val points = path.points.toGeoPoints()
                     assertTrue(points.all { point ->
                         point.lat.isFinite() && point.lon.isFinite() &&
@@ -136,6 +142,35 @@ class RouteCorpusTest {
         stops.forEach { stop ->
             val nearest = routed.minOf { RouteSimilarity.haversineMeters(it, stop.toGeoPoint()) }
             assertTrue("route missed imported stop $stop by ${nearest}m", nearest < 1_000.0)
+        }
+    }
+
+    /**
+     * Lane guidance end to end on the shipped graph: the production router
+     * requests the `moto_lanes` detail, the lane-aware import stored it, and
+     * the track factory turns it into recommendations. Brisbane CBD to
+     * Annerley crosses several mapped multi-lane approaches (Merivale Street
+     * carries turn:lanes arrows), so a graph imported with the stock
+     * GraphHopper command, or a router that drops the path detail, fails here.
+     */
+    @Test(timeout = 300_000)
+    fun cbdRouteCarriesLaneGuidanceFromTheGraph() {
+        val path = GraphHopperRouter(context).route(
+            com.graphhopper.util.shapes.GHPoint(-27.4698, 153.0251),
+            com.graphhopper.util.shapes.GHPoint(-27.5598, 153.0811),
+        ).routes.first()
+        assertTrue(
+            "route must carry the moto_lanes path detail",
+            path.pathDetails[MOTO_LANES_DETAIL].orEmpty().any { it.value is String },
+        )
+        val turns = com.organicmoto.maps.routing.navigation.RouteTrackFactory.fromPath(path).turns
+        val laned = turns.mapNotNull { it.lanes }
+        assertTrue("expected several multi-lane turn approaches, got ${laned.size}", laned.size >= 3)
+        assertTrue("expected at least one turn:lanes-marked approach", laned.any { it.marked })
+        laned.forEach { guidance ->
+            assertTrue(guidance.lanes.size >= 2)
+            assertTrue(guidance.leftHandTraffic)
+            assertTrue(guidance.recommendedIndices.isNotEmpty())
         }
     }
 

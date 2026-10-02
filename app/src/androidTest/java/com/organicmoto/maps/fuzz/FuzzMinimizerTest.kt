@@ -1,7 +1,7 @@
 package com.organicmoto.maps.fuzz
 
+import com.organicmoto.maps.ui.dismissMediaStartupPrompt
 import android.Manifest
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -10,7 +10,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import androidx.test.platform.app.InstrumentationRegistry
 import com.organicmoto.maps.MainActivity
-import com.organicmoto.maps.RouteUiStateKey
 import java.io.File
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -28,6 +27,9 @@ class FuzzMinimizerTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
+
     @Test(timeout = 300_000)
     fun greedySingleEliminationWritesAReproducibleMinimum() {
         val original = FuzzSeed.readActions("initial.json")
@@ -38,7 +40,7 @@ class FuzzMinimizerTest {
         assertTrue("minimizer must remove at least one action", minimized.size < original.size)
         assertTrue(
             "the minimized sequence must keep the signal",
-            minimized.any { it is FuzzAction.RotateKnob && it.detents > 0 },
+            minimized.any { it is RotateKnob && it.detents > 0 },
         )
         assertTrue(reproducesKnobSignal(minimized))
 
@@ -51,8 +53,8 @@ class FuzzMinimizerTest {
         }
         val originalFile = File(directory, "initial.json")
         val minimizedFile = File(directory, "initial.minimized.json")
-        originalFile.writeText(encodeActions(original))
-        minimizedFile.writeText(encodeActions(minimized))
+        originalFile.writeText(FuzzActionCodec.encodeAll(original))
+        minimizedFile.writeText(FuzzActionCodec.encodeAll(minimized))
         assertTrue(originalFile.isFile)
         assertTrue(minimizedFile.isFile)
         assertTrue(minimizedFile.readText().contains("\"actions\""))
@@ -75,7 +77,7 @@ class FuzzMinimizerTest {
             composeRule.onNodeWithContentDescription("From").performTextClearance()
             composeRule.onNodeWithContentDescription("To").performTextClearance()
         }
-        executor.execute(FuzzAction.RotateKnob(-64))
+        executor.execute(RotateKnob(-64))
         composeRule.waitForIdle()
         actions.forEach {
             executor.execute(it)
@@ -86,15 +88,7 @@ class FuzzMinimizerTest {
         ).fetchSemanticsNodes().isNotEmpty()
     }
 
-    private fun waitForScreen() {
-        composeRule.waitUntil(30_000) {
-            runCatching {
-                composeRule.onAllNodes(
-                    SemanticsMatcher.keyIsDefined(RouteUiStateKey),
-                ).fetchSemanticsNodes().isNotEmpty()
-            }.getOrDefault(false)
-        }
-    }
+    private fun waitForScreen() = FuzzWait.waitForScreen(composeRule)
 
     private fun minimize(
         original: List<FuzzAction>,
@@ -114,47 +108,5 @@ class FuzzMinimizerTest {
             }
         }
         return current
-    }
-
-    private fun encodeActions(actions: List<FuzzAction>): String = buildString {
-        append("{\n  \"actions\": [\n")
-        actions.forEachIndexed { index, action ->
-            append("    ").append(encodeAction(action))
-            if (index + 1 < actions.size) append(',')
-            append('\n')
-        }
-        append("  ]\n}\n")
-    }
-
-    private fun encodeAction(action: FuzzAction): String = when (action) {
-        is FuzzAction.Click -> "{\"type\":\"Click\",\"target\":\"${action.target}\"}"
-        is FuzzAction.LongClick -> "{\"type\":\"LongClick\",\"target\":\"${action.target}\"}"
-        is FuzzAction.TypeText ->
-            "{\"type\":\"TypeText\",\"target\":\"${action.target}\",\"value\":${quote(action.value)}}"
-        is FuzzAction.SwipeCarousel -> "{\"type\":\"SwipeCarousel\",\"direction\":\"${action.direction}\"}"
-        is FuzzAction.RotateKnob -> "{\"type\":\"RotateKnob\",\"detents\":${action.detents}}"
-        FuzzAction.TapStart -> "{\"type\":\"TapStart\"}"
-        FuzzAction.Back -> "{\"type\":\"Back\"}"
-        FuzzAction.OpenSavedRoutes -> "{\"type\":\"OpenSavedRoutes\"}"
-        FuzzAction.ToggleSettings -> "{\"type\":\"ToggleSettings\"}"
-        FuzzAction.OpenVoiceSettings -> "{\"type\":\"OpenVoiceSettings\"}"
-        FuzzAction.ToggleDarkRideMap -> "{\"type\":\"ToggleDarkRideMap\"}"
-        is FuzzAction.PanMap -> "{\"type\":\"PanMap\",\"direction\":\"${action.direction}\"}"
-        FuzzAction.BackgroundForeground -> "{\"type\":\"BackgroundForeground\"}"
-    }
-
-    private fun quote(value: String): String = buildString(value.length + 2) {
-        append('"')
-        value.forEach { character ->
-            when (character) {
-                '\\' -> append("\\\\")
-                '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                '\t' -> append("\\t")
-                else -> append(character)
-            }
-        }
-        append('"')
     }
 }

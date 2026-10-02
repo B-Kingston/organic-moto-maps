@@ -5,7 +5,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -14,12 +20,18 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.organicmoto.maps.RoutePlanSearchField
 import com.organicmoto.maps.RoutePlanSearchResultsPopup
+import com.organicmoto.maps.RouteFieldSearchState
+import com.organicmoto.maps.SearchUiState
 import com.organicmoto.maps.SEARCH_DEBOUNCE_MS
+import com.organicmoto.maps.minimumSearchResultPopupHeightPx
 import com.organicmoto.maps.geocoding.GeocodeController
 import com.organicmoto.maps.geocoding.GeocodeResult
 import com.organicmoto.maps.geocoding.GeocodeResultType
@@ -218,7 +230,11 @@ class SearchDebounceTest {
                         }
                         val activeSearch = fromSearch.takeIf { it.active } ?: toSearch.takeIf { it.active }
                         if (activeSearch != null) {
-                            RoutePlanSearchResultsPopup(activeSearch, maxWidth)
+                            RoutePlanSearchResultsPopup(
+                                activeSearch,
+                                maxWidth,
+                                maxHeight = 140.dp,
+                            )
                         }
                     }
                 }
@@ -227,10 +243,14 @@ class SearchDebounceTest {
         composeRule.onNodeWithContentDescription("To").performTextInput("Palm")
         advanceDebounce()
         composeRule.waitUntil(2_000) { controller.queries == listOf("Palm") }
-        controller.gate("Palm").complete(listOf(result("Palm result")))
+        controller.gate("Palm").complete(
+            listOf(result("Palm result")) + (1..6).map { result("Palm alternative $it") },
+        )
         waitForResult("Palm result")
 
         val resultBounds = composeRule.onNodeWithContentDescription("Palm result")
+            .fetchSemanticsNode().boundsInRoot
+        val popupBounds = composeRule.onNodeWithContentDescription("Search results")
             .fetchSemanticsNode().boundsInRoot
         val fromBounds = composeRule.onNodeWithContentDescription("From")
             .fetchSemanticsNode().boundsInRoot
@@ -238,6 +258,164 @@ class SearchDebounceTest {
             .fetchSemanticsNode().boundsInRoot
         assertTrue("results must be above From", resultBounds.bottom <= fromBounds.top)
         assertTrue("results must be above To", resultBounds.bottom <= toBounds.top)
+        assertTrue(
+            "popup should be capped at 140 dp",
+            popupBounds.height <= 140f * composeRule.density.density + 1f,
+        )
+        assertTrue("popup must stay above From", popupBounds.bottom <= fromBounds.top)
+        assertTrue(
+            "first result must remain fully visible",
+            resultBounds.top >= popupBounds.top && resultBounds.bottom <= popupBounds.bottom,
+        )
+    }
+
+    @Test
+    fun constrainedPopupWaitsForCompleteFontScaledResultRow() {
+        val searchState = RouteFieldSearchState().apply {
+            hasFocus = true
+            uiState = SearchUiState.Results(listOf(result("Minimum row")))
+        }
+        var popupMaxHeight by mutableStateOf(47.dp)
+        var fontScale by mutableStateOf(1f)
+        var measuredTitleHeightPx by mutableStateOf(0)
+        var measuredSubtitleHeightPx by mutableStateOf(0)
+        val heightProbe = java.util.concurrent.atomic.AtomicReference<PopupHeightProbe?>(null)
+        composeRule.setContent {
+            val baseDensity = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(baseDensity.density, fontScale)) {
+                MaterialTheme {
+                    val density = LocalDensity.current
+                    val minimumRowHeightPx = minimumSearchResultPopupHeightPx(
+                        state = searchState.uiState,
+                        width = 240.dp,
+                        titleStyle = MaterialTheme.typography.titleSmall,
+                        subtitleStyle = MaterialTheme.typography.bodySmall,
+                    )
+                    val measuredRowHeightPx = with(density) {
+                        maxOf(
+                            48.dp.roundToPx(),
+                            measuredTitleHeightPx + measuredSubtitleHeightPx + 2 * 10.dp.roundToPx(),
+                        )
+                    }
+                    // Measure the same two Text styles without a height cap.
+                    // onTextLayout reports actual Android/Compose font scaling,
+                    // including nonlinear scaling above 1.3x.
+                    Column(
+                        Modifier
+                            .width(240.dp)
+                            .minimumInteractiveComponentSize()
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                            .graphicsLayer(alpha = 0f),
+                    ) {
+                        Text(
+                            text = "Minimum row",
+                            style = MaterialTheme.typography.titleSmall,
+                            onTextLayout = { measuredTitleHeightPx = it.size.height },
+                        )
+                        Text(
+                            text = "Queensland",
+                            style = MaterialTheme.typography.bodySmall,
+                            onTextLayout = { measuredSubtitleHeightPx = it.size.height },
+                        )
+                    }
+                    SideEffect {
+                        heightProbe.set(
+                            PopupHeightProbe(
+                                density = density.density,
+                                fontScale = density.fontScale,
+                                popupMaxHeightDp = popupMaxHeight.value,
+                                minimumRowHeightDp = with(density) { minimumRowHeightPx.toDp().value },
+                                measuredRowHeightPx = measuredRowHeightPx,
+                                minimumRowHeightPx = minimumRowHeightPx,
+                            ),
+                        )
+                    }
+                    RoutePlanSearchResultsPopup(
+                        state = searchState,
+                        width = 240.dp,
+                        maxHeight = popupMaxHeight,
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Search results").assertDoesNotExist()
+
+        val normalProbe = checkNotNull(heightProbe.get()) { "Popup height probe did not run" }
+        assertEquals("normal density row measurement", normalProbe.minimumRowHeightPx, normalProbe.measuredRowHeightPx)
+        popupMaxHeight = 48.dp
+        composeRule.waitForIdle()
+        composeRule.onNodeWithContentDescription("Search results").assertDoesNotExist()
+        popupMaxHeight = 55.dp
+        composeRule.waitForIdle()
+        composeRule.onNodeWithContentDescription("Search results").assertDoesNotExist()
+
+        popupMaxHeight = 56.dp
+        composeRule.waitForIdle()
+        val popupNode = composeRule.onNodeWithContentDescription("Search results")
+            .fetchSemanticsNode()
+        val resultNode = composeRule.onNodeWithContentDescription(
+            "Minimum row",
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        val normalRowHeightPx = 56f * composeRule.density.density
+        assertTrue(
+            "the full two-line row's un-clipped layout height must fit",
+            resultNode.size.height.toFloat() >= normalRowHeightPx - 1f,
+        )
+        assertTrue(
+            "the complete text and target must fit inside the popup",
+            resultNode.positionOnScreen.y + resultNode.size.height <=
+                popupNode.positionOnScreen.y + popupNode.size.height,
+        )
+
+        fontScale = 1.5f
+        popupMaxHeight = 56.dp
+        composeRule.waitForIdle()
+        val probe = checkNotNull(heightProbe.get()) { "Popup height probe did not run" }
+        assertEquals("density used by popup placement", composeRule.density.density, probe.density, 0.01f)
+        assertEquals("font scale used by popup placement", 1.5f, probe.fontScale, 0.01f)
+        assertEquals("cap before measuring its threshold", 56f, probe.popupMaxHeightDp, 0.01f)
+        assertEquals("helper matches independently measured font-scaled row", probe.measuredRowHeightPx, probe.minimumRowHeightPx)
+        assertTrue("font-scaled row grows beyond the normal row", probe.measuredRowHeightPx > normalProbe.measuredRowHeightPx)
+        val rowHeight = with(composeRule.density) { probe.measuredRowHeightPx.toDp() }
+        assertEquals(
+            "computed dp minimum matches rendered row typography",
+            rowHeight.value,
+            probe.minimumRowHeightDp,
+            1f / probe.density,
+        )
+        val onePixelBelowRowHeight = with(composeRule.density) {
+            (probe.measuredRowHeightPx - 1).toDp()
+        }
+        popupMaxHeight = onePixelBelowRowHeight
+        composeRule.waitForIdle()
+        val belowThresholdProbe = checkNotNull(heightProbe.get()) { "Popup height probe did not update" }
+        assertEquals(onePixelBelowRowHeight.value, belowThresholdProbe.popupMaxHeightDp, 0.01f)
+        composeRule.onNodeWithContentDescription("Search results").assertDoesNotExist()
+        popupMaxHeight = rowHeight
+        composeRule.waitForIdle()
+        val largeTextPopupNode = composeRule.onNodeWithContentDescription("Search results")
+            .fetchSemanticsNode()
+        val largeTextResultNode = composeRule.onNodeWithContentDescription(
+            "Minimum row",
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        assertTrue(
+            "font-scaled text must fit without clipping: " +
+                "rendered=${largeTextResultNode.size.height}px, " +
+                "measured=${probe.measuredRowHeightPx}px, " +
+                "cap=${probe.popupMaxHeightDp}dp, density=${probe.density}, " +
+                "fontScale=${probe.fontScale}",
+            largeTextResultNode.size.height >= probe.measuredRowHeightPx,
+        )
+        assertTrue(
+            "the font-scaled text and target must fit inside the popup: " +
+                "row=${largeTextResultNode.boundsInRoot}, popup=${largeTextPopupNode.boundsInRoot}, " +
+                "measured=${probe.measuredRowHeightPx}px",
+            largeTextResultNode.positionOnScreen.y + largeTextResultNode.size.height <=
+                largeTextPopupNode.positionOnScreen.y + largeTextPopupNode.size.height,
+        )
     }
 
     @Test
@@ -366,4 +544,13 @@ class SearchDebounceTest {
         fun gate(query: String): CompletableDeferred<List<GeocodeResult>> =
             gates.getOrPut(query) { CompletableDeferred() }
     }
+
+    private data class PopupHeightProbe(
+        val density: Float,
+        val fontScale: Float,
+        val popupMaxHeightDp: Float,
+        val minimumRowHeightDp: Float,
+        val measuredRowHeightPx: Int,
+        val minimumRowHeightPx: Int,
+    )
 }

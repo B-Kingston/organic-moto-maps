@@ -30,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
@@ -53,9 +54,12 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -84,7 +88,11 @@ internal const val SEARCH_DEBOUNCE_MS = 300L
 private const val MAX_DROPDOWN_ROWS = 6
 
 /** Max dropdown height before the result list scrolls (keeps the overlay from sprawling). */
-private val MAX_DROPDOWN_HEIGHT = 320.dp
+internal val MAX_DROPDOWN_HEIGHT = 320.dp
+
+/** Result rows retain their complete minimum interactive target when the popup is shown. */
+internal val MIN_SEARCH_RESULT_TARGET_HEIGHT = 48.dp
+private val SEARCH_RESULT_ROW_VERTICAL_PADDING = 10.dp
 
 /** Max result rows visible at once in the inline panel list; extra rows scroll. */
 private const val MAX_INLINE_RESULTS = 5
@@ -469,10 +477,25 @@ fun RoutePlanSearchField(
 internal fun RoutePlanSearchResultsPopup(
     state: RouteFieldSearchState,
     width: Dp,
+    maxHeight: Dp = MAX_DROPDOWN_HEIGHT,
+    centerHorizontally: Boolean = false,
 ) {
+    val cappedMaxHeight = maxHeight.coerceIn(0.dp, MAX_DROPDOWN_HEIGHT)
+    val density = LocalDensity.current
+    val minimumRowHeightPx = minimumSearchResultPopupHeightPx(
+        state = state.uiState,
+        width = width,
+        titleStyle = MaterialTheme.typography.titleSmall,
+        subtitleStyle = MaterialTheme.typography.bodySmall,
+    )
+    val popupMaxHeightPx = with(density) { cappedMaxHeight.roundToPx() }
+    if (!hasRoomForCompleteSearchResultRow(popupMaxHeightPx, minimumRowHeightPx)) return
+
     val focusManager = LocalFocusManager.current
     Popup(
-        popupPositionProvider = remember { AboveAnchorPopupPositionProvider() },
+        popupPositionProvider = remember(centerHorizontally) {
+            AboveAnchorPopupPositionProvider(centerHorizontally)
+        },
         onDismissRequest = { state.uiState = SearchUiState.Idle },
         properties = PopupProperties(
             focusable = false,
@@ -481,27 +504,39 @@ internal fun RoutePlanSearchResultsPopup(
             usePlatformDefaultWidth = false,
         ),
     ) {
-        SearchDropdown(
-            width = width,
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            color = ROUTE_PANEL_COLOR,
-            shadowElevation = 0.dp,
-        ) {
-            when (val current = state.uiState) {
-                SearchUiState.Idle -> Unit
-                SearchUiState.Loading -> DropdownMessage("Searching…")
-                SearchUiState.Empty -> DropdownMessage("No results", dim = true)
-                is SearchUiState.Results ->
-                    current.results.take(MAX_DROPDOWN_ROWS).forEachIndexed { index, result ->
-                        if (index > 0) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        // Popup owns a separate Android window. Pin the measured density into
+        // its content so font-scale metrics used for the fit check are exactly
+        // the metrics used to render the result row.
+        CompositionLocalProvider(LocalDensity provides density) {
+            SearchDropdown(
+                width = width,
+                maxHeight = cappedMaxHeight,
+                shape = RoundedCornerShape(
+                    topStart = 16.dp,
+                    topEnd = 16.dp,
+                    bottomStart = 0.dp,
+                    bottomEnd = 0.dp,
+                ),
+                color = ROUTE_PANEL_COLOR,
+                shadowElevation = 0.dp,
+                modifier = Modifier.semantics { contentDescription = "Search results" },
+            ) {
+                when (val current = state.uiState) {
+                    SearchUiState.Idle -> Unit
+                    SearchUiState.Loading -> DropdownMessage("Searching…")
+                    SearchUiState.Empty -> DropdownMessage("No results", dim = true)
+                    is SearchUiState.Results ->
+                        current.results.take(MAX_DROPDOWN_ROWS).forEachIndexed { index, result ->
+                            if (index > 0) {
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                            ResultRow(result) {
+                                state.uiState = SearchUiState.Idle
+                                focusManager.clearFocus()
+                                state.onPick(result)
+                            }
                         }
-                        ResultRow(result) {
-                            state.uiState = SearchUiState.Idle
-                            focusManager.clearFocus()
-                            state.onPick(result)
-                        }
-                    }
+                }
             }
         }
     }
@@ -511,6 +546,7 @@ internal fun RoutePlanSearchResultsPopup(
 @Composable
 private fun SearchDropdown(
     width: Dp,
+    maxHeight: Dp = MAX_DROPDOWN_HEIGHT,
     shape: Shape = MaterialTheme.shapes.small,
     color: Color = MaterialTheme.colorScheme.surface,
     shadowElevation: Dp = 4.dp,
@@ -520,7 +556,7 @@ private fun SearchDropdown(
     Surface(
         modifier = modifier
             .width(width)
-            .heightIn(max = MAX_DROPDOWN_HEIGHT),
+            .heightIn(max = maxHeight),
         shape = shape,
         color = color,
         shadowElevation = shadowElevation,
@@ -535,7 +571,9 @@ private fun SearchDropdown(
 }
 
 /** Places a popup directly above its text-field anchor. */
-private class AboveAnchorPopupPositionProvider : PopupPositionProvider {
+internal class AboveAnchorPopupPositionProvider(
+    private val centerHorizontally: Boolean = false,
+) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
         windowSize: IntSize,
@@ -543,14 +581,99 @@ private class AboveAnchorPopupPositionProvider : PopupPositionProvider {
         popupContentSize: IntSize,
     ): IntOffset {
         val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
-        val x = when (layoutDirection) {
-            LayoutDirection.Ltr -> anchorBounds.left
-            LayoutDirection.Rtl -> anchorBounds.right - popupContentSize.width
-        }.coerceIn(0, maxX)
+        val desiredX = if (centerHorizontally) {
+            anchorBounds.left + (anchorBounds.right - anchorBounds.left - popupContentSize.width) / 2
+        } else {
+            when (layoutDirection) {
+                LayoutDirection.Ltr -> anchorBounds.left
+                LayoutDirection.Rtl -> anchorBounds.right - popupContentSize.width
+            }
+        }
+        val x = desiredX.coerceIn(0, maxX)
         val y = (anchorBounds.top - popupContentSize.height).coerceAtLeast(0)
         return IntOffset(x, y)
     }
 }
+
+/** Limits popup height to the pixels above the visible window viewport and the configured cap. */
+internal fun maxSearchDropdownHeightPx(
+    availableAboveAnchorPx: Int,
+    preferredMaxHeightPx: Int,
+    visibleViewportTopPx: Int = 0,
+): Int {
+    val visibleHeight = (availableAboveAnchorPx - visibleViewportTopPx).coerceAtLeast(0)
+    return minOf(visibleHeight, preferredMaxHeightPx.coerceAtLeast(0))
+}
+
+/**
+ * Measures the first result with the same one-line styles and width as [ResultRow].
+ * TextMeasurer uses Compose's actual platform font metrics, including nonlinear
+ * Android font scaling and font padding that cannot be recovered from lineHeight.
+ */
+@Composable
+internal fun minimumSearchResultPopupHeightPx(
+    state: SearchUiState,
+    width: Dp,
+    titleStyle: TextStyle,
+    subtitleStyle: TextStyle,
+): Int {
+    val firstResult = (state as? SearchUiState.Results)?.results?.firstOrNull()
+    val density = LocalDensity.current
+    val targetHeightPx = with(density) { MIN_SEARCH_RESULT_TARGET_HEIGHT.roundToPx() }
+    if (firstResult == null) return targetHeightPx
+
+    val textMeasurer = rememberTextMeasurer()
+    val textWidthPx = with(density) {
+        (width - 32.dp).coerceAtLeast(0.dp).roundToPx()
+    }
+    val constraints = Constraints(maxWidth = textWidthPx)
+    val titleHeightPx = textMeasurer.measure(
+        text = firstResult.name,
+        style = titleStyle,
+        overflow = TextOverflow.Ellipsis,
+        softWrap = true,
+        maxLines = 1,
+        constraints = constraints,
+    ).size.height
+    val subtitleHeightPx = if (firstResult.subtitle.isNotBlank()) {
+        textMeasurer.measure(
+            text = firstResult.subtitle,
+            style = subtitleStyle,
+            overflow = TextOverflow.Ellipsis,
+            softWrap = true,
+            maxLines = 1,
+            constraints = constraints,
+        ).size.height
+    } else {
+        0
+    }
+    val paddingHeightPx = with(density) {
+        (SEARCH_RESULT_ROW_VERTICAL_PADDING * 2).roundToPx()
+    }
+    return searchResultRowMinimumHeightPx(
+        titleHeightPx = titleHeightPx,
+        subtitleHeightPx = subtitleHeightPx,
+        paddingHeightPx = paddingHeightPx,
+        targetHeightPx = targetHeightPx,
+    )
+}
+
+/** Pure size rule kept separate so row gating can be checked without Android text layout. */
+internal fun searchResultRowMinimumHeightPx(
+    titleHeightPx: Int,
+    subtitleHeightPx: Int,
+    paddingHeightPx: Int,
+    targetHeightPx: Int,
+): Int = maxOf(
+    targetHeightPx.coerceAtLeast(0),
+    titleHeightPx.coerceAtLeast(0) +
+        subtitleHeightPx.coerceAtLeast(0) +
+        paddingHeightPx.coerceAtLeast(0),
+)
+
+/** True only when the result surface can show one complete first result row. */
+internal fun hasRoomForCompleteSearchResultRow(availableHeightPx: Int, rowHeightPx: Int): Boolean =
+    rowHeightPx > 0 && availableHeightPx >= rowHeightPx
 
 /**
  * Standalone results viewport for route-planning tests and non-panel hosts.
@@ -592,7 +715,7 @@ private fun ResultRow(result: GeocodeResult, onClick: () -> Unit) {
             .pointerInput(Unit) { detectTapGestures(onTap = { onClick() }) }
             .minimumInteractiveComponentSize()
             .semantics { contentDescription = result.name }
-            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .padding(horizontal = 16.dp, vertical = SEARCH_RESULT_ROW_VERTICAL_PADDING)
     ) {
         Text(
             text = result.name,

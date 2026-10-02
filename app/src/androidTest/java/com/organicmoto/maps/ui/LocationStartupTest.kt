@@ -25,6 +25,9 @@ class LocationStartupTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
+
     @Test
     fun retainedLocationPermissionKeepsPlannerReadyAtStartup() {
         composeRule.onNode(

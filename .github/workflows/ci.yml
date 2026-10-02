@@ -32,7 +32,13 @@ env:
   # Geofabrik's `latest` alias currently loops through a cached slash redirect.
   # Pin the current dated Queensland extract until that alias is healthy again.
   OSM_EXTRACT_DATE: "260928"
-  CACHE_SEED: v2
+  # v3: tools/tiles/build-tiles.sh gained configurable work/output paths and
+  # portable SHA-256 verification for the map server's pipeline reuse. The
+  # extraction and output bytes are unchanged, but the pinned pipeline input
+  # changed, so the generated-data cache must rebuild.
+  # v4: the graph is imported with tools/gh/MotoGraphImport.java, which adds
+  # per-direction lane guidance (moto_lanes) to edge KV storage.
+  CACHE_SEED: v4
 
 jobs:
   light-tier:
@@ -70,7 +76,7 @@ jobs:
             tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar
             app/src/main/assets/graph-cache
             app/src/main/assets/geocoder
-          key: offline-${{ runner.os }}-${{ env.CACHE_SEED }}-qld${{ env.OSM_EXTRACT_DATE }}-gh${{ env.GRAPHHOPPER_VERSION }}-${{ hashFiles('tools/gh/config.yml', 'tools/gh/motorcycle.json', 'tools/tiles/build-tiles.sh', 'geocoder-tool/**') }}
+          key: offline-${{ runner.os }}-${{ env.CACHE_SEED }}-qld${{ env.OSM_EXTRACT_DATE }}-gh${{ env.GRAPHHOPPER_VERSION }}-${{ hashFiles('tools/gh/config.yml', 'tools/gh/motorcycle.json', 'tools/gh/MotoGraphImport.java', 'tools/tiles/build-tiles.sh', 'geocoder-tool/**') }}
 
       - name: Download OSM extract and GraphHopper import jar
         if: steps.data-cache.outputs.cache-hit != 'true'
@@ -106,7 +112,7 @@ jobs:
       - name: Import routing graph (GraphHopper, JDK 17)
         if: steps.data-cache.outputs.cache-hit != 'true'
         run: |
-          "$JAVA_HOME_17_X64/bin/java" -Xmx12g -jar "tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" import tools/gh/config.yml
+          "$JAVA_HOME_17_X64/bin/java" -Xmx12g -cp "tools/gh/graphhopper-web-${{ env.GRAPHHOPPER_VERSION }}.jar" tools/gh/MotoGraphImport.java import tools/gh/config.yml
           cp -R data/graph-cache app/src/main/assets/graph-cache
 
       - name: Build offline vector tiles (Planetiler, JDK 21)
@@ -162,3 +168,20 @@ jobs:
             app/build/outputs/apk/debug/app-debug.apk \
             data/tiles/queensland.pmtiles \
             data/tiles/queensland.pmtiles.sha256
+
+  # The map server is an independent Go module. It is cheap to verify and must
+  # never be able to break the app pipeline silently.
+  map-server-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: map-server/go.mod
+      - name: Vet and test (race detector)
+        working-directory: map-server
+        run: |
+          go vet ./...
+          go test -race ./...

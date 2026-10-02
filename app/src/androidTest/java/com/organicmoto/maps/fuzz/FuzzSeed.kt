@@ -1,6 +1,7 @@
 package com.organicmoto.maps.fuzz
 
 import android.util.JsonReader
+import android.util.JsonToken
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
@@ -30,41 +31,30 @@ object FuzzSeed {
         val actions = mutableListOf<FuzzAction>()
         reader.beginArray()
         while (reader.hasNext()) {
-            var type = ""
-            var target: UiTarget? = null
-            var direction: Direction? = null
-            var value = ""
-            var detents = 0
+            var name = ""
+            val args = mutableMapOf<String, String>()
             reader.beginObject()
             while (reader.hasNext()) {
-                when (reader.nextName()) {
-                    "type" -> type = reader.nextString()
-                    "target" -> target = UiTarget.valueOf(reader.nextString())
-                    "direction" -> direction = Direction.valueOf(reader.nextString())
-                    "value" -> value = reader.nextString()
-                    "detents" -> detents = reader.nextInt()
-                    else -> reader.skipValue()
+                when (val key = reader.nextName()) {
+                    "type" -> name = reader.nextString()
+                    else -> args[key] = nextScalar(reader)
                 }
             }
             reader.endObject()
-            actions += when (type) {
-                "Click" -> FuzzAction.Click(requireNotNull(target))
-                "LongClick" -> FuzzAction.LongClick(requireNotNull(target))
-                "TypeText" -> FuzzAction.TypeText(requireNotNull(target), value)
-                "SwipeCarousel" -> FuzzAction.SwipeCarousel(requireNotNull(direction))
-                "RotateKnob" -> FuzzAction.RotateKnob(detents)
-                "TapStart" -> FuzzAction.TapStart
-                "Back" -> FuzzAction.Back
-                "OpenSavedRoutes" -> FuzzAction.OpenSavedRoutes
-                "ToggleSettings" -> FuzzAction.ToggleSettings
-                "OpenVoiceSettings" -> FuzzAction.OpenVoiceSettings
-                "ToggleDarkRideMap" -> FuzzAction.ToggleDarkRideMap
-                "PanMap" -> FuzzAction.PanMap(requireNotNull(direction))
-                "BackgroundForeground" -> FuzzAction.BackgroundForeground
-                else -> error("unknown fuzz action type $type")
-            }
+            actions += FuzzActionCodec.decode(name, args)
         }
         reader.endArray()
         return actions
+    }
+
+    /**
+     * Scalars are kept as text; [FuzzActionCodec] narrows them per action.
+     * Android's JsonReader only coerces numbers in `nextString`, so booleans
+     * are read explicitly and stringified.
+     */
+    private fun nextScalar(reader: JsonReader): String = when (reader.peek()) {
+        JsonToken.BOOLEAN -> reader.nextBoolean().toString()
+        JsonToken.NUMBER, JsonToken.STRING -> reader.nextString()
+        else -> error("fuzz seed field must be a scalar, was ${reader.peek()}")
     }
 }

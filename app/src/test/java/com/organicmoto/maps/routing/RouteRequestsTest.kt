@@ -22,7 +22,7 @@ class RouteRequestsTest {
             previousEdgeIds = setOf(3, 7),
         )
         assertEquals(MOTORCYCLE_PROFILE, request.profile)
-        assertEquals(listOf("edge_id"), request.pathDetails)
+        assertEquals(listOf("edge_id", "road_class", MOTO_LANES_DETAIL), request.pathDetails)
         assertTrue(request.hints.getBool(Parameters.CH.DISABLE, false))
         assertEquals(0.0, request.hints.getDouble(MOTO_COMPLEXITY, -1.0), 0.0)
         assertFalse(request.hints.has(Parameters.Algorithms.ALT_ROUTE))
@@ -43,7 +43,7 @@ class RouteRequestsTest {
             previousEdgeIds = setOf(3, 7),
         )
         assertEquals(MOTORCYCLE_PROFILE, request.profile)
-        assertEquals(listOf("edge_id"), request.pathDetails)
+        assertEquals(listOf("edge_id", "road_class", MOTO_LANES_DETAIL), request.pathDetails)
         assertTrue(request.hints.getBool(Parameters.CH.DISABLE, false))
         assertEquals(2.0, request.hints.getDouble(MOTO_COMPLEXITY, -1.0), 0.0)
         assertEquals(Parameters.Algorithms.ALT_ROUTE, request.algorithm)

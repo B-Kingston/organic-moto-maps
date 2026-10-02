@@ -39,10 +39,17 @@ object OfflineTileStore {
      * Returns the installed archive URL, or null until the user imports one.
      */
     suspend fun installedUrl(context: Context): String? = withContext(Dispatchers.IO) {
-        installedFile(context.applicationContext)
-            .takeIf { it.isFile && it.length() >= PMTILES_HEADER_SIZE && hasValidHeader(it.inputStream()) }
-            ?.let(::mapUrl)
+        installedFileOrNull(context)?.let(::mapUrl)
     }
+
+    /** The validated legacy basemap file, or null when none is installed. */
+    fun installedFileOrNull(context: Context): File? {
+        val file = installedFile(context.applicationContext)
+        return file.takeIf { it.isFile && it.length() >= PMTILES_HEADER_SIZE && hasValidHeader(it.inputStream()) }
+    }
+
+    /** URL MapLibre reads the file through (PMTiles byte-range file source). */
+    internal fun mapUrl(file: File) = "pmtiles://file://${file.absolutePath}"
 
     /** Validates and atomically imports [source], preserving any prior map on failure. */
     suspend fun import(context: Context, source: Uri): String = withContext(Dispatchers.IO) {
@@ -90,7 +97,6 @@ object OfflineTileStore {
     }
 
     private fun installedFile(context: Context) = File(File(context.filesDir, "tiles"), FILE_NAME)
-    private fun mapUrl(file: File) = "pmtiles://file://${file.absolutePath}"
 
     private fun moveReplacing(from: File, to: File) {
         try {

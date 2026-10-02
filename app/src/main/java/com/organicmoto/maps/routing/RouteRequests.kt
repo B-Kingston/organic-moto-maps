@@ -23,7 +23,7 @@ internal fun buildGhRequest(
 ): GHRequest {
     val request = GHRequest(listOf(from) + viaPoints + to)
         .setProfile(MOTORCYCLE_PROFILE)
-        .setPathDetails(listOf("edge_id"))
+        .setPathDetails(listOf("edge_id", "road_class", MOTO_LANES_DETAIL))
     request.putHint(Parameters.CH.DISABLE, true)
     request.putHint(MOTO_COMPLEXITY, detent.toDouble())
     request.putHint(BLOCK_UNPAVED, blockUnpaved)

@@ -46,6 +46,8 @@ class RouteTrack(
         val roundaboutExitNumber: Int? = null,
         /** True for clockwise circulation, false for counterclockwise, null when ambiguous. */
         val roundaboutClockwise: Boolean? = null,
+        /** Recommended lane(s) on the road being left, when it has two or more lanes. */
+        val lanes: LaneGuidance? = null,
     )
 
     val vertexCount: Int get() = latitudes.size
@@ -146,6 +148,8 @@ class RouteTrack(
             instructionTimesS: List<Double>,
             instructionRoundaboutExitNumbers: List<Int?> = List(instructionSigns.size) { null },
             instructionRoundaboutClockwise: List<Boolean?> = List(instructionSigns.size) { null },
+            /** Raw `moto_lanes` value of segment v -> v+1 at index v; empty when unknown. */
+            segmentLanes: List<String?> = emptyList(),
         ): RouteTrack {
             val n = latitudes.size
             require(n >= 2) { "a route track needs at least two vertices" }
@@ -203,6 +207,11 @@ class RouteTrack(
                 // synthetic first instruction (depart / continue at origin).
                 if (i > 0 && isRealTurn(instructionSigns[i])) {
                     val vertex = cursor.coerceAtMost(n - 1)
+                    val lanes = LaneGuidance.forTurn(
+                        segmentLanes, cumulativeDistance, vertex,
+                        previousTurnVertex = turns.lastOrNull()?.vertexIndex ?: 0,
+                        sign = instructionSigns[i],
+                    )
                     turns += TurnNode(
                         vertexIndex = vertex,
                         sign = instructionSigns[i],
@@ -210,6 +219,7 @@ class RouteTrack(
                         turnAngleDeg = turnAngleAt(latitudes, longitudes, vertex),
                         roundaboutExitNumber = instructionRoundaboutExitNumbers[i],
                         roundaboutClockwise = instructionRoundaboutClockwise[i],
+                        lanes = lanes,
                     )
                 }
                 cursor = end

@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -14,9 +15,8 @@ import org.maplibre.android.style.layers.SymbolLayer
 
 /**
  * Pixel and style contracts for the navigation rider marker: the freestanding
- * faceted chevron, its density-aware size, and the layer that rotates it into
- * map space while keeping it upright for the pitched viewport. These catch
- * regressions that semantics cannot see.
+ * rounded arrow, its grayscale road contrast, density-aware size, and heading.
+ * These checks catch visible regressions that semantics cannot see.
  */
 @RunWith(AndroidJUnit4::class)
 class NavPositionMarkerTest {
@@ -31,72 +31,66 @@ class NavPositionMarkerTest {
     private fun alphaAt(image: IntArray, width: Int, x: Int, y: Int): Int =
         Color.alpha(argb(image, width, x, y))
 
-    private fun rowSpan(image: IntArray, width: Int, y: Int): Int {
-        var first = -1
-        var last = -1
-        for (x in 0 until width) {
-            if (Color.alpha(image[y * width + x]) > 160) {
-                if (first < 0) first = x
-                last = x
+    @Test
+    fun guidanceArrowKeepsItsRearNotchAndRaisedFaces() {
+        val bitmap = buildGuidanceChevronBitmap(2f)
+        val image = bitmapPixels(bitmap)
+        val width = bitmap.width
+        val height = bitmap.height
+        assertTrue("the tip must be filled", alphaAt(image, width, width / 2, height / 4) > 200)
+        val rearY = (height * 0.82f).toInt()
+        assertTrue("the left wing must be filled", alphaAt(image, width, width / 4, rearY) > 200)
+        assertTrue("the right wing must be filled", alphaAt(image, width, width * 3 / 4, rearY) > 200)
+        assertTrue("the rear notch must remain open", alphaAt(image, width, width / 2, rearY) < 100)
+        for (x in listOf(0, width - 1)) {
+            for (y in listOf(0, height - 1)) {
+                assertEquals("no disc may surround the arrow", 0, alphaAt(image, width, x, y))
             }
         }
-        return if (first < 0) 0 else last - first + 1
+        val left = argb(image, width, width * 2 / 5, height / 2)
+        val right = argb(image, width, width * 3 / 5, height / 2)
+        assertTrue("the left face must be brighter", Color.green(left) > Color.green(right) + 50)
+        assertTrue("both faces must stay blue", Color.blue(left) > Color.red(left) && Color.blue(right) > Color.red(right))
     }
 
     @Test
-    fun guidanceChevronIsAPointedFacetedArrowWithoutTheOldDisc() {
-        val bitmap = buildGuidanceChevronBitmap(2f)
-        val width = bitmap.width
-        val height = bitmap.height
-        val image = bitmapPixels(bitmap)
-
-        // Freestanding: no disc means every bitmap edge midpoint is empty.
-        assertTrue(alphaAt(image, width, 0, 0) < 10)
-        assertTrue(alphaAt(image, width, width - 1, 0) < 10)
-        assertTrue(alphaAt(image, width, 0, height - 1) < 10)
-        assertTrue(alphaAt(image, width, width - 1, height - 1) < 10)
-        assertTrue(alphaAt(image, width, width / 2, 0) < 10)
-        assertTrue(alphaAt(image, width, 0, height / 2) < 10)
-        assertTrue(alphaAt(image, width, width - 1, height / 2) < 10)
-        // The centre notch keeps the bottom middle free of the opaque faces
-        // (only the soft contact shadow may tint it).
-        assertTrue(alphaAt(image, width, width / 2, height - 1) < 60)
-        assertTrue(
-            "a subtle contact shadow must sit below the wings",
-            alphaAt(image, width, width / 2, height - 2) in 1..60,
-        )
-
-        // Pointed top, swept bottom wings.
-        val apexSpan = rowSpan(image, width, (height * 0.12f).toInt())
-        val wingSpan = rowSpan(image, width, (height * 0.92f).toInt())
-        assertTrue("apex row must be a narrow point", apexSpan > 0 && apexSpan < width / 3)
-        assertTrue("wing row must be wide", wingSpan > width * 2 / 3)
-        assertTrue("the arrow must widen downward", wingSpan > apexSpan * 2)
-
-        // Faceted faces: cyan-blue left, saturated royal-blue right, dark bevel.
-        var cyan = 0
-        var royal = 0
-        var bevel = 0
-        var white = 0
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val color = argb(image, width, x, y)
-                if (Color.alpha(color) < 200) continue
-                val red = Color.red(color)
-                val green = Color.green(color)
-                val blue = Color.blue(color)
-                if (red > 230 && green > 230 && blue > 230) white++
-                when {
-                    red < 120 && green > 130 && blue > 180 -> cyan++
-                    red < 120 && green < 110 && blue > 150 -> royal++
-                    red < 90 && green < 90 && blue < 140 -> bevel++
-                }
-            }
+    fun monochromeOutlineSeparatesBothSidesFromAWhiteRoad() {
+        val marker = buildGuidanceChevronBitmap(2f, monochrome = true)
+        val road = Bitmap.createBitmap(marker.width, marker.height, Bitmap.Config.ARGB_8888)
+        road.density = marker.density
+        val canvas = android.graphics.Canvas(road)
+        canvas.drawColor(Color.WHITE)
+        canvas.drawBitmap(marker, 0f, 0f, null)
+        val row = marker.height / 2
+        val pixels = bitmapPixels(road)
+        for (range in listOf(0 until marker.width / 2, marker.width / 2 until marker.width)) {
+            assertTrue(
+                "each side needs a dark outline against the white road",
+                range.any { Color.red(argb(pixels, marker.width, it, row)) < 40 },
+            )
         }
-        assertTrue("left face must stay cyan-blue", cyan > 60)
-        assertTrue("right face must stay royal blue", royal > 60)
-        assertTrue("lower bevel facets must stay dark blue", bevel > 40)
-        assertEquals("the old white arrow glyph must not return", 0, white)
+        assertTrue("the top face must remain light", Color.red(argb(pixels, marker.width, marker.width * 2 / 5, row)) > 200)
+    }
+
+    @Test
+    fun monochromeGuidanceArrowUsesOnlyGrayscaleFaces() {
+        val bitmap = buildGuidanceChevronBitmap(2f, monochrome = true)
+        val image = bitmapPixels(bitmap)
+        var brightFace = 0
+        var darkFace = 0
+        for (pixel in image) {
+            if (Color.alpha(pixel) < 200) continue
+            val red = Color.red(pixel)
+            val green = Color.green(pixel)
+            val blue = Color.blue(pixel)
+            assertTrue("marker must stay grayscale: #${Integer.toHexString(pixel)}", kotlin.math.abs(red - green) <= 2)
+            assertTrue("marker must stay grayscale: #${Integer.toHexString(pixel)}", kotlin.math.abs(green - blue) <= 2)
+            if (red > 200) brightFace++
+            if (red in 50..170) darkFace++
+        }
+        assertTrue("the light face must remain visible", brightFace > 60)
+        assertTrue("the shaded face and bevel must remain visible", darkFace > 60)
+        assertNotEquals(NAV_CHEVRON_IMAGE_ID, NAV_CHEVRON_MONO_IMAGE_ID)
     }
 
     @Test
@@ -140,6 +134,7 @@ class NavPositionMarkerTest {
         val rotateIsExpression = java.util.concurrent.atomic.AtomicReference<Boolean?>()
         val rotateJson = java.util.concurrent.atomic.AtomicReference<String?>()
         val guidanceImage = java.util.concurrent.atomic.AtomicReference<String?>()
+        val monochromeImage = java.util.concurrent.atomic.AtomicReference<String?>()
         val followImage = java.util.concurrent.atomic.AtomicReference<String?>()
         val followRotation = java.util.concurrent.atomic.AtomicReference<String?>()
         val followRotate = java.util.concurrent.atomic.AtomicReference<Float?>()
@@ -153,6 +148,10 @@ class NavPositionMarkerTest {
             guidanceRotation.set(guidanceLayer.getIconRotationAlignment().value)
             guidancePitch.set(guidanceLayer.getIconPitchAlignment().value)
             guidanceImage.set(guidanceLayer.getIconImage().value)
+            monochromeImage.set(
+                buildNavPositionLayer(NAV_CHEVRON_MONO_IMAGE_ID, guidance = true)
+                    .getIconImage().value,
+            )
             allowOverlap.set(guidanceLayer.getIconAllowOverlap().value)
             ignorePlacement.set(guidanceLayer.getIconIgnorePlacement().value)
             val rotate = guidanceLayer.getIconRotate()
@@ -169,6 +168,7 @@ class NavPositionMarkerTest {
         assertEquals(Property.ICON_ROTATION_ALIGNMENT_MAP, guidanceRotation.get())
         assertEquals(Property.ICON_PITCH_ALIGNMENT_VIEWPORT, guidancePitch.get())
         assertEquals(NAV_CHEVRON_IMAGE_ID, guidanceImage.get())
+        assertEquals(NAV_CHEVRON_MONO_IMAGE_ID, monochromeImage.get())
         assertEquals(true, allowOverlap.get())
         assertEquals(true, ignorePlacement.get())
         assertEquals(true, rotateIsExpression.get())

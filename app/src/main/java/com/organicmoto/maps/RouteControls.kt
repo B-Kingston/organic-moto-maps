@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -31,7 +33,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
@@ -257,6 +261,61 @@ internal fun SettingsCogIcon() {
     }
 }
 
+/**
+ * Screen header for the screens opened from the settings cog: a 48 dp back
+ * button that returns to the planner, then the screen title. Every screen
+ * opened from the cog exposes this back button as its exit affordance.
+ */
+@Composable
+internal fun SettingsScreenHeader(title: String, onBack: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier
+                .size(48.dp)
+                .offset(x = (-12).dp)
+                .semantics { contentDescription = "Back" },
+        ) { BackArrowIcon() }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+    }
+}
+
+/** Hand-drawn back chevron with a tail, matching the app's Canvas icons. */
+@Composable
+internal fun BackArrowIcon(tint: Color = Color(0xFF303030)) {
+    Canvas(Modifier.size(20.dp)) {
+        val strokeWidth = 2.4.dp.toPx()
+        drawPath(
+            path = Path().apply {
+                moveTo(size.width * 0.64f, size.height * 0.17f)
+                lineTo(size.width * 0.32f, size.height * 0.50f)
+                lineTo(size.width * 0.64f, size.height * 0.83f)
+            },
+            color = tint,
+            style = Stroke(
+                width = strokeWidth,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round,
+            ),
+        )
+        drawLine(
+            color = tint,
+            start = Offset(size.width * 0.32f, size.height * 0.50f),
+            end = Offset(size.width * 0.86f, size.height * 0.50f),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+        )
+    }
+}
+
 @Composable
 internal fun RouteSettingsDialog(
     currentPercent: Float,
@@ -268,7 +327,7 @@ internal fun RouteSettingsDialog(
     var draftBlockUnpaved by remember(blockUnpaved) { mutableStateOf(blockUnpaved) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Route settings") },
+        title = { SettingsScreenHeader(title = "Route settings", onBack = onDismiss) },
         text = {
             Column(Modifier.fillMaxWidth()) {
                 Text(
@@ -328,9 +387,6 @@ internal fun RouteSettingsDialog(
         },
         confirmButton = {
             TextButton(onClick = { onApply(draftPercent, draftBlockUnpaved) }) { Text("APPLY") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("CANCEL") }
         },
     )
 }

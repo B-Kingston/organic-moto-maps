@@ -1,5 +1,6 @@
 package com.organicmoto.maps.map
 
+import com.organicmoto.maps.ui.dismissMediaStartupPrompt
 import android.Manifest
 import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.test.SemanticsMatcher
@@ -36,6 +37,9 @@ class CarouselMapConsistencyTest {
 
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
+
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
 
     @Test(timeout = 300_000)
     fun selectedCardAndFocusedMapRouteStayInSync() {

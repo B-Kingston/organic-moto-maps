@@ -27,7 +27,11 @@ object FailureRecorder {
             append("{\n")
             append("  \"seed\": ").append(seed).append(",\n")
             append("  \"steps\": ").append(steps).append(",\n")
-            append("  \"actionSequence\": ").append(actions.map { it.toString() }.joinToJson()).append(",\n")
+            // Written with the shared codec so a report is machine-readable
+            // rather than only human-readable Kotlin toString text.
+            append("  \"actionSequence\": ")
+                .append(actions.joinToString(", ", "[", "]") { quote(FuzzActionCodec.encode(it)) })
+                .append(",\n")
             append("  \"stateSequence\": ").append(states.map { it.toString() }.joinToJson()).append(",\n")
             append("  \"androidApi\": ").append(android.os.Build.VERSION.SDK_INT).append(",\n")
             append("  \"generation\": ").append(states.lastOrNull()?.generation ?: 0).append(",\n")
@@ -37,6 +41,9 @@ object FailureRecorder {
             append("}\n")
         }
         File(directory, "failure.json").writeText(record)
+        // A ready-to-replay seed alongside the report: drop this into
+        // app/src/androidTest/assets/fuzz_seeds/ and pass it to FuzzReplayTest.
+        File(directory, "replay.json").writeText(FuzzActionCodec.encodeAll(actions))
         File(directory, "semantics.txt").writeText(extractor.semanticsDump())
         val screenshot = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
         FileOutputStream(File(directory, "screenshot.png")).use { output ->

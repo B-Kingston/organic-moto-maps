@@ -33,6 +33,9 @@ class SavedRouteFlowTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
+
     @Before
     fun resetSavedRoutes() {
         composeRule.activity.deleteDatabase(SAVED_ROUTES_DB_NAME)

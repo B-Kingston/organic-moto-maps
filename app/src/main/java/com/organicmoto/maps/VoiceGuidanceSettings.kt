@@ -1,9 +1,13 @@
 package com.organicmoto.maps
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeightIn
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -24,7 +28,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.heightIn
 import com.organicmoto.maps.routing.navigation.VoiceDistanceUnit
 import com.organicmoto.maps.routing.navigation.VoiceGuidanceSettings
 
@@ -52,7 +55,7 @@ internal fun VoiceGuidanceSettingsDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Voice guidance") },
+        title = { SettingsScreenHeader(title = "Voice guidance", onBack = onDismiss) },
         text = {
             Column(
                 Modifier
@@ -75,9 +78,11 @@ internal fun VoiceGuidanceSettingsDialog(
                     Switch(
                         checked = draftEnabled,
                         onCheckedChange = { draftEnabled = it },
-                        modifier = Modifier.semantics {
-                            contentDescription = "Spoken turn guidance"
-                        },
+                        modifier = Modifier
+                            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                            .semantics {
+                                contentDescription = "Spoken turn guidance"
+                            },
                     )
                 }
                 Text(
@@ -98,17 +103,22 @@ internal fun VoiceGuidanceSettingsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF8A000000),
                 )
-                Slider(
-                    value = draftInterval,
-                    onValueChange = { draftInterval = it },
-                    valueRange = unit.minimumInterval.toFloat()..unit.maximumInterval.toFloat(),
-                    steps = intervalSteps,
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .semantics {
+                        .requiredHeightIn(min = 48.dp)
+                        .semantics(mergeDescendants = true) {
                             contentDescription = "Announcement interval every $intervalLabel"
                         },
-                )
+                ) {
+                    Slider(
+                        value = draftInterval,
+                        onValueChange = { draftInterval = it },
+                        valueRange = unit.minimumInterval.toFloat()..unit.maximumInterval.toFloat(),
+                        steps = intervalSteps,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 Text("Preview the next $previewCount turns", fontWeight = FontWeight.Medium)
                 Text(
@@ -116,17 +126,22 @@ internal fun VoiceGuidanceSettingsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF8A000000),
                 )
-                Slider(
-                    value = draftPreviewCount,
-                    onValueChange = { draftPreviewCount = it },
-                    valueRange = 1f..5f,
-                    steps = 3,
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .semantics {
+                        .requiredHeightIn(min = 48.dp)
+                        .semantics(mergeDescendants = true) {
                             contentDescription = "Preview next $previewCount maneuvers"
                         },
-                )
+                ) {
+                    Slider(
+                        value = draftPreviewCount,
+                        onValueChange = { draftPreviewCount = it },
+                        valueRange = 1f..5f,
+                        steps = 3,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         },
         confirmButton = {
@@ -141,9 +156,6 @@ internal fun VoiceGuidanceSettingsDialog(
                     )
                 },
             ) { Text("APPLY") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("CANCEL") }
         },
     )
 }

@@ -4,10 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PointF
-import android.graphics.RadialGradient
+import android.graphics.LinearGradient
 import android.graphics.Shader
-import kotlin.math.hypot
 import kotlin.math.roundToInt
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.style.expressions.Expression
@@ -26,34 +24,17 @@ internal const val NAV_POSITION_BEARING_PROPERTY = "nav_bearing"
 /** Follow-mode marker image: the ordinary centre-on-me dot, unchanged. */
 internal const val NAV_FOLLOW_IMAGE_ID = "nav-position-arrow"
 
-/**
- * Guidance rider image: a freestanding faceted chevron that points along the
- * rider's course. It replaces the disc-plus-arrow glyph for navigation only;
- * ordinary location tracking keeps the [NAV_FOLLOW_IMAGE_ID] look.
- */
+/** Guidance rider image: the supplied rounded arrow with a raised centre ridge. */
 internal const val NAV_CHEVRON_IMAGE_ID = "nav-guidance-chevron"
+/** Grayscale counterpart used by the black-and-white ride map. */
+internal const val NAV_CHEVRON_MONO_IMAGE_ID = "nav-guidance-chevron-mono"
 
-/**
- * Guidance marker footprint, proportioned from the navigation reference
- * (104 x 96) and expressed in dp so every screen density gets the same
- * physical marker size.
- */
-internal const val NAV_CHEVRON_WIDTH_DP = 44f
-internal const val NAV_CHEVRON_HEIGHT_DP = 41f
+/** Arrow footprint in dp, including the side walls but not the shadow. */
+internal const val NAV_CHEVRON_WIDTH_DP = 38f
+internal const val NAV_CHEVRON_HEIGHT_DP = 36f
 
 /** Transparent space around the chevron that carries its contact shadow. */
-private const val CHEVRON_PADDING_DP = 3f
-
-/** Where the centre notch rises from the swept wing line. */
-private const val CHEVRON_NOTCH_FRACTION = 0.52f
-
-/** Narrow lower bevel facets along the bottom edge of each face. */
-private const val CHEVRON_BEVEL_FRACTION = 0.10f
-
-private val CHEVRON_LEFT_FACE_COLOR = 0xFF29B6F6.toInt()
-private val CHEVRON_RIGHT_FACE_COLOR = 0xFF1D4ED8.toInt()
-private val CHEVRON_BEVEL_COLOR = 0xFF0B2B6B.toInt()
-private const val CHEVRON_SHADOW_COLOR = 0x40000000
+private const val CHEVRON_PADDING_DP = 4f
 
 /**
  * The guidance position marker: one GeoJSON point source plus a symbol layer
@@ -72,7 +53,7 @@ fun MapLibreMap.updateNavPosition(lat: Double, lon: Double, bearingDeg: Double) 
 }
 
 /**
- * Guidance variant of [updateNavPosition]: the faceted chevron rider marker,
+ * Guidance variant of [updateNavPosition]: the raised arrow rider marker,
  * drawn at the given display [density] so its physical size is screen
  * independent.
  */
@@ -81,8 +62,16 @@ fun MapLibreMap.updateGuidancePosition(
     lon: Double,
     bearingDeg: Double,
     density: Float,
+    monochrome: Boolean = false,
 ) {
-    updateNavMarker(lat, lon, bearingDeg, guidance = true, density = density)
+    updateNavMarker(
+        lat,
+        lon,
+        bearingDeg,
+        guidance = true,
+        density = density,
+        monochrome = monochrome,
+    )
 }
 
 private fun MapLibreMap.updateNavMarker(
@@ -91,9 +80,14 @@ private fun MapLibreMap.updateNavMarker(
     bearingDeg: Double,
     guidance: Boolean,
     density: Float,
+    monochrome: Boolean = false,
 ) {
     if (lat.isNaN() || lon.isNaN()) return
-    val imageId = if (guidance) NAV_CHEVRON_IMAGE_ID else NAV_FOLLOW_IMAGE_ID
+    val imageId = when {
+        !guidance -> NAV_FOLLOW_IMAGE_ID
+        monochrome -> NAV_CHEVRON_MONO_IMAGE_ID
+        else -> NAV_CHEVRON_IMAGE_ID
+    }
     getStyle { style ->
         val feature = Feature.fromGeometry(Point.fromLngLat(lon, lat)).apply {
             addNumberProperty(
@@ -110,7 +104,11 @@ private fun MapLibreMap.updateNavMarker(
         if (style.getImage(imageId) == null) {
             style.addImage(
                 imageId,
-                if (guidance) buildGuidanceChevronBitmap(density) else buildFollowMarkerBitmap(),
+                if (guidance) {
+                    buildGuidanceChevronBitmap(density, monochrome)
+                } else {
+                    buildFollowMarkerBitmap()
+                },
             )
         }
         val layer = style.getLayerAs<SymbolLayer>(NAV_POSITION_LAYER_ID)
@@ -157,123 +155,90 @@ internal fun navPositionProperties(
     PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
 )
 
-/** Draws the faceted guidance chevron at [density] scale. */
-internal fun buildGuidanceChevronBitmap(density: Float): Bitmap {
+/** Draws the raised arrow at [density] scale. */
+internal fun buildGuidanceChevronBitmap(density: Float): Bitmap =
+    buildGuidanceChevronBitmap(density, monochrome = false)
+
+/** Builds the approved 2.5D artwork. The viewport alignment preserves its depth. */
+internal fun buildGuidanceChevronBitmap(density: Float, monochrome: Boolean): Bitmap {
     val scale = if (density.isFinite() && density > 0f) density else 1f
-    val padding = CHEVRON_PADDING_DP * scale
-    val contentWidth = NAV_CHEVRON_WIDTH_DP * scale
-    val contentHeight = NAV_CHEVRON_HEIGHT_DP * scale
-    val width = (contentWidth + padding * 2f).roundToInt().coerceAtLeast(1)
-    val height = (contentHeight + padding * 2f).roundToInt().coerceAtLeast(1)
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    // MapLibre derives an added image's pixel ratio from its bitmap density,
-    // so tagging the bitmap keeps the marker's physical (dp) size constant.
+    val width = ((NAV_CHEVRON_WIDTH_DP + CHEVRON_PADDING_DP * 2f) * scale).roundToInt()
+    val height = ((NAV_CHEVRON_HEIGHT_DP + CHEVRON_PADDING_DP * 2f) * scale).roundToInt()
+    val bitmap = Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
     bitmap.density = (scale * 160f).roundToInt().coerceAtLeast(1)
     val canvas = Canvas(bitmap)
-    val left = padding
-    val top = padding
-    val right = width - padding
-    val bottom = height - padding
-    val centerX = (left + right) / 2f
-    val notchY = top + contentHeight * CHEVRON_NOTCH_FRACTION
+    val unitX = NAV_CHEVRON_WIDTH_DP / 18.34f * scale
+    // Bake the approved oblique view into the icon; do not pitch it a second time.
+    val unitY = unitX * 0.7667f
+    canvas.translate(CHEVRON_PADDING_DP * scale - 2.83f * unitX, CHEVRON_PADDING_DP * scale - 2f * unitY)
+    canvas.scale(unitX, unitY)
 
-    drawContactShadow(canvas, centerX, top, contentWidth, contentHeight)
-
-    val apex = PointF(centerX, top)
-    val leftWing = PointF(left, bottom)
-    val notch = PointF(centerX, notchY)
-    val rightWing = PointF(right, bottom)
-
-    drawChevronFace(canvas, apex, leftWing, notch, CHEVRON_LEFT_FACE_COLOR, bottom - top)
-    drawChevronFace(canvas, apex, rightWing, notch, CHEVRON_RIGHT_FACE_COLOR, bottom - top)
-    return bitmap
-}
-
-/** Soft radial contact shadow under the chevron; fades out inside the bitmap. */
-private fun drawContactShadow(
-    canvas: Canvas,
-    centerX: Float,
-    top: Float,
-    contentWidth: Float,
-    contentHeight: Float,
-) {
-    val centerY = top + contentHeight * 0.62f
-    val radius = contentWidth * 0.58f
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        shader = RadialGradient(
-            centerX,
-            centerY,
-            radius,
-            intArrayOf(CHEVRON_SHADOW_COLOR, 0x00000000),
-            floatArrayOf(0f, 1f),
-            Shader.TileMode.CLAMP,
-        )
-    }
-    canvas.drawCircle(centerX, centerY, radius, paint)
-}
-
-/**
- * One folded face of the chevron plus its narrow lower bevel. The bevel strip
- * is clipped to the face so the wing tip stays sharp.
- */
-private fun drawChevronFace(
-    canvas: Canvas,
-    apex: PointF,
-    wing: PointF,
-    notch: PointF,
-    faceColor: Int,
-    contentHeight: Float,
-) {
-    val face = Path().apply {
-        moveTo(apex.x, apex.y)
-        lineTo(wing.x, wing.y)
-        lineTo(notch.x, notch.y)
+    // Original map-arrow-up SVG path, including its rounded corners and rear notch.
+    val arrow = Path().apply {
+        moveTo(3.16496f, 19.5025f)
+        lineTo(10.5275f, 2.99281f)
+        cubicTo(11.1178f, 1.66906f, 12.8822f, 1.66906f, 13.4725f, 2.99281f)
+        lineTo(20.835f, 19.5025f)
+        cubicTo(21.5021f, 20.9984f, 20.0209f, 22.5499f, 18.6331f, 21.809f)
+        lineTo(12.7294f, 18.657f)
+        cubicTo(12.2702f, 18.4118f, 11.7298f, 18.4118f, 11.2706f, 18.657f)
+        lineTo(5.36689f, 21.809f)
+        cubicTo(3.97914f, 22.5499f, 2.49789f, 20.9984f, 3.16496f, 19.5025f)
         close()
     }
-    canvas.drawPath(face, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = faceColor })
-
-    val offset = bevelOffset(wing, notch, apex, contentHeight)
-    val bevel = Path().apply {
-        moveTo(wing.x, wing.y)
-        lineTo(notch.x, notch.y)
-        lineTo(notch.x + offset.first, notch.y + offset.second)
-        lineTo(wing.x + offset.first, wing.y + offset.second)
-        close()
-    }
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeJoin = Paint.Join.ROUND }
     canvas.save()
-    canvas.clipPath(face)
-    canvas.drawPath(
-        bevel,
-        Paint(Paint.ANTI_ALIAS_FLAG).apply { color = CHEVRON_BEVEL_COLOR },
-    )
+    canvas.translate(0f, 1.7f)
+    paint.color = if (monochrome) 0xFF535353.toInt() else 0xFF092D68.toInt()
+    paint.setShadowLayer(0.9f, 0f, 0.7f, if (monochrome) 0xD9000000.toInt() else 0x73081323)
+    canvas.drawPath(arrow, paint)
+    paint.clearShadowLayer()
+    paint.style = Paint.Style.STROKE
+    paint.strokeWidth = if (monochrome) 1f else 0.16f
+    paint.color = if (monochrome) 0xFF101010.toInt() else 0xFF061F49.toInt()
+    canvas.drawPath(arrow, paint)
     canvas.restore()
-}
+    if (monochrome) canvas.drawPath(arrow, paint)
 
-/**
- * Perpendicular offset from the wing -> notch edge toward the face interior,
- * so the drawn strip is a parallel bevel inside the fold.
- */
-private fun bevelOffset(
-    wing: PointF,
-    notch: PointF,
-    apex: PointF,
-    contentHeight: Float,
-): Pair<Float, Float> {
-    val edgeX = notch.x - wing.x
-    val edgeY = notch.y - wing.y
-    val length = hypot(edgeX, edgeY)
-    if (length <= 0f) return 0f to 0f
-    var normalX = edgeY / length
-    var normalY = -edgeX / length
-    val midX = (wing.x + notch.x) / 2f
-    val midY = (wing.y + notch.y) / 2f
-    val towardInterior = (apex.x - midX) * normalX + (apex.y - midY) * normalY
-    if (towardInterior < 0f) {
-        normalX = -normalX
-        normalY = -normalY
+    paint.style = Paint.Style.FILL
+    paint.shader = LinearGradient(
+        3f, 2f, 21f, 22f,
+        if (monochrome) intArrayOf(0xFFFFFFFF.toInt(), 0xFFBCBCBC.toInt())
+        else intArrayOf(0xFF7EE4FF.toInt(), 0xFF28B8F4.toInt(), 0xFF1584DB.toInt()),
+        if (monochrome) null else floatArrayOf(0f, 0.5f, 1f),
+        Shader.TileMode.CLAMP,
+    )
+    canvas.drawPath(arrow, paint)
+    paint.shader = null
+    canvas.save()
+    canvas.clipPath(arrow)
+    val rightFace = Path().apply {
+        moveTo(12f, 1f)
+        lineTo(22f, 23f)
+        lineTo(12f, 18.46f)
+        close()
     }
-    val thickness = contentHeight * CHEVRON_BEVEL_FRACTION
-    return normalX * thickness to normalY * thickness
+    paint.color = if (monochrome) 0xFF959595.toInt() else 0xFF1965CF.toInt()
+    canvas.drawPath(rightFace, paint)
+    if (!monochrome) {
+        rightFace.rewind()
+        rightFace.moveTo(12f, 2.2f)
+        rightFace.lineTo(12f, 18.46f)
+        rightFace.lineTo(3f, 22f)
+        rightFace.close()
+        paint.color = 0x4053CDFF
+        canvas.drawPath(rightFace, paint)
+    }
+    canvas.restore()
+    paint.style = Paint.Style.STROKE
+    paint.strokeWidth = 0.16f
+    paint.color = if (monochrome) 0xFFF6F6F6.toInt() else 0xFF97E6FF.toInt()
+    canvas.drawPath(arrow, paint)
+    paint.strokeWidth = 0.18f
+    paint.strokeCap = Paint.Cap.ROUND
+    paint.color = if (monochrome) 0xFFFFFFFF.toInt() else 0xFFC4F5FF.toInt()
+    canvas.drawLine(12f, 2.55f, 12f, 18.46f, paint)
+    return bitmap
 }
 
 /**

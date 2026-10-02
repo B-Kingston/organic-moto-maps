@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application>
+    <!-- Debug builds may talk to a plain-HTTP LAN dev server when the user
+         explicitly opts in (Maps → Allow insecure HTTP, private addresses
+         only). The release manifest never enables cleartext. -->
+    <application android:usesCleartextTraffic="true">
         <receiver
             android:name=".VisualRouteControlReceiver"
             android:exported="true">
@@ -8,6 +11,17 @@
                 <action android:name="com.organicmoto.maps.DEBUG_VISUAL_ROUTE_FIX" />
                 <action android:name="com.organicmoto.maps.DEBUG_VISUAL_CAMERA" />
                 <action android:name="com.organicmoto.maps.DEBUG_VISUAL_MAP_PROBE" />
+                <action android:name="com.organicmoto.maps.DEBUG_MAP_PERF_SWEEP" />
+                <action android:name="com.organicmoto.maps.DEBUG_VISUAL_MAPS_STATE" />
+            </intent-filter>
+        </receiver>
+        <!-- Debug-only synthetic media session used by tools/test/visual.py to
+             screenshot the media control center without a real media app. -->
+        <receiver
+            android:name=".media.VisualMediaSessionReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.organicmoto.maps.DEBUG_VISUAL_MEDIA_SESSION" />
             </intent-filter>
         </receiver>
     </application>

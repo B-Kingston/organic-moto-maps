@@ -9,6 +9,15 @@
 
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Media control center: adjust the local music stream and (with the
+         user-granted notification listener) query active media sessions.
+         No privileged MEDIA_CONTENT_CONTROL, no Spotify SDK, no network. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Regional package downloads only (Maps settings → map server). Routing,
+         offline place search, and map rendering never touch the network;
+         OfflineGuaranteeTest pins that download-only boundary to
+         com.organicmoto.maps.region.net. Release builds require HTTPS. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"
@@ -26,6 +35,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Minimal notification listener: exists only to read active media
+             sessions for the ride media control center. It overrides no
+             notification callback, so notification content is never touched.
+             The system binds it only when the user enables access. -->
+        <service
+            android:name=".media.MediaNotificationListenerService"
+            android:exported="true"
+            android:label="curveMaps media controls"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

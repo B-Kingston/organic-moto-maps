@@ -28,6 +28,9 @@ class ComplexityDialTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
+
     @Test(timeout = 300_000)
     fun dialStopsAtZeroCountsClicksAndSurvivesRecreation() {
         // Positive control for both rotation directions: if a synthesized

@@ -3,11 +3,18 @@ package com.organicmoto.maps
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
@@ -33,14 +40,22 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.graphhopper.util.Instruction
+import com.organicmoto.maps.media.GloveGap
+import com.organicmoto.maps.media.GloveTarget
+import com.organicmoto.maps.media.MediaNoteIcon
+import com.organicmoto.maps.media.MediaPanelJoin
+import com.organicmoto.maps.routing.navigation.LaneArrow
+import com.organicmoto.maps.routing.navigation.LaneGuidance
 import com.organicmoto.maps.routing.navigation.NavigationSnapshot
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -57,15 +72,9 @@ import kotlin.math.sqrt
 fun NavigationHud(
     snapshot: NavigationSnapshot,
     modifier: Modifier = Modifier,
-    voiceGuidanceEnabled: Boolean = true,
-    voiceGuidanceReady: Boolean? = null,
-    voiceGuidanceStatusDescription: String? = null,
-    onVoiceSettings: () -> Unit = {},
-    darkRideMapEnabled: Boolean = false,
-    onDarkRideMapToggle: () -> Unit = {},
 ) {
     Surface(
-        color = Color(0xFF1C1C1E),
+        color = RideSurfaceColor,
         shape = RoundedCornerShape(18.dp),
         shadowElevation = 6.dp,
         modifier = modifier
@@ -81,145 +90,280 @@ fun NavigationHud(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.weight(1f, fill = false),
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier.size(width = 44.dp, height = 44.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Box(
-                        modifier = Modifier.size(width = 44.dp, height = 44.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
-                            drawTurnArrow(snapshot.turn, size.width, size.height)
-                        }
-                        snapshot.turn?.roundaboutExitNumber?.takeIf { it > 0 }?.let { exitNumber ->
-                            Text(
-                                text = exitNumber.toString(),
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF249CF2))
-                                    .padding(horizontal = 3.dp, vertical = 1.dp),
-                            )
-                        }
+                    Canvas(Modifier.size(width = 44.dp, height = 44.dp)) {
+                        drawTurnArrow(snapshot.turn, size.width, size.height)
                     }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = snapshot.turn?.let { NavigationHudFormat.distanceText(it.distanceM) } ?: "—",
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White,
-                    )
-                    if (!snapshot.turn?.streetName.isNullOrBlank()) {
+                    snapshot.turn?.roundaboutExitNumber?.takeIf { it > 0 }?.let { exitNumber ->
                         Text(
-                            text = snapshot.turn!!.streetName,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xB3FFFFFF),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            text = exitNumber.toString(),
+                            color = RideSurfaceColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                                .padding(horizontal = 3.dp, vertical = 1.dp),
                         )
                     }
                 }
-                Spacer(Modifier.width(4.dp))
-                IconButton(
-                    onClick = onVoiceSettings,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .semantics {
-                            contentDescription = NavigationHudFormat.voiceSettingsDescription(
-                                enabled = voiceGuidanceEnabled,
-                                statusDescription = voiceGuidanceStatusDescription,
-                            )
-                        },
-                ) {
-                    VoiceGuidanceIcon(enabled = voiceGuidanceEnabled && (voiceGuidanceReady ?: true))
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = snapshot.turn?.let { NavigationHudFormat.distanceText(it.distanceM) } ?: "—",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                )
+                if (!snapshot.turn?.streetName.isNullOrBlank()) {
+                    Text(
+                        text = snapshot.turn!!.streetName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = RideMutedColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-                IconButton(
-                    onClick = onDarkRideMapToggle,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .semantics {
-                            contentDescription = NavigationHudFormat.darkRideMapDescription(
-                                darkRideMapEnabled,
-                            )
-                            stateDescription = if (darkRideMapEnabled) "on" else "off"
-                        },
-                ) {
-                    DarkRideMapIcon(enabled = darkRideMapEnabled)
+                snapshot.turn?.lanes?.let { lanes ->
+                    Spacer(Modifier.height(8.dp))
+                    LaneGuidanceRow(lanes)
                 }
             }
         }
     }
 }
 
+/** Shared dark ride surface: directions HUD, data bar, and media panel. */
+internal val RideSurfaceColor = Color(0xFF1C1C1E)
+
+/**
+ * Secondary content on the dark ride surfaces and inside the white map pills:
+ * metric labels, the street name, and the unknown pace delta. The ride chrome
+ * uses exactly one white and this one near-black ([RideSurfaceColor]) — state
+ * is carried by glyph and text, never hue.
+ */
+internal val RideMutedColor = Color(0xB3FFFFFF)
+
+/**
+ * Rounding of the data bar's two top corners. The media panel fuses into this
+ * edge (see [com.organicmoto.maps.media.MediaPanelJoin]), and mirroring the
+ * same radius is what makes the two surfaces read as one continuous shape
+ * rather than two stacked cards with a notch between them.
+ */
+internal val DataBarTopCorner: Dp = 24.dp
+
+/**
+ * Data bar leading content padding, so the media opener's left edge sits this
+ * far from the screen edge. The media panel is inset by exactly the same amount
+ * so its left edge is flush with the opener it grows out of.
+ */
+internal val DataBarLeadingPadding: Dp = 4.dp
+
+/** Data bar trailing content padding. */
+internal val DataBarTrailingPadding: Dp = 12.dp
+
+/**
+ * Base vertical inset for ride-bar content, excluding the system navigation
+ * inset. Represents the bar's top and bottom gaps around the metric row.
+ */
+internal val DataBarVerticalPadding: Dp = 6.dp
+
 /**
  * Bottom-of-screen guidance bar that replaces the planner controls in ride
- * mode: live speed, ETA, remaining distance, and pace delta on the left, and
- * a red END button on the right that cancels navigation. Dark blue so the
- * white metric text stays readable over the map.
+ * mode. It shares the directions HUD's surface colour ([RideSurfaceColor]) and
+ * holds a balanced four-metric grid — speed, time, distance, pace — with the
+ * far-left media control opener and a distinct END button on the right.
+ *
+ * The bar adapts its rows instead of squeezing the metrics: on a wide screen
+ * everything sits on one row, while on a narrow or large-font screen it uses
+ * two metric rows plus a media/END row so every value stays fully readable at
+ * its minimum font size (never a 10 sp ellipsis). All controls keep
+ * glove-sized targets ([GloveTarget]) and visible separation between them.
+ *
+ * The bar carries the ride chrome's single palette: white content on the dark
+ * surface, with muted white for labels. [monochrome] is the B&W ride mode and
+ * greys the one remaining accent, the END button. The bar pads itself for the
+ * system navigation bar so its controls stay reachable and unclipped on
+ * gesture devices and under large font scales.
  */
 @Composable
 fun NavigationDataBar(
     snapshot: NavigationSnapshot,
     onEnd: () -> Unit,
     modifier: Modifier = Modifier,
+    mediaPanelOpen: Boolean = false,
+    onMediaToggle: () -> Unit = {},
+    monochrome: Boolean = false,
 ) {
-    Surface(
-        color = Color(0xFF0D2137),
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        shadowElevation = 6.dp,
-        modifier = modifier
-            .fillMaxWidth()
-            .semantics {
-                contentDescription = "Ride data: " +
-                    "${NavigationHudFormat.speedKmh(snapshot.speedMps)} kilometres per hour, " +
-                    "${NavigationHudFormat.etaText(snapshot.remainingTimeS)} remaining, " +
-                    "${NavigationHudFormat.distanceText(snapshot.remainingDistanceM)} left, " +
-                    NavigationHudFormat.deltaDescription(snapshot.paceDeltaS)
-            },
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
+    val speedValue = NavigationHudFormat.speedKmh(snapshot.speedMps)
+    val etaValue = NavigationHudFormat.etaCompactText(snapshot.remainingTimeS)
+    val distanceValue = NavigationHudFormat.distanceText(snapshot.remainingDistanceM)
+    val paceValue = NavigationHudFormat.deltaText(snapshot.paceDeltaS)
+    val density = LocalDensity.current
+    val navigationInset = with(density) {
+        WindowInsets.navigationBars.getBottom(this).toDp()
+    }
+    // The bar draws behind the system navigation area. Match the content gap
+    // above the row to its complete gap below it (the base vertical padding
+    // plus that system inset).
+    // The media-panel join still fuses over its independent base padding.
+    val topRowPadding = DataBarVerticalPadding + navigationInset
+
+    BoxWithConstraints(modifier) {
+        val fontScale = LocalDensity.current.fontScale
+        val singleRow = NavigationHudFormat.dataBarLayout(
+            availableWidthDp = maxWidth.value,
+            fontScale = fontScale,
+            metricValues = listOf(speedValue, etaValue, distanceValue, paceValue),
+        ) == DataBarLayout.SINGLE_ROW
+        Surface(
+            color = RideSurfaceColor,
+            // The panel supplies the top rounding when open; the join itself
+            // must be square or its corners expose little wedges of map.
+            shape = RoundedCornerShape(
+                topStart = MediaPanelJoin.barTopCorner(mediaPanelOpen),
+                topEnd = MediaPanelJoin.barTopCorner(mediaPanelOpen),
+            ),
+            // The bar's own shadow would fall across the panel's bottom edge and
+            // draw the very seam the join removes; the panel supplies the
+            // elevation for the fused pair.
+            shadowElevation = MediaPanelJoin.barShadow(mediaPanelOpen),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .semantics {
+                    contentDescription = "Ride data: " +
+                        "${NavigationHudFormat.speedKmh(snapshot.speedMps)} kilometres per hour, " +
+                        "${NavigationHudFormat.etaText(snapshot.remainingTimeS)} remaining, " +
+                        "${NavigationHudFormat.distanceText(snapshot.remainingDistanceM)} left, " +
+                        NavigationHudFormat.deltaDescription(snapshot.paceDeltaS)
+                },
         ) {
-            DeltaCell(
-                deltaS = snapshot.paceDeltaS,
-                modifier = Modifier.weight(1f),
-            )
-            MetricCell(
-                value = NavigationHudFormat.speedKmh(snapshot.speedMps),
-                label = "km/h",
-                modifier = Modifier.weight(1f),
-            )
-            MetricCell(
-                value = NavigationHudFormat.etaText(snapshot.remainingTimeS),
-                label = "remaining",
-                modifier = Modifier.weight(1f),
-            )
-            MetricCell(
-                value = NavigationHudFormat.distanceText(snapshot.remainingDistanceM),
-                label = "left",
-                modifier = Modifier.weight(1.2f),
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = onEnd,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFD32F2F),
-                    contentColor = Color.White,
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.semantics { contentDescription = "End navigation" },
-            ) {
-                Text("END", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            if (singleRow) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(
+                        start = DataBarLeadingPadding,
+                        end = DataBarTrailingPadding,
+                        top = topRowPadding,
+                        bottom = DataBarVerticalPadding,
+                    ),
+                ) {
+                    MediaOpenButton(open = mediaPanelOpen, onClick = onMediaToggle)
+                    MetricCell(
+                        value = speedValue,
+                        label = "km/h",
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricCell(
+                        value = etaValue,
+                        label = "remaining",
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricCell(
+                        value = distanceValue,
+                        label = "left",
+                        modifier = Modifier.weight(1f),
+                    )
+                    DeltaCell(
+                        deltaS = snapshot.paceDeltaS,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    EndRideButton(onEnd = onEnd, monochrome = monochrome)
+                }
+            } else {
+                // Narrow/large-font: a true two-metric-wide grid with the
+                // media and END controls on their own full-width row.
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(
+                            start = DataBarLeadingPadding,
+                            end = DataBarTrailingPadding,
+                            top = topRowPadding,
+                            bottom = DataBarVerticalPadding,
+                        ),
+                ) {
+                    Row(Modifier.fillMaxWidth()) {
+                        MetricCell(
+                            value = speedValue,
+                            label = "km/h",
+                            modifier = Modifier.weight(1f),
+                        )
+                        MetricCell(
+                            value = etaValue,
+                            label = "remaining",
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        MetricCell(
+                            value = distanceValue,
+                            label = "left",
+                            modifier = Modifier.weight(1f),
+                        )
+                        DeltaCell(
+                            deltaS = snapshot.paceDeltaS,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Spacer(Modifier.height(GloveGap))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        MediaOpenButton(open = mediaPanelOpen, onClick = onMediaToggle)
+                        Spacer(Modifier.weight(1f))
+                        EndRideButton(onEnd = onEnd, monochrome = monochrome)
+                    }
+                }
             }
         }
+    }
+}
+
+/** Glove-sized media opener: far-left, visually separated from the metrics. */
+@Composable
+private fun MediaOpenButton(open: Boolean, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(GloveTarget)
+            .semantics {
+                contentDescription = "Media controls"
+                stateDescription = if (open) "open" else "closed"
+            },
+    ) {
+        MediaNoteIcon(color = Color.White)
+    }
+}
+
+/** Distinct END, on the right, with the same glove-sized target floor. */
+@Composable
+private fun EndRideButton(onEnd: () -> Unit, monochrome: Boolean) {
+    Button(
+        onClick = onEnd,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (monochrome) Color(0xFFE5E5EA) else Color(0xFFD32F2F),
+            contentColor = if (monochrome) RideSurfaceColor else Color.White,
+        ),
+        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+        modifier = Modifier
+            .heightIn(min = GloveTarget)
+            .defaultMinSize(minWidth = GloveTarget)
+            .semantics { contentDescription = "End navigation" },
+    ) {
+        Text("END", fontSize = 15.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -285,44 +429,84 @@ internal fun DarkRideMapIcon(enabled: Boolean, color: Color = Color.White) {
 
 
 
+/**
+ * One balanced data-bar cell. The value font shrinks to the available width
+ * (and the active font scale) but never below [NavigationHudFormat.MIN_METRIC_SP],
+ * so a compact value such as "1h 19m" cannot collapse into an ellipsis; the
+ * two-row bar gives the cells the extra width when the screen is narrow.
+ */
 @Composable
 private fun MetricCell(value: String, label: String, modifier: Modifier = Modifier) {
-    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = value, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-        Text(text = label, style = MaterialTheme.typography.labelSmall, color = Color(0xB3FFFFFF))
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        val fontScale = LocalDensity.current.fontScale
+        val characters = value.length.coerceAtLeast(1)
+        val fitted = (maxWidth.value / (characters * 0.62f)) / fontScale
+        val size = fitted.coerceIn(NavigationHudFormat.MIN_METRIC_SP, NavigationHudFormat.MAX_METRIC_SP).sp
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = value,
+                fontSize = size,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = RideMutedColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
 /**
- * Motorsport-style live pace delta: green when ahead of the plan, red when
- * behind, dashes until the engine has measured enough movement. The value is
- * a smoothed total (not per-second jitter) so it reads like a timing screen.
+ * Live pace delta: white when the engine has measured enough movement, muted
+ * until then. The sign and the gained/lost label carry the direction, so the
+ * cell needs no second hue — the ride chrome uses one white and one near-black
+ * ([RideSurfaceColor]) everywhere.
  */
 @Composable
-private fun DeltaCell(deltaS: Double, modifier: Modifier = Modifier) {
+private fun DeltaCell(
+    deltaS: Double,
+    modifier: Modifier = Modifier,
+) {
     val known = !deltaS.isNaN()
-    val color = when {
-        !known -> Color(0xB3FFFFFF)
-        deltaS <= 0.0 -> Color(0xFF3DDC84) // ahead: green
-        else -> Color(0xFFFF5252)          // behind: red
-    }
-    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = NavigationHudFormat.deltaText(deltaS),
-            fontSize = 20.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = color,
-            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-        )
-        Text(
-            text = when {
-                !known -> "pace"
-                deltaS > 0.0 -> "lost"
-                else -> "gained"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = Color(0xB3FFFFFF),
-        )
+    val color = if (known) Color.White else RideMutedColor
+    val value = NavigationHudFormat.deltaText(deltaS)
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        val fontScale = LocalDensity.current.fontScale
+        val characters = value.length.coerceAtLeast(1)
+        val fitted = (maxWidth.value / (characters * 0.72f)) / fontScale
+        val size = fitted.coerceIn(NavigationHudFormat.MIN_METRIC_SP, NavigationHudFormat.MAX_METRIC_SP).sp
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = value,
+                fontSize = size,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = when {
+                    !known -> "pace"
+                    deltaS > 0.0 -> "lost"
+                    else -> "gained"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = RideMutedColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -425,6 +609,112 @@ internal fun DrawScope.drawTurnArrow(turn: NavigationSnapshot.TurnInfo?, w: Floa
         lineTo(baseX + uy * wing, baseY - ux * wing)
     }
     drawPath(head, paint, style = stroke)
+}
+
+/**
+ * One cell per lane of the road being left, left to right as the rider sees
+ * them, divided by dashed lane markings. The recommended lane(s) draw their
+ * arrows in full white with a bar beneath; the others stay dim. Count-only
+ * lanes (no painted arrows in OSM) show the turn arrow in the suggested lane
+ * only. White on the ride surface only, so it reads the same in B&W mode.
+ */
+@Composable
+internal fun LaneGuidanceRow(lanes: LaneGuidance, modifier: Modifier = Modifier) {
+    val cellWidth = if (lanes.lanes.size > 8) 22.dp else LaneCellWidth
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier.semantics {
+            contentDescription = "Lane guidance: " + lanes.description()
+            this[RecommendedLanesKey] = NavigationHudFormat.recommendedLanesValue(lanes)
+        },
+    ) {
+        lanes.lanes.forEachIndexed { index, lane ->
+            if (index > 0) {
+                Canvas(Modifier.size(width = 2.dp, height = LaneCellHeight)) {
+                    val dash = size.height / 7f
+                    var y = 0f
+                    while (y < size.height) {
+                        drawLine(
+                            RideMutedColor,
+                            Offset(size.width / 2f, y),
+                            Offset(size.width / 2f, (y + dash).coerceAtMost(size.height)),
+                            strokeWidth = size.width,
+                        )
+                        y += dash * 2f
+                    }
+                }
+            }
+            Canvas(Modifier.size(width = cellWidth, height = LaneCellHeight)) {
+                val color = if (lane.recommended) Color.White else LaneDimColor
+                drawLaneArrows(lane.arrows, lanes.leftHandTraffic, size.width, size.height * 0.84f, color)
+                if (lane.recommended) {
+                    drawLine(
+                        Color.White,
+                        Offset(size.width * 0.18f, size.height * 0.96f),
+                        Offset(size.width * 0.82f, size.height * 0.96f),
+                        strokeWidth = size.height * 0.07f,
+                        cap = StrokeCap.Round,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val LaneCellWidth: Dp = 26.dp
+private val LaneCellHeight: Dp = 32.dp
+
+/** Non-recommended lane arrows: visible as context, clearly not the pick. */
+private val LaneDimColor = Color(0x59FFFFFF)
+
+/** Lane arrows sharing one stem, like painted road markings. */
+private fun DrawScope.drawLaneArrows(
+    arrows: Set<LaneArrow>,
+    leftHandTraffic: Boolean,
+    w: Float,
+    h: Float,
+    color: Color,
+) {
+    if (arrows.isEmpty()) return
+    val stroke = Stroke(width = w * 0.11f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+    val cx = w * 0.5f
+    val fork = h * 0.52f
+    drawLine(color, Offset(cx, h * 0.95f), Offset(cx, fork), strokeWidth = stroke.width, cap = StrokeCap.Round)
+    if (LaneArrow.STRAIGHT in arrows) {
+        drawLine(color, Offset(cx, fork), Offset(cx, h * 0.12f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+        drawArrowHead(cx, h * 0.12f, 0f, -1f, w, color, stroke)
+    }
+    for ((arrow, direction) in listOf(LaneArrow.LEFT to -1f, LaneArrow.RIGHT to 1f)) {
+        if (arrow !in arrows) continue
+        val endX = cx + direction * w * 0.36f
+        val endY = h * 0.26f
+        drawPath(
+            Path().apply {
+                moveTo(cx, fork)
+                quadraticTo(cx, endY, endX, endY)
+            },
+            color,
+            style = stroke,
+        )
+        drawArrowHead(endX, endY, direction, 0f, w, color, stroke)
+    }
+    if (LaneArrow.UTURN in arrows) {
+        // Hooks across the oncoming side: right in left-hand traffic.
+        val direction = if (leftHandTraffic) 1f else -1f
+        val far = cx + direction * w * 0.3f
+        drawPath(
+            Path().apply {
+                moveTo(cx, fork)
+                lineTo(cx, h * 0.3f)
+                quadraticTo(cx, h * 0.1f, (cx + far) / 2f, h * 0.1f)
+                quadraticTo(far, h * 0.1f, far, h * 0.3f)
+                lineTo(far, h * 0.5f)
+            },
+            color,
+            style = stroke,
+        )
+        drawArrowHead(far, h * 0.5f, 0f, 1f, w, color, stroke)
+    }
 }
 
 /** A neutral U-turn when GraphHopper does not provide a side. */
@@ -613,8 +903,54 @@ private fun DrawScope.drawArrowHead(
 }
 
 
+/** Row layout chosen for the ride data bar (see [NavigationHudFormat.dataBarLayout]). */
+enum class DataBarLayout {
+    /** All four metrics, media opener and END on one row. */
+    SINGLE_ROW,
+
+    /** Two metric rows plus a media/END row, so values stay readable. */
+    TWO_ROW,
+}
+
+
 /** Pure formatting helpers, JVM-testable. */
 object NavigationHudFormat {
+    /** Smallest metric font the data bar ever uses; values stay readable. */
+    const val MIN_METRIC_SP: Float = 11.5f
+
+    /** Largest metric font, so a wide screen stays balanced. */
+    const val MAX_METRIC_SP: Float = 18f
+
+    /**
+     * Minimum width (dp) a metric cell needs to render [value] completely at
+     * [MIN_METRIC_SP] and the active font scale. 0.62 em is the em-width
+     * approximation the data bar uses to fit values.
+     */
+    fun metricCellWidthDp(value: String, fontScale: Float): Float {
+        val characters = value.length.coerceAtLeast(1)
+        return characters * MIN_METRIC_SP * 0.62f * fontScale.coerceAtLeast(0.5f) + 8f
+    }
+
+    /**
+     * Chooses the data-bar row layout from the real available width. A single
+     * row is used only when all four metric cells still render at
+     * [MIN_METRIC_SP] beside the glove-sized media opener and END; otherwise
+     * the bar switches to the two-row grid, which is the only way to keep
+     * every value fully readable at 320 dp / 2x font scale.
+     */
+    fun dataBarLayout(
+        availableWidthDp: Float,
+        fontScale: Float,
+        metricValues: List<String>,
+    ): DataBarLayout {
+        val chrome = 2f * GloveTargetDp + 4f + 12f + 8f + 12f
+        val required = metricValues.sumOf { metricCellWidthDp(it, fontScale).toDouble() } + chrome
+        return if (availableWidthDp >= required) DataBarLayout.SINGLE_ROW else DataBarLayout.TWO_ROW
+    }
+
+    /** Data-bar chrome constants, mirrored from the Compose layout. */
+    private const val GloveTargetDp = 64f
+
     fun darkRideMapDescription(enabled: Boolean): String =
         "Dark ride map, ${if (enabled) "on" else "off"}"
 
@@ -645,6 +981,29 @@ object NavigationHudFormat {
             else -> "<1 min"
         }
     }
+
+    /**
+     * Narrower duration for the data-bar cell, e.g. "1h 19m" / "45m" / "2h".
+     * The shorter form keeps the metric row from wrapping in screenshots and
+     * on small displays.
+     */
+    fun etaCompactText(seconds: Double): String {
+        val safe = seconds.coerceAtLeast(0.0)
+        val totalMinutes = (safe / 60.0).toInt()
+        if (totalMinutes <= 0) return "<1m"
+        val hours = totalMinutes / 60
+        val minutes = totalMinutes % 60
+        return when {
+            hours > 0 && minutes > 0 -> "${hours}h ${minutes}m"
+            hours > 0 -> "${hours}h"
+            else -> "${minutes}m"
+        }
+    }
+
+    /** [RecommendedLanesKey] value: zero-based recommended lane indices over the lane count, e.g. "1,2/3". */
+    fun recommendedLanesValue(lanes: LaneGuidance): String =
+        lanes.recommendedIndices.joinToString(",") + "/" + lanes.lanes.size +
+            if (lanes.marked) "" else " suggested"
 
     /** Maneuver name for accessibility and logs, aligned with GraphHopper signs. */
     fun turnDescription(turn: NavigationSnapshot.TurnInfo?): String {

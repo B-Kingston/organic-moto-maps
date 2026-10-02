@@ -1,5 +1,6 @@
 package com.organicmoto.maps.map
 
+import com.organicmoto.maps.ui.dismissMediaStartupPrompt
 import android.Manifest
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -38,6 +39,9 @@ class BuildingRenderingTest {
     @get:Rule val permissions = GrantPermissionRule.grant(
         Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @org.junit.Before
+    fun dismissStartupSetup() = compose.dismissMediaStartupPrompt()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private fun main(block: () -> Unit) = instrumentation.runOnMainSync(block)
     private var renderer: MapView? = null
@@ -57,6 +61,9 @@ class BuildingRenderingTest {
         val dark = context.assets.open("ride-dark-style.json").bufferedReader().use { it.readText() }.replace("{tiles_path}", url)
         loadStyle(map, normal)
         assertBuildingPixels(map, -27.4679, 153.0281, 18.0, houses = false)
+        // The wide z14 view is where the production tile LOD applies; real
+        // raised towers must still render and change pixels there.
+        assertBuildingPixels(map, -27.4679, 153.0281, 14.0, houses = false)
         assertBuildingPixels(map, -27.4616, 153.0466, 18.5, houses = true)
         // Same private URL replacement/style reloading must recreate the layer.
         loadStyle(map, dark)
@@ -64,7 +71,7 @@ class BuildingRenderingTest {
         loadStyle(map, normal)
         assertBuildingPixels(map, -27.4616, 153.0466, 18.5, houses = true)
         // At z13.9 there must be footprints, not merged block extrusions.
-        camera(map, -27.4679, 153.0281, 13.9)
+        camera(map, -27.4679, 153.0281, 13.9, expectBuildings = false)
         main {
             assertTrue(map.queryRenderedFeatures(viewport(), "building-3d").isEmpty())
             assertTrue(map.queryRenderedFeatures(viewport(), "building").isNotEmpty())
@@ -140,7 +147,7 @@ class BuildingRenderingTest {
                 getMapAsync { result.set(it) }
             }
         }
-        compose.waitUntil(30_000) {
+        compose.waitUntil(60_000) {
             result.get() != null
         }
         return result.get()
@@ -151,10 +158,33 @@ class BuildingRenderingTest {
         assertTrue("Local style must load", ready.await(30, TimeUnit.SECONDS))
     }
     private fun viewport() = RectF(0f, 0f, renderer!!.width.toFloat(), renderer!!.height.toFloat())
-    private fun camera(map: MapLibreMap, lat: Double, lon: Double, zoom: Double, bearing: Double = 0.0) {
+    private fun camera(
+        map: MapLibreMap,
+        lat: Double,
+        lon: Double,
+        zoom: Double,
+        bearing: Double = 0.0,
+        expectBuildings: Boolean = zoom >= 14.0,
+    ) {
         main { map.moveCamera(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder()
             .target(LatLng(lat, lon)).zoom(zoom).tilt(58.0).bearing(bearing).build())) }
-        Thread.sleep(2500)
+        // Wait for the real archive instead of a fixed sleep: on a loaded
+        // emulator the first z18 camera can still be loading tiles after 2.5 s,
+        // which used to fail "must render real offline building geometries".
+        if (expectBuildings) {
+            val deadline = System.currentTimeMillis() + 20_000
+            while (System.currentTimeMillis() < deadline) {
+                if (renderedFeatureCount(map, "building-3d") > 0) break
+                Thread.sleep(250)
+            }
+        }
+        Thread.sleep(800)
+    }
+
+    private fun renderedFeatureCount(map: MapLibreMap, layerId: String): Int {
+        val result = AtomicReference(0)
+        instrumentation.runOnMainSync { result.set(map.queryRenderedFeatures(viewport(), layerId).size) }
+        return result.get()
     }
     private fun snapshot(map: MapLibreMap): Bitmap {
         val ready = CountDownLatch(1)

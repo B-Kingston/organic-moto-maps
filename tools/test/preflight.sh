@@ -8,7 +8,7 @@ cd "$REPO_ROOT"
 JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@17}"
 export JAVA_HOME
 
-GRAPH_IMPORT='JAVA_HOME=/opt/homebrew/opt/openjdk@17 $JAVA_HOME/bin/java -Xmx12g -jar tools/gh/graphhopper-web-11.0.jar import tools/gh/config.yml; cp -R data/graph-cache app/src/main/assets/graph-cache'
+GRAPH_IMPORT='JAVA_HOME=/opt/homebrew/opt/openjdk@17 $JAVA_HOME/bin/java -Xmx12g -cp tools/gh/graphhopper-web-11.0.jar tools/gh/MotoGraphImport.java import tools/gh/config.yml; cp -R data/graph-cache app/src/main/assets/graph-cache'
 TILE_BUILD='tools/tiles/build-tiles.sh'
 GEOCODER_BUILD='JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew :geocoder-tool:run --args="data/queensland.osm.pbf app/src/main/assets/geocoder"'
 STYLE_BUILD='tools/style/fetch-style-assets.sh'
@@ -38,7 +38,10 @@ case "$GRAPH_PROPERTIES" in
     *'profiles=motorcycle|198752012'*) ;;
     *) fail "Graph profile marker is not motorcycle|198752012" "$GRAPH_IMPORT" ;;
 esac
-printf 'OK: GraphHopper cache files and stored profile marker\n'
+# Lane guidance lives in edge KV storage, written only by tools/gh/MotoGraphImport.java.
+grep -q 'moto_lanes' "$GRAPH_DIR/edgekv_keys" 2>/dev/null ||
+    fail "Graph has no moto_lanes lane guidance (imported with the stock GraphHopper command?)" "$GRAPH_IMPORT"
+printf 'OK: GraphHopper cache files, stored profile marker, and lane guidance\n'
 
 TILE="data/tiles/queensland.pmtiles"
 TILE_HASH_FILE="data/tiles/queensland.pmtiles.sha256"

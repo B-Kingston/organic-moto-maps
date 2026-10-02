@@ -89,8 +89,34 @@ tasks.named("preBuild") {
     dependsOn("validateGeocoderAsset")
 }
 
+// MapLibre 13.5.0 publishes one rendering backend per artifact and the
+// published default (`org.maplibre.gl:android-sdk`) is Vulkan-only: its
+// RenderingEngine returns VULKAN and rejects any runtime switch. The Android
+// emulator rasterizes Vulkan through gfxstream/llvmpipe in software (measured:
+// `cmd gpu vkjson` reports llvmpipe for the dense Brisbane CBD style) while its
+// OpenGL ES path is translated onto the host GPU (measured: "Android Emulator
+// OpenGL ES Translator (Apple M4 Pro)"), so debug builds default to the
+// genuine OpenGL artifact and release keeps the published Vulkan default.
+// `-PmaplibreBackend=vulkan|opengl` forces one backend for both variants, which
+// is how the A/B benchmark in tools/test/visual.py builds its baseline.
+val maplibreBackendOverride: String? = (findProperty("maplibreBackend") as String?)?.lowercase()
+fun maplibreBackendFor(variant: String): String = when (maplibreBackendOverride) {
+    null -> if (variant == "debug") "opengl" else "vulkan"
+    "opengl", "vulkan" -> maplibreBackendOverride
+    else -> throw GradleException(
+        "Unknown maplibreBackend '$maplibreBackendOverride'; use 'vulkan' or 'opengl'.",
+    )
+}
+
 dependencies {
-    implementation(libs.maplibre.android.sdk)
+    add(
+        "debugImplementation",
+        if (maplibreBackendFor("debug") == "opengl") libs.maplibre.android.sdk.opengl else libs.maplibre.android.sdk,
+    )
+    add(
+        "releaseImplementation",
+        if (maplibreBackendFor("release") == "opengl") libs.maplibre.android.sdk.opengl else libs.maplibre.android.sdk,
+    )
     implementation(libs.graphhopper.core)
     implementation(libs.slf4j.android)
 

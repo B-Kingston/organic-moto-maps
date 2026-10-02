@@ -10,6 +10,7 @@ import com.graphhopper.util.Instruction
 import com.organicmoto.maps.NavigationHud
 import com.organicmoto.maps.routing.navigation.NavigationSnapshot
 import com.organicmoto.maps.routing.navigation.NavigationState
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,19 +43,19 @@ class NavigationManeuverHudTest {
             ),
         )
         composeRule.setContent {
-            NavigationHud(
-                snapshot,
-                voiceGuidanceReady = false,
-                voiceGuidanceStatusDescription = "checking offline voice",
-            )
+            NavigationHud(snapshot)
         }
 
-        composeRule.onNodeWithContentDescription(
+        val guidance = composeRule.onNodeWithContentDescription(
             "Navigation guidance: enter the roundabout in 120 m, then take the 2nd exit onto Abbotsford Road",
-        ).assertIsDisplayed()
-        composeRule
-            .onNodeWithContentDescription("Voice guidance settings, enabled, checking offline voice")
-            .assertIsDisplayed()
+        )
+        guidance.assertIsDisplayed()
+        assertTrue(
+            "guidance card should shrink after the ride controls move to the right pill",
+            guidance.fetchSemanticsNode().boundsInRoot.width < 240f * composeRule.density.density,
+        )
+        composeRule.onNodeWithContentDescription("Voice guidance settings", substring = true)
+            .assertDoesNotExist()
         composeRule.onNodeWithText("2").assertIsDisplayed()
     }
 

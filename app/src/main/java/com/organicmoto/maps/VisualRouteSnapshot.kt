@@ -137,7 +137,13 @@ internal object VisualRouteSnapshot {
      * framing (zoom band, forward tilt, heading) and the planning-camera
      * restore after END can be checked instead of only eyeballed.
      */
-    fun writeCamera(cacheDir: File, camera: CameraPosition, guidance: Boolean) {
+    fun writeCamera(
+        cacheDir: File,
+        camera: CameraPosition,
+        guidance: Boolean,
+        followSuspended: Boolean = false,
+        cameraLocked: Boolean = false,
+    ) {
         runCatching {
             val target = camera.target
             val json = JSONObject()
@@ -146,6 +152,8 @@ internal object VisualRouteSnapshot {
                 .put("tilt", camera.tilt.takeIf { it.isFinite() } ?: 0.0)
                 .put("bearing", camera.bearing.takeIf { it.isFinite() } ?: 0.0)
                 .put("guidance", guidance)
+                .put("followSuspended", followSuspended)
+                .put("cameraLocked", cameraLocked)
                 .put("createdAtMillis", System.currentTimeMillis())
             if (target != null) {
                 json.put("lat", target.latitude).put("lon", target.longitude)

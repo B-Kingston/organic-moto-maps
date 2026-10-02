@@ -1,6 +1,8 @@
 package com.organicmoto.maps
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.os.SystemClock
 import android.util.Log
@@ -39,8 +41,14 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerDefaults
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.organicmoto.maps.map.MapPerformanceProbe
+import com.organicmoto.maps.map.MapPerfProbeGate
+import com.organicmoto.maps.map.MapPerfSweepQueue
+import com.organicmoto.maps.map.MapPerfSweepRunner
+import com.organicmoto.maps.map.DARK_RIDE_BASEMAP_PROBE_LAYERS
 import com.organicmoto.maps.map.hideNavPosition
 import com.organicmoto.maps.map.updateGuidancePosition
 import com.organicmoto.maps.map.updateNavPosition
@@ -89,6 +97,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
@@ -109,6 +118,14 @@ import com.graphhopper.util.shapes.GHPoint
 import com.organicmoto.maps.geocoding.GeocodeResult
 import com.organicmoto.maps.geocoding.GeocodeSearchController
 import com.organicmoto.maps.geocoding.GeocodeController
+import com.organicmoto.maps.media.AndroidMediaKeyController
+import com.organicmoto.maps.media.AndroidMediaSessionGateway
+import com.organicmoto.maps.media.AndroidVolumeController
+import com.organicmoto.maps.media.MediaCenterController
+import com.organicmoto.maps.media.MediaControlCenter
+import com.organicmoto.maps.media.MediaListenerBridge
+import com.organicmoto.maps.media.MediaPanelJoin
+import com.organicmoto.maps.media.VolumeTarget
 import com.organicmoto.maps.map.clearRoutes
 import com.organicmoto.maps.map.drawRoutes
 import com.organicmoto.maps.map.findRouteIndexAt
@@ -119,6 +136,7 @@ import com.organicmoto.maps.map.RouteGeometryCache
 import com.organicmoto.maps.map.showGpxPreviewMarker
 import com.organicmoto.maps.routing.GraphHopperRouter
 import com.organicmoto.maps.routing.PointParser
+import com.organicmoto.maps.region.RegionManager
 import com.organicmoto.maps.storage.GeoPoint
 import com.organicmoto.maps.storage.GpxParser
 import com.organicmoto.maps.storage.GpxMilestone
@@ -134,8 +152,12 @@ import com.organicmoto.maps.storage.SavedRouteSummary
 import com.organicmoto.maps.storage.GpxGeometry
 import com.organicmoto.maps.tiles.OfflineTileStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.maplibre.android.MapLibre
@@ -157,6 +179,8 @@ import kotlin.math.roundToInt
 
 private const val TAG = "OrganicMoto.RouteScreen"
 private const val TAG_SAVED = "OrganicMoto.SavedRoutes"
+private const val TAG_MEDIA = "OrganicMoto.Media"
+private const val TAG_MAP_PERF = "OrganicMoto.MapPerf"
 private const val STYLE_ASSET = "style.json"
 private const val DARK_RIDE_STYLE_ASSET = "ride-dark-style.json"
 private const val TILES_PATH_PLACEHOLDER = "{tiles_path}"
@@ -169,6 +193,30 @@ private const val VOICE_PREVIEW_COUNT_PREF = "voice_guidance_preview_count"
 private const val DARK_RIDE_MAP_PREF = "dark_ride_map_enabled"
 private const val DEFAULT_ROAD_SHARE = 70f
 
+private data class NativeStyleLoadRequest(
+    val json: String?,
+    val map: MapLibreMap?,
+    val screenStarted: Boolean,
+    val revision: Int,
+    val darkRideStyle: Boolean,
+)
+
+/**
+ * What the system "Save to" dialog is being opened for. The region download,
+ * an interrupted-download resume, and saving a recovered app-storage package
+ * all use the same create-document picker.
+ */
+private sealed interface MapsDownloadAction {
+    data class New(val regionId: String) : MapsDownloadAction
+    data object Resume : MapsDownloadAction
+    data object SaveRecovered : MapsDownloadAction
+}
+
+// While the media panel shows the local music stream, the app polls the real
+// AudioManager readback at this interval so hardware volume presses (which are
+// invisible to the app) still update the displayed level and limits.
+private const val LOCAL_VOLUME_POLL_MILLIS = 1_000L
+
 /**
  * True for debuggable (debug) builds. Release APKs are never debuggable, so
  * user-typed queries, source/destination text and coordinates are only logged
@@ -176,6 +224,19 @@ private const val DEFAULT_ROAD_SHARE = 70f
  */
 private fun isDebugBuild(context: Context): Boolean =
     (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+/** Unwraps the host activity so the debug probe can read its window metrics. */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+// The rendering backend is chosen at build time by the MapLibre artifact
+// (debug: OpenGL, release: Vulkan; see app/build.gradle.kts). A runtime switch
+// is not possible with these single-backend artifacts: MapLibre.getInstance
+// fixes RenderingEngine's type on first call, and setCurrentType rejects the
+// other backend with UnsupportedOperationException.
 
 /** Converts GraphHopper's point list into the storage package's vocabulary type. */
 private fun PointList.toGeoPoints(): List<GeoPoint> =
@@ -276,13 +337,55 @@ fun RouteScreen() {
     var screenStarted by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
     }
-    val router = remember { GraphHopperRouter(context.applicationContext) }
+    // Regional datasets: the active package decides the graph, geocoder, and
+    // basemap. The manager is app-scoped (it survives recomposition and keeps
+    // polling/downloading while the settings screen is closed).
+    val regionManager = remember { RegionManager(context.applicationContext) }
+    val mapsState by regionManager.state.collectAsState()
+    // Debug visual tooling (tools/test/visual.py) can preview intermediate
+    // Maps states; release builds never set this flow.
+    val visualMapsPreview by VisualMapsPreview.state.collectAsState()
+    val activeDataset by regionManager.dataset.collectAsState()
+    DisposableEffect(regionManager) {
+        onDispose { regionManager.close() }
+    }
+    val router = remember(activeDataset.installId, activeDataset.generation) {
+        GraphHopperRouter(
+            context.applicationContext,
+            activeDataset.graphDir,
+            activeDataset.copyGraphFromAssets,
+        )
+    }
+    // The coordinator captures its backend once; rememberUpdatedState keeps a
+    // dataset switch from leaving it pointed at the closed router.
+    val latestRouter = rememberUpdatedState(router)
+    DisposableEffect(router) {
+        // The dataset this router was built from: a pending active-map deletion
+        // waits for exactly this reader to be released before unlinking files.
+        val releasedInstallId = activeDataset.installId
+        onDispose {
+            val drain = router.closeAsync()
+            if (drain == null) {
+                regionManager.onDatasetReadersReleased(releasedInstallId)
+            } else {
+                // Join the drain off the UI thread, then let the manager know
+                // the graph directory is no longer in use.
+                Thread(
+                    {
+                        runCatching { drain.join() }
+                        regionManager.onDatasetReadersReleased(releasedInstallId)
+                    },
+                    "gh-drain",
+                ).apply { isDaemon = true }.start()
+            }
+        }
+    }
     val scope = rememberCoroutineScope()
     val debugLogs = remember { isDebugBuild(context.applicationContext) }
     val routeBackend: suspend (RouteParams) -> RouteOutcome = { params ->
         val started = SystemClock.elapsedRealtime()
         try {
-            val result = router.route(
+            val result = latestRouter.value.route(
                 params.from,
                 params.to,
                 params.complexity,
@@ -315,7 +418,7 @@ fun RouteScreen() {
             } else {
                 Log.e(TAG, "Route request failed after ${SystemClock.elapsedRealtime() - started} ms")
             }
-            RouteOutcome.Failure(e.message ?: "Routing failed")
+            RouteOutcome.Failure(describeRoutingFailure(e.message ?: "Routing failed"))
         }
     }
     val coordinator = remember { RouteSearchCoordinator(scope, backend = routeBackend) }
@@ -326,6 +429,10 @@ fun RouteScreen() {
     var toText by rememberSaveable { mutableStateOf("") }
     var fromPoint by remember { mutableStateOf<GHPoint?>(null) }
     var toPoint by remember { mutableStateOf<GHPoint?>(null) }
+    var fromLocationState by remember { mutableStateOf(CurrentLocationSelectionState()) }
+    fun cancelFromLocationRequest() {
+        fromLocationState = fromLocationState.cancel()
+    }
     // Ride-complexity dial levels: 0 = Fastest, each click adds one level
     // (+1.0 of motorcycle/curve preference). Eight clicks per revolution;
     // winding past the eighth level keeps counting (9, 10, ...). The dial
@@ -369,6 +476,11 @@ fun RouteScreen() {
     }
     var voiceSettingsOpen by remember { mutableStateOf(false) }
     var routeSettingsOpen by remember { mutableStateOf(false) }
+    // The settings cog expands into a card over the whole screen; the tap
+    // scrim and the BackHandler live here rather than inside the rail so the
+    // dismissal covers the planner panel too. Not rememberSaveable: menus are
+    // deliberately closed across recreation, like the other overlays.
+    var settingsMenuOpen by remember { mutableStateOf(false) }
     // Complete inputs of the most recent submission attempt (START / dial
     // release / settings apply / saved-route load). GPX imports carry bounded
     // shaping points here as well as their endpoints; keeping the complete
@@ -377,7 +489,36 @@ fun RouteScreen() {
     // Nulled whenever either field changes, so a stale reroute can never
     // target edited-away points.
     var activePlan by remember { mutableStateOf<RouteParams?>(null) }
-    val geocodeController = remember { GeocodeSearchController(context.applicationContext) }
+    // Bumped when a legacy basemap replacement is imported at the same private
+    // path; the style reload effect keys on it.
+    var mapRevision by remember { mutableIntStateOf(0) }
+    val geocodeController = remember(activeDataset.installId, activeDataset.generation) {
+        GeocodeSearchController(context.applicationContext, activeDataset.geocoderFile)
+    }
+    // A dataset switch invalidates everything computed from the previous
+    // region: displayed routes, resolved points, and the map style all rebuild
+    // from the new package. Saved rides are untouched (they are just data).
+    // The first composition initializes the key and does nothing: bumping the
+    // map revision there would start a second style load on every launch.
+    var appliedDatasetKey by remember {
+        mutableStateOf(activeDataset.installId to activeDataset.generation)
+    }
+    LaunchedEffect(activeDataset.installId, activeDataset.generation) {
+        val key = activeDataset.installId to activeDataset.generation
+        if (key == appliedDatasetKey) return@LaunchedEffect
+        appliedDatasetKey = key
+        coordinator.reset()
+        activePlan = null
+        fromPoint = null
+        cancelFromLocationRequest()
+        toPoint = null
+        mapRevision++
+        Log.i(
+            TAG,
+            "Active region: ${activeDataset.displayName} (${activeDataset.regionId}, " +
+                "generation ${activeDataset.generation})",
+        )
+    }
     // Guidance: pure engine + Android glue. One controller per screen.
     val navigationController = remember { NavigationController(scope) }
     val navSnapshot by navigationController.snapshot.collectAsStateWithLifecycle()
@@ -406,6 +547,15 @@ fun RouteScreen() {
         // grant is retained across launches until the user changes it in
         // Settings. Android may expire one-time grants by policy.
         val granted = LocationPermission.isGranted(context)
+        val waitingForPermission =
+            fromLocationState.status as? CurrentLocationStatus.WaitingForPermission
+        if (waitingForPermission != null) {
+            fromLocationState = fromLocationState.permissionResult(waitingForPermission.request.id, granted)
+            if (!granted) {
+                fromText = ""
+                fromPoint = null
+            }
+        }
         locationPermissionGranted = granted
         if (pendingGuidanceStart) {
             guidanceRequested = granted
@@ -431,10 +581,90 @@ fun RouteScreen() {
     // Saved-route storage: repository over device SQLite plus the menu flag.
     val savedRouteRepository = remember { SavedRouteRepository(context.applicationContext) }
     var savedRoutesOpen by remember { mutableStateOf(false) }
+    var mapsSettingsOpen by remember { mutableStateOf(false) }
     var importedGpxName by remember { mutableStateOf<String?>(null) }
     var importedGpxMilestones by remember { mutableStateOf<List<GpxMilestone>>(emptyList()) }
     var gpxPreviewOpen by remember { mutableStateOf(false) }
     var gpxImportToken by remember { mutableStateOf(0) }
+    val requestCurrentLocation: () -> Unit = {
+        fromLocationState = fromLocationState.beginRequest()
+        val waiting = fromLocationState.status as CurrentLocationStatus.WaitingForPermission
+        fromText = ""
+        fromPoint = null
+        importedGpxName = null
+        importedGpxMilestones = emptyList()
+        gpxImportToken++
+        activePlan = null
+        coordinator.invalidate()
+        if (LocationPermission.isGranted(context)) {
+            locationPermissionGranted = true
+            fromLocationState = fromLocationState.permissionResult(waiting.request.id, granted = true)
+        } else {
+            permissionLauncher.launch(LocationPermission.requestedPermissions)
+        }
+    }
+
+    // Ride media control center: native MediaSessionManager discovery plus a
+    // local AudioManager volume path that needs no notification access. The
+    // panel opens from the data bar; the controller reads the platform only
+    // while the panel is visible.
+    val mediaController = remember {
+        MediaCenterController(
+            gateway = AndroidMediaSessionGateway(context.applicationContext),
+            localVolume = AndroidVolumeController(context.applicationContext),
+            mediaKeys = AndroidMediaKeyController(context.applicationContext),
+            onLog = { message ->
+                // Media state transitions are debug-build diagnostics only.
+                if (debugLogs) Log.d(TAG_MEDIA, message)
+            },
+        )
+    }
+    val mediaState by mediaController.state.collectAsState()
+    var mediaPanelOpen by remember { mutableStateOf(false) }
+    DisposableEffect(mediaController) {
+        mediaController.attach()
+        onDispose {
+            mediaController.setPanelOpen(false)
+            mediaController.detach()
+        }
+    }
+    // The listener service connecting/disconnecting changes session
+    // availability and can drop the platform callback: re-assert the listener
+    // and refresh an open panel when that happens.
+    DisposableEffect(mediaController) {
+        val bridge = { mediaController.onListenerServiceChanged() }
+        MediaListenerBridge.addListener(bridge)
+        onDispose { MediaListenerBridge.removeListener(bridge) }
+    }
+    LaunchedEffect(mediaPanelOpen) {
+        mediaController.setPanelOpen(mediaPanelOpen)
+    }
+    // Measured from the real bar so map controls and the media panel sit
+    // exactly above it instead of at hard-coded ride offsets.
+    var dataBarHeightPx by remember { mutableIntStateOf(0) }
+    val dataBarHeightDp = with(LocalDensity.current) { dataBarHeightPx.toDp() }
+    // Measured directions HUD so the media panel can never grow over it.
+    var hudHeightPx by remember { mutableIntStateOf(0) }
+    val hudHeightDp = with(LocalDensity.current) { hudHeightPx.toDp() }
+    val rideActive = guidanceRequested && navSnapshot.state != NavigationState.Idle
+    // Deleting the active map is refused mid-ride; the manager enforces the
+    // same rule as the disabled trash control.
+    LaunchedEffect(rideActive) {
+        regionManager.setRideActive(rideActive)
+    }
+    val mapControlsHidden = rideActive && mediaPanelOpen
+    // Hardware volume buttons are invisible to the app; while the panel shows
+    // the local music stream, poll the real AudioManager readback so the level
+    // and its disabled limits follow the hardware. Remote sessions report
+    // through their own onAudioInfoChanged callback instead.
+    val localVolumeTargeted = mediaState.volume.target == VolumeTarget.PHONE
+    LaunchedEffect(rideActive, mediaPanelOpen, localVolumeTargeted) {
+        if (!rideActive || !mediaPanelOpen || !localVolumeTargeted) return@LaunchedEffect
+        while (true) {
+            delay(LOCAL_VOLUME_POLL_MILLIS)
+            mediaController.pollLocalVolume()
+        }
+    }
 
     val selectRoute: (Int) -> Unit = coordinator::selectRoute
     val latestSelectRoute by rememberUpdatedState(selectRoute)
@@ -492,6 +722,9 @@ fun RouteScreen() {
                         pendingGuidanceStart = false
                         guidanceRequested = false
                     }
+                    // Notification access may have been granted or revoked
+                    // while we were in Settings; re-read it immediately.
+                    mediaController.onResume()
                 }
                 else -> Unit
             }
@@ -557,11 +790,47 @@ fun RouteScreen() {
             }
         }
     }
+    LaunchedEffect(fromLocationState, locationPermissionGranted) {
+        val waiting =
+            fromLocationState.status as? CurrentLocationStatus.WaitingForFix ?: return@LaunchedEffect
+        if (!locationPermissionGranted) {
+            fromLocationState = fromLocationState.permissionLost(waiting.request.id)
+            fromText = ""
+            fromPoint = null
+            return@LaunchedEffect
+        }
+
+        val fix = withTimeoutOrNull(CURRENT_LOCATION_FIX_TIMEOUT_MS) {
+            snapshotFlow { trackedFix }.first { candidate ->
+                fromLocationState.currentPoint(
+                    waiting.request,
+                    candidate,
+                    SystemClock.elapsedRealtime(),
+                ) != null
+            }
+        }
+        if (fromLocationState.status != waiting) return@LaunchedEffect
+        val endpoint = fromLocationState.currentEndpoint(
+            waiting.request,
+            fix,
+            SystemClock.elapsedRealtime(),
+        )
+        if (endpoint == null) {
+            fromLocationState = fromLocationState.noRecentFix(waiting.request.id)
+            fromText = ""
+            fromPoint = null
+        } else {
+            fromText = endpoint.label
+            fromPoint = GHPoint(endpoint.point.lat, endpoint.point.lon)
+            fromLocationState = fromLocationState.complete(waiting.request.id)
+        }
+    }
     // The debug visual runner uses an app-private queued fix to move the real
-    // NavigationSession deterministically. This seam is absent from release
-    // builds and avoids emulator GPS provider throttling during route jumps.
-    LaunchedEffect(guidanceRequested, debugLogs) {
-        if (!guidanceRequested || !debugLogs) return@LaunchedEffect
+    // map rider deterministically in planning and NavigationSession in ride
+    // mode. This seam is absent from release builds and avoids emulator GPS
+    // provider throttling during camera checks and route jumps.
+    LaunchedEffect(debugLogs) {
+        if (!debugLogs) return@LaunchedEffect
         while (true) {
             val request = withContext(Dispatchers.IO) {
                 VisualRouteSnapshot.takeQueuedFix(context.cacheDir)
@@ -582,13 +851,16 @@ fun RouteScreen() {
                 timestampMs = SystemClock.elapsedRealtime(),
             )
             latestFix.set(fix)
-            lastDebugFixAt.set(SystemClock.elapsedRealtime())
-            navigationController.onFix(fix)
+            val guidanceActive = latestGuidanceRequested.value
+            if (guidanceActive) {
+                lastDebugFixAt.set(SystemClock.elapsedRealtime())
+                navigationController.onFix(fix)
+            }
             if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                 trackedFix = fix
             }
             val snapshot = navigationController.snapshot.value
-            if (snapshot.state != NavigationState.Idle) {
+            if (guidanceActive && snapshot.state != NavigationState.Idle) {
                 voiceGuidanceOutput.onSnapshot(snapshot, latestVoiceGuidanceSettings.value)
             }
             withContext(Dispatchers.IO) {
@@ -604,44 +876,67 @@ fun RouteScreen() {
         }
     }
 
-    // Location lock: when on, the camera re-centres on each fix but keeps
-    // whatever zoom the user last set (follow zoom), so pinch or the zoom
-    // pill works while locked. Tapping the crosshair again releases.
+    // The planner lock keeps the zoom the user selected. A new ride starts
+    // with its own guidance camera lock, which keeps guidance framing.
     var followMe by remember { mutableStateOf(false) }
     var followZoom by remember { mutableStateOf(FOLLOW_ZOOM) }
+    var guidanceCameraLocked by remember(guidanceRequested) { mutableStateOf(guidanceRequested) }
+    var cameraFollowSuspension by remember { mutableStateOf(CameraFollowSuspension()) }
 
     var mapUrl by remember { mutableStateOf<String?>(null) }
     var mapFileChecked by remember { mutableStateOf(false) }
     var mapImporting by remember { mutableStateOf(false) }
     var mapImportError by remember { mutableStateOf<String?>(null) }
-    var mapRevision by remember { mutableStateOf(0) }
     var styleJson by remember { mutableStateOf<String?>(null) }
     val darkGuidanceStyle = guidanceRequested && darkRideMapEnabled
-    LaunchedEffect(Unit) {
+    // The active dataset owns the basemap: an installed region uses its own
+    // PMTiles archive, the bundled fallback keeps the legacy "Load map file"
+    // import. Re-resolving on dataset generation and map revision keeps the
+    // URL honest after a switch or a replacement import.
+    LaunchedEffect(activeDataset.installId, activeDataset.generation, mapRevision) {
         try {
-            mapUrl = OfflineTileStore.installedUrl(context.applicationContext)
+            val resolvedUrl = activeDataset.tilesUrl
+                ?: OfflineTileStore.installedUrl(context.applicationContext)
+            withContext(Dispatchers.Main.immediate) { mapUrl = resolvedUrl }
+        } catch (e: CancellationException) {
+            // Leaving the composition cancels this effect; it is not a load
+            // failure, and recording one would leave a stale modal error.
+            throw e
         } catch (e: Exception) {
-            mapImportError = "The installed map file could not be opened"
+            withContext(Dispatchers.Main.immediate) {
+                mapImportError = "The installed map file could not be opened"
+            }
             Log.e(TAG, "Installed map failed to load", e)
         } finally {
-            mapFileChecked = true
+            withContext(NonCancellable + Dispatchers.Main.immediate) { mapFileChecked = true }
         }
     }
     LaunchedEffect(mapUrl, mapRevision, darkGuidanceStyle) {
         // Force a style reload when a replacement is imported at the same
         // private path; the URL string itself intentionally stays stable.
-        styleJson = null
+        withContext(Dispatchers.Main.immediate) { styleJson = null }
         val url = mapUrl ?: run {
             return@LaunchedEffect
         }
         try {
-            styleJson = loadOfflineStyle(
+            val loadedJson = loadOfflineStyle(
                 context.applicationContext,
                 url,
                 darkRideMode = darkGuidanceStyle,
             )
+            // loadOfflineStyle reads the asset on Dispatchers.IO. Publish UI
+            // state on Main so recomposition and the keyed native-style effect
+            // are scheduled on the UI dispatcher after that context switch.
+            withContext(Dispatchers.Main.immediate) { styleJson = loadedJson }
+        } catch (e: CancellationException) {
+            // A recomposition/recreation cancellation is not a style failure;
+            // rethrowing keeps the map on its next successful load instead of
+            // popping a false "Map file not loaded" dialog over it.
+            throw e
         } catch (e: Exception) {
-            mapImportError = "The offline map style could not be loaded"
+            withContext(Dispatchers.Main.immediate) {
+                mapImportError = "The offline map style could not be loaded"
+            }
             Log.e(TAG, "Offline map style failed to load", e)
         }
     }
@@ -656,6 +951,9 @@ fun RouteScreen() {
             try {
                 mapUrl = OfflineTileStore.import(context.applicationContext, uri)
                 mapRevision++
+                // The legacy basemap belongs to the bundled dataset; switch
+                // back to it so the import is actually visible.
+                regionManager.activateBundled()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -671,12 +969,44 @@ fun RouteScreen() {
         mapPicker.launch(arrayOf("application/octet-stream", "*/*"))
     }
 
-    val mapView = rememberMapView(context) { mapRef.value = it }
+    // Offline regional package import: the system picker supplies a `.motomap`
+    // file; the manager copies, verifies, and installs it transactionally. The
+    // user's file is left where it is.
+    val mapsPackagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) regionManager.importPackage(uri)
+    }
+
+    // Downloads are saved as a user-visible file first: the system "Save to"
+    // dialog picks the location (Downloads by default), then the resumable
+    // transfer stages privately and copies into that file once it is complete.
+    // The same picker also serves resuming an interrupted download and saving a
+    // package recovered from the old private-only flow.
+    var pendingMapsDownload by remember { mutableStateOf<MapsDownloadAction?>(null) }
+    val mapsDownloadPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val action = pendingMapsDownload
+        pendingMapsDownload = null
+        if (uri == null || action == null) return@rememberLauncherForActivityResult
+        when (action) {
+            is MapsDownloadAction.New -> regionManager.startDownload(action.regionId, uri)
+            MapsDownloadAction.Resume -> regionManager.resumeDownload(uri)
+            MapsDownloadAction.SaveRecovered -> regionManager.saveRecoveredPackage(uri)
+        }
+    }
+
+    val mapView = rememberMapView(context) { map ->
+        mapRef.value = map
+    }
 
     var styledMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var appliedStyleJson by remember { mutableStateOf<String?>(null) }
     var appliedMapRevision by remember { mutableStateOf<Int?>(null) }
     var loadedStyleJson by remember { mutableStateOf<String?>(null) }
+    var styleLoadStartedJson by remember { mutableStateOf<String?>(null) }
+    var styleLoadError by remember { mutableStateOf("") }
     var styleLoadGeneration by remember { mutableIntStateOf(0) }
     // Debug-only, request-driven inspection. No production camera change and
     // no building queries per GPS update. The runner waits for actual rendered
@@ -693,7 +1023,13 @@ fun RouteScreen() {
             camera?.let { map.moveCamera(CameraUpdateFactory.newCameraPosition(it.camera)) }
             if (probeId != null && loadedStyleJson != null) {
                 val bounds = android.graphics.RectF(0f, 0f, mapView.width.toFloat(), mapView.height.toFloat())
-                val basemap = map.queryRenderedFeatures(bounds, if (darkGuidanceStyle) "ride-roads" else "building").size
+                val basemap = if (darkGuidanceStyle) {
+                    DARK_RIDE_BASEMAP_PROBE_LAYERS.sumOf { layerId ->
+                        map.queryRenderedFeatures(bounds, layerId).size
+                    }
+                } else {
+                    map.queryRenderedFeatures(bounds, "building").size
+                }
                 val routeReady = map.style?.let { style ->
                     style.getSource("route") != null && style.getLayer("route-focus-line") != null
                 } == true
@@ -705,30 +1041,159 @@ fun RouteScreen() {
             delay(40)
         }
     }
-    LaunchedEffect(styleJson, mapRef.value, screenStarted, mapRevision) {
-        if (!screenStarted) return@LaunchedEffect
-        val json = styleJson ?: return@LaunchedEffect
+    // Debug-only native frame benchmark. The probe attaches to the live map
+    // only in debug builds, and only while this screen owns it; the runner
+    // animates host-queued camera sweeps with MapLibre's own easeCamera and
+    // exports per-sweep frame JSON. Release builds never attach the listeners.
+    // `screenStarted` and `loadedStyleJson` are keys so backgrounding the app
+    // or reloading the style cancels an in-flight sweep and restores camera
+    // and paint instead of leaving a half-driven camera behind.
+    LaunchedEffect(debugLogs, mapView, mapRef.value, screenStarted, loadedStyleJson) {
+        if (!debugLogs || !screenStarted) return@LaunchedEffect
         val map = mapRef.value ?: return@LaunchedEffect
-        if (styledMap === map && appliedStyleJson == json && appliedMapRevision == mapRevision) {
-            return@LaunchedEffect
+        val probe = MapPerformanceProbe(
+            mapView = mapView,
+            map = map,
+            window = context.findActivity()?.window,
+            log = { Log.d(TAG_MAP_PERF, it) },
+        )
+        probe.attach()
+        val runner = MapPerfSweepRunner(
+            mapView = mapView,
+            map = map,
+            probe = probe,
+            cacheDir = context.cacheDir,
+            log = { Log.d(TAG_MAP_PERF, it) },
+        )
+        try {
+            while (true) {
+                // A queued sweep must wait for a live style: animating the
+                // camera before the style exists would measure nothing and
+                // could be cancelled by the style load itself.
+                if (map.style == null) {
+                    delay(100)
+                    continue
+                }
+                val request = withContext(Dispatchers.IO) {
+                    MapPerfSweepQueue.take(context.cacheDir)
+                }
+                if (request != null) {
+                    try {
+                        runner.run(request)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        Log.e(TAG_MAP_PERF, "sweep '${request.label}' failed", error)
+                    }
+                }
+                delay(40)
+            }
+        } finally {
+            // Leaving the screen cancels the sweep: the runner restores the
+            // camera and building paint, and the gate always comes back down.
+            probe.detach()
+            MapPerfProbeGate.exit()
         }
-        loadedStyleJson = null
-        // Check the live style state as well as the generation: a callback
-        // can arrive after the desired style is cleared, before a new request.
-        val generation = ++styleLoadGeneration
-        if (styledMap !== map) {
-            // Set an initial Queensland view once for each MapLibreMap. Style
-            // changes on the same map retain the live planning/guidance camera.
-            map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(-23.0, 145.5), 4.5))
-        }
-        map.setStyle(Style.Builder().fromJson(json)) {
-            if (mapRef.value === map && styleLoadGeneration == generation && styleJson == json) {
-                loadedStyleJson = json
+    }
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            NativeStyleLoadRequest(
+                json = styleJson,
+                map = mapRef.value,
+                screenStarted = screenStarted,
+                revision = mapRevision,
+                darkRideStyle = guidanceRequested && darkRideMapEnabled,
+            )
+        }.collectLatest { request ->
+            withContext(Dispatchers.Main.immediate) {
+                if (debugLogs) {
+                    Log.d(
+                        TAG,
+                        "Map style request observed json=${request.json != null} " +
+                            "map=${request.map != null} screenStarted=${request.screenStarted} " +
+                            "revision=${request.revision}",
+                    )
+                }
+                if (!request.screenStarted) {
+                    if (debugLogs) {
+                        Log.d(TAG, "Map style load deferred: screenStarted=false revision=${request.revision}")
+                    }
+                    return@withContext
+                }
+                val json = request.json ?: run {
+                    if (debugLogs) Log.d(TAG, "Map style load deferred: style JSON is unavailable")
+                    return@withContext
+                }
+                val map = request.map ?: run {
+                    if (debugLogs) Log.d(TAG, "Map style load deferred: native map is unavailable")
+                    return@withContext
+                }
+                if (styledMap === map && appliedStyleJson == json && appliedMapRevision == request.revision) {
+                    if (debugLogs) {
+                        Log.d(
+                            TAG,
+                            "Map style load skipped: request already applied revision=${request.revision} " +
+                                "generation=$styleLoadGeneration loaded=${loadedStyleJson == json}",
+                        )
+                    }
+                    return@withContext
+                }
+                loadedStyleJson = null
+                styleLoadStartedJson = null
+                styleLoadError = ""
+                // Check the live style state as well as the generation: a callback
+                // can arrive after the desired style is cleared, before a new request.
+                val generation = ++styleLoadGeneration
+                if (debugLogs) {
+                    Log.i(
+                        TAG,
+                        "Map style load start generation=$generation revision=${request.revision} " +
+                            "screenStarted=${request.screenStarted} mapCurrent=${mapRef.value === map} " +
+                            "sameMap=${styledMap === map} " +
+                            "style=${if (request.darkRideStyle) "ride-dark" else "color"}",
+                    )
+                }
+                try {
+                    if (styledMap !== map) {
+                        // Set an initial Queensland view once for each MapLibreMap. Style
+                        // changes on the same map retain the live planning/guidance camera.
+                        map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(-23.0, 145.5), 4.5))
+                    }
+                    map.setStyle(Style.Builder().fromJson(json)) {
+                        val stillCurrent = mapRef.value === map &&
+                            styleLoadGeneration == generation && styleJson == json
+                        if (stillCurrent) {
+                            loadedStyleJson = json
+                            styleLoadError = ""
+                            if (debugLogs) {
+                                Log.i(
+                                    TAG,
+                                    "Map style load success generation=$generation revision=${request.revision} " +
+                                        "screenStarted=${request.screenStarted} mapCurrent=${mapRef.value === map}",
+                                )
+                            }
+                        } else if (debugLogs) {
+                            Log.w(
+                                TAG,
+                                "Map style callback ignored generation=$generation currentGeneration=$styleLoadGeneration " +
+                                    "screenStarted=${request.screenStarted} mapCurrent=${mapRef.value === map} " +
+                                    "requestMatches=${styleJson == json}",
+                            )
+                        }
+                    }
+                    styleLoadStartedJson = json
+                    styledMap = map
+                    appliedStyleJson = json
+                    appliedMapRevision = request.revision
+                } catch (failure: Exception) {
+                    styleLoadError = "${failure.javaClass.simpleName}: ${failure.message.orEmpty()}"
+                    if (debugLogs) {
+                        Log.e(TAG, "Map style load request failed generation=$generation revision=${request.revision}", failure)
+                    }
+                    throw failure
+                }
             }
         }
-        styledMap = map
-        appliedStyleJson = json
-        appliedMapRevision = mapRevision
     }
 
     val routeResult = (state as? RouteUiState.Success)?.result
@@ -939,6 +1404,7 @@ fun RouteScreen() {
      * stored value and can be changed to steer the route differently.
      */
     fun loadSavedRoute(saved: SavedRoute) {
+        cancelFromLocationRequest()
         savedRoutesOpen = false
         importedGpxName = null
         importedGpxMilestones = emptyList()
@@ -973,6 +1439,7 @@ fun RouteScreen() {
         waypoints: List<GeoPoint>,
         milestones: List<GpxMilestone>,
     ) {
+        cancelFromLocationRequest()
         val routingPoints = GpxGeometry.routingPoints(points, waypoints)
         val start = routingPoints.first()
         val end = routingPoints.last()
@@ -1102,22 +1569,28 @@ fun RouteScreen() {
         onDispose { navigationController.stop() }
     }
 
-    // Follow the rider while guidance runs: the camera re-centres on the
-    // snapped position and eases out as speed rises so the view ahead stays
-    // readable at pace. Small stationary fixes do not restart camera motion.
-    // Location lock: re-centre on each fix at the user's zoom (followZoom),
-    // never re-asserting a fixed level, so manual zoom works while locked.
-    // Guidance already owns the camera; the lock only matters in planning
-    // mode.
-    LaunchedEffect(trackedFix, followMe, followZoom, guidanceRequested, screenStarted) {
-        if (!screenStarted) return@LaunchedEffect
-        if (!followMe || guidanceRequested) return@LaunchedEffect
-        val map = mapRef.value ?: return@LaunchedEffect
-        val fix = trackedFix ?: return@LaunchedEffect
-        if (fix.lat.isNaN() || fix.lon.isNaN()) return@LaunchedEffect
-        val camera = map.cameraPosition
-        val cameraTarget = camera.target ?: return@LaunchedEffect
-        if (shouldFollowCamera(
+    // Follow the rider in planning mode only when the planner lock is on.
+    // Guidance has its own lock and keeps its speed-based zoom and framing.
+    LaunchedEffect(
+        trackedFix,
+        followMe,
+        followZoom,
+        guidanceRequested,
+        screenStarted,
+        cameraFollowSuspension,
+    ) {
+        withContext(Dispatchers.Main.immediate) {
+            if (!screenStarted) return@withContext
+            if (!followMe || guidanceRequested) return@withContext
+            if (cameraFollowSuspension.isSuspended(SystemClock.elapsedRealtime())) {
+                return@withContext
+            }
+            val map = mapRef.value ?: return@withContext
+            val fix = trackedFix ?: return@withContext
+            if (fix.lat.isNaN() || fix.lon.isNaN()) return@withContext
+            val camera = map.cameraPosition
+            val cameraTarget = camera.target ?: return@withContext
+            val needsPositionOrZoom = shouldFollowCamera(
                 cameraTarget.latitude,
                 cameraTarget.longitude,
                 camera.zoom,
@@ -1126,12 +1599,64 @@ fun RouteScreen() {
                 followZoom,
                 followMovementThresholdMeters(fix.speedMps),
             )
-        ) {
-            map.animateCamera(
-                CameraUpdateFactory.newLatLngZoom(LatLng(fix.lat, fix.lon), followZoom),
-                400,
-            )
+            val needsOrientation = planningOrientationNeedsUpdate(camera.bearing, camera.tilt)
+            if (needsPositionOrZoom || needsOrientation) {
+                map.animateCamera(
+                    CameraUpdateFactory.newCameraPosition(
+                        CameraPosition.Builder(camera)
+                            .target(LatLng(fix.lat, fix.lon))
+                            .zoom(followZoom)
+                            .bearing(0.0)
+                            .tilt(0.0)
+                            .build(),
+                    ),
+                    400,
+                )
+            }
         }
+    }
+    // Finish the grace period even when the rider is stationary and no new
+    // location fix arrives. Resetting the state re-enables follow and gives
+    // tests/visual tooling a settled `followSuspended=false` snapshot.
+    LaunchedEffect(cameraFollowSuspension) {
+        val pending = cameraFollowSuspension
+        if (pending.gestureActive) return@LaunchedEffect
+        val remainingMs = pending.remainingDelayMs(SystemClock.elapsedRealtime())
+        if (remainingMs > 0L) delay(remainingMs)
+        if (cameraFollowSuspension != pending) return@LaunchedEffect
+        cameraFollowSuspension = pending.cooldownElapsed()
+        if (debugLogs && !MapPerfProbeGate.sweepActive) {
+            val camera = withContext(Dispatchers.Main.immediate) {
+                mapRef.value?.cameraPosition
+            }
+            camera?.let {
+                val locked = if (guidanceRequested) guidanceCameraLocked else followMe
+                VisualRouteSnapshot.writeCamera(
+                    context.cacheDir,
+                    it,
+                    guidanceRequested,
+                    followSuspended = false,
+                    cameraLocked = locked,
+                )
+            }
+        }
+    }
+    // The debug camera probe also exposes lock transitions that do not move
+    // the native camera (for example, turning follow on while already centred).
+    LaunchedEffect(debugLogs, mapRef.value, followMe, guidanceRequested, guidanceCameraLocked) {
+        if (!debugLogs || MapPerfProbeGate.sweepActive) return@LaunchedEffect
+        val camera = withContext(Dispatchers.Main.immediate) {
+            mapRef.value?.cameraPosition
+        } ?: return@LaunchedEffect
+        val locked = if (guidanceRequested) guidanceCameraLocked else followMe
+        VisualRouteSnapshot.writeCamera(
+            context.cacheDir,
+            camera,
+            guidanceRequested,
+            followSuspended = locked &&
+                cameraFollowSuspension.isSuspended(SystemClock.elapsedRealtime()),
+            cameraLocked = locked,
+        )
     }
     // On the first usable fix, move the initial map viewport to the rider.
     // This is intentionally one-shot: later fixes update the position marker,
@@ -1160,72 +1685,116 @@ fun RouteScreen() {
         initialLocationCentered = true
         Log.i(TAG, "Initial map viewport centered on the first location fix")
     }
-    // Manual zoom (pinch or the +/- pill) while locked: adopt the new zoom
-    // into followZoom so the re-centre effect keeps the user's level.
+    // In planning mode, manual zoom changes followZoom so the location lock
+    // keeps the user's selected level.
     val latestFollowMe = rememberUpdatedState(followMe)
+    val latestGuidanceCameraLocked = rememberUpdatedState(guidanceCameraLocked)
     DisposableEffect(mapRef.value) {
         val map = mapRef.value ?: return@DisposableEffect onDispose { }
-        var gestureStart: CameraPosition? = null
-        val moveStarted = MapLibreMap.OnCameraMoveStartedListener { reason ->
-            gestureStart = if (
-                reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE &&
-                latestFollowMe.value
-            ) {
-                map.cameraPosition
-            } else {
-                null
+        var gestureStartZoom: Double? = null
+        var mapTouchActive = false
+        var mapTouchWasLocked = false
+        fun cameraLockActive(): Boolean = if (latestGuidanceRequested.value) {
+            latestGuidanceCameraLocked.value
+        } else {
+            latestFollowMe.value
+        }
+        fun finishMapGesture() {
+            if (!mapTouchActive && gestureStartZoom == null) return
+            val lockedGesture = mapTouchWasLocked || gestureStartZoom != null
+            mapTouchActive = false
+            mapTouchWasLocked = false
+            if (!lockedGesture) return
+            if (latestFollowMe.value && !latestGuidanceRequested.value) {
+                followZoom = map.cameraPosition.zoom
+            }
+            gestureStartZoom = null
+            val endedAt = SystemClock.elapsedRealtime()
+            cameraFollowSuspension = cameraFollowSuspension.gestureEnded(endedAt)
+            if (debugLogs && !MapPerfProbeGate.sweepActive) {
+                // Publish the camera at pointer-up as well as native idle. The
+                // map can still be finishing its gesture animation, and the
+                // debug runner needs an immediate snapshot of the real angle
+                // plus the active follow pause.
+                val guidanceActive = latestGuidanceRequested.value
+                val locked = cameraLockActive()
+                VisualRouteSnapshot.writeCamera(
+                    context.cacheDir,
+                    map.cameraPosition,
+                    guidanceActive,
+                    followSuspended = locked &&
+                        cameraFollowSuspension.isSuspended(endedAt),
+                    cameraLocked = locked,
+                )
             }
         }
-        val listener = MapLibreMap.OnCameraMoveListener {
-            if (latestFollowMe.value) {
-                val camera = map.cameraPosition
-                val start = gestureStart
-                val startTarget = start?.target
-                val currentTarget = camera.target
-                if (startTarget != null && currentTarget != null &&
-                    isManualPan(
-                        startTarget.latitude,
-                        startTarget.longitude,
-                        start.zoom,
-                        currentTarget.latitude,
-                        currentTarget.longitude,
-                        camera.zoom,
-                    )
-                ) {
-                    // A rider who drags the map has explicitly released the
-                    // lock; later fixes should not pull the view back.
-                    followMe = false
-                    gestureStart = null
+        val touchListener = View.OnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    mapTouchActive = true
+                    mapTouchWasLocked = cameraLockActive()
+                    if (mapTouchWasLocked) {
+                        gestureStartZoom = map.cameraPosition.zoom
+                        cameraFollowSuspension = cameraFollowSuspension.gestureStarted()
+                    }
                 }
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> finishMapGesture()
+            }
+            // Observe the pointers while leaving every event for MapLibre's
+            // normal pan, pinch, rotate, and two-finger tilt recognizers.
+            false
+        }
+        mapView.setOnTouchListener(touchListener)
+        val moveStarted = MapLibreMap.OnCameraMoveStartedListener { reason ->
+            if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE &&
+                cameraLockActive()
+            ) {
+                if (gestureStartZoom == null) gestureStartZoom = map.cameraPosition.zoom
+                cameraFollowSuspension = cameraFollowSuspension.gestureStarted()
             }
         }
         val idle = MapLibreMap.OnCameraIdleListener {
-            val userGesture = gestureStart != null
-            gestureStart = null
-            if (userGesture && latestFollowMe.value) {
-                // Capture a manual pinch's final zoom once. Programmatic
-                // follow animations have no gestureStart and cannot feed a
-                // camera -> state -> animation loop.
-                followZoom = map.cameraPosition.zoom
-            }
-            if (debugLogs) {
+            // Native camera idle may fire while a rider is holding a finger
+            // still on the map. The raw touch observer owns the true end of
+            // the gesture; this fallback covers native gestures without a
+            // delivered touch sequence and never ends an active touch early.
+            if (!mapTouchActive && gestureStartZoom != null) finishMapGesture()
+            if (debugLogs && !MapPerfProbeGate.sweepActive) {
                 // Debug seam for tools/test/visual.py: publish the settled
                 // camera so the runner can check guidance framing and the
-                // planning-camera restore after END.
+                // planning-camera restore after END. Suppressed while a perf
+                // sweep drives the camera, so the benchmark measures the map
+                // and not its own debug bookkeeping.
                 val settled = map.cameraPosition
                 val guidanceActive = latestGuidanceRequested.value
+                val suspension = cameraFollowSuspension
+                val locked = if (guidanceActive) {
+                    latestGuidanceCameraLocked.value
+                } else {
+                    latestFollowMe.value
+                }
+                val suspended = locked && suspension.isSuspended(SystemClock.elapsedRealtime())
                 scope.launch(Dispatchers.IO) {
-                    VisualRouteSnapshot.writeCamera(context.cacheDir, settled, guidanceActive)
+                    VisualRouteSnapshot.writeCamera(
+                        context.cacheDir,
+                        settled,
+                        guidanceActive,
+                        followSuspended = suspended,
+                        cameraLocked = locked,
+                    )
                 }
             }
         }
         map.addOnCameraMoveStartedListener(moveStarted)
-        map.addOnCameraMoveListener(listener)
+        // Zoom-gated tile LOD: the coarse distant-tile shift only applies to
+        // wide views (<= z15); close views keep pre-LOD rendering. The band
+        // changes rarely, so this makes no native call while it is stable.
         map.addOnCameraIdleListener(idle)
         onDispose {
             map.removeOnCameraMoveStartedListener(moveStarted)
-            map.removeOnCameraMoveListener(listener)
             map.removeOnCameraIdleListener(idle)
+            mapView.setOnTouchListener(null)
         }
     }
 
@@ -1254,10 +1823,13 @@ fun RouteScreen() {
     LaunchedEffect(
         trackingActive,
         guidanceRequested,
+        guidanceCameraLocked,
         loadedStyleJson,
         mapRef.value,
         screenStarted,
         markerDensity,
+        darkGuidanceStyle,
+        cameraFollowSuspension,
     ) {
         if (!screenStarted) return@LaunchedEffect
         val map = mapRef.value ?: return@LaunchedEffect
@@ -1268,51 +1840,69 @@ fun RouteScreen() {
         }
         if (guidanceRequested) {
             navigationController.snapshot.collect { snap ->
-                if (snap.state == NavigationState.Idle || !snap.lat.isFinite() || !snap.lon.isFinite()) {
-                    map.hideNavPosition()
-                    return@collect
-                }
-                val camera = map.cameraPosition
-                val bearing = guidanceBearingTracker.resolve(snap.bearingDeg, camera.bearing)
-                map.updateGuidancePosition(snap.lat, snap.lon, bearing, markerDensity)
-                val zoom = guidanceZoomFor(snap.speedMps)
-                val cameraTarget = camera.target ?: return@collect
-                val needsPositionOrZoom = shouldFollowCamera(
-                    cameraTarget.latitude,
-                    cameraTarget.longitude,
-                    camera.zoom,
-                    snap.lat,
-                    snap.lon,
-                    zoom,
-                    followMovementThresholdMeters(snap.speedMps),
-                )
-                if (needsPositionOrZoom || guidanceOrientationNeedsUpdate(
+                // MapLibre requires native updates on the Android UI thread,
+                // including emissions resumed by snapshot/test dispatchers.
+                withContext(Dispatchers.Main.immediate) {
+                    if (snap.state == NavigationState.Idle || !snap.lat.isFinite() || !snap.lon.isFinite()) {
+                        map.hideNavPosition()
+                        return@withContext
+                    }
+                    val camera = map.cameraPosition
+                    val bearing = guidanceBearingTracker.resolve(snap.bearingDeg, camera.bearing)
+                    map.updateGuidancePosition(
+                        snap.lat,
+                        snap.lon,
+                        bearing,
+                        markerDensity,
+                        monochrome = darkGuidanceStyle,
+                    )
+                    // Navigation and the position marker remain live while the
+                    // rider inspects the map with the camera lock released.
+                    if (!guidanceCameraLocked) return@withContext
+                    if (cameraFollowSuspension.isSuspended(SystemClock.elapsedRealtime())) {
+                        return@withContext
+                    }
+                    val zoom = guidanceZoomFor(snap.speedMps)
+                    val cameraTarget = camera.target ?: return@withContext
+                    val needsPositionOrZoom = shouldFollowCamera(
+                        cameraTarget.latitude,
+                        cameraTarget.longitude,
+                        camera.zoom,
+                        snap.lat,
+                        snap.lon,
+                        zoom,
+                        followMovementThresholdMeters(snap.speedMps),
+                    )
+                    val needsOrientation = guidanceOrientationNeedsUpdate(
                         cameraBearing = camera.bearing,
                         targetBearing = bearing,
                         cameraTilt = camera.tilt,
                     )
-                ) {
-                    val topPadding = (mapView.height.coerceAtLeast(0) * GUIDANCE_TOP_PADDING_FRACTION)
-                    map.animateCamera(
-                        CameraUpdateFactory.newCameraPosition(
-                            CameraPosition.Builder()
-                                .target(LatLng(snap.lat, snap.lon))
-                                .zoom(zoom)
-                                .bearing(bearing)
-                                .tilt(GUIDANCE_TILT_DEGREES)
-                                .padding(0.0, topPadding, 0.0, 0.0)
-                                .build(),
-                        ),
-                        600,
-                    )
+                    if (needsPositionOrZoom || needsOrientation) {
+                        val topPadding = (mapView.height.coerceAtLeast(0) * GUIDANCE_TOP_PADDING_FRACTION)
+                        map.animateCamera(
+                            CameraUpdateFactory.newCameraPosition(
+                                CameraPosition.Builder()
+                                    .target(LatLng(snap.lat, snap.lon))
+                                    .zoom(zoom)
+                                    .bearing(bearing)
+                                    .tilt(GUIDANCE_TILT_DEGREES)
+                                    .padding(0.0, topPadding, 0.0, 0.0)
+                                    .build(),
+                            ),
+                            600,
+                        )
+                    }
                 }
             }
         } else {
             snapshotFlow { trackedFix }.collect { fix ->
-                if (fix == null || !fix.lat.isFinite() || !fix.lon.isFinite()) {
-                    map.hideNavPosition()
-                } else {
-                    map.updateNavPosition(fix.lat, fix.lon, fix.bearingDeg)
+                withContext(Dispatchers.Main.immediate) {
+                    if (fix == null || !fix.lat.isFinite() || !fix.lon.isFinite()) {
+                        map.hideNavPosition()
+                    } else {
+                        map.updateNavPosition(fix.lat, fix.lon, fix.bearingDeg)
+                    }
                 }
             }
         }
@@ -1320,238 +1910,415 @@ fun RouteScreen() {
 
     // Map above, panel below: the map is exactly the region the route menu
     // does not cover, so the two never overlap and the menu cannot slide
-    // around over the map.
-    Column(
-        Modifier
-            .fillMaxSize()
-            .imePadding()
-            .semantics {
-                this[RouteUiStateKey] = routeStateName
-                this[RouteGenerationKey] = coordinator.generation
-                this[SelectedRouteKey] = selectedIndex
-                this[RouteCountKey] = routeCount
-                this[LocationPermissionKey] = locationPermissionGranted
-                this[MapInstalledKey] = mapUrl != null
-                this[GuidanceActiveKey] = guidanceRequested && navSnapshot.state != NavigationState.Idle
-                this[DarkRideMapEnabledKey] = darkRideMapEnabled
-                this[DarkGuidanceStyleReadyKey] = darkGuidanceStyle &&
-                    styleJson != null && loadedStyleJson == styleJson
-            }
-    ) {
-        Box(
+    // around over the map. The expanded settings card and its scrim sit above
+    // both regions, so a tap anywhere outside the card closes it.
+    Box(Modifier.fillMaxSize()) {
+        Column(
             Modifier
-                .fillMaxWidth()
-                .weight(1f)
+                .fillMaxSize()
+                .imePadding()
                 .semantics {
-                    this[FocusedRouteIndexKey] = selectedIndex
-                    this[MapRouteCountKey] = routeCount
-                    this[MapReadyKey] = mapRef.value != null &&
+                    this[RouteUiStateKey] = routeStateName
+                    this[RouteGenerationKey] = coordinator.generation
+                    this[SelectedRouteKey] = selectedIndex
+                    this[RouteCountKey] = routeCount
+                    this[LocationPermissionKey] = locationPermissionGranted
+                    this[MapInstalledKey] = mapUrl != null
+                    this[MapStyleJsonReadyKey] = styleJson != null
+                    this[MapNativeStyleReadyKey] = mapRef.value?.style != null
+                    this[MapStyleLoadedKey] = loadedStyleJson != null
+                    this[MapStyleMatchesRequestKey] = styleJson != null && loadedStyleJson == styleJson
+                    this[MapScreenStartedKey] = screenStarted
+                    this[MapStyleLoadStartedKey] = styleJson != null && styleLoadStartedJson == styleJson
+                    this[MapStyleLoadGenerationKey] = styleLoadGeneration
+                    this[MapAppliedStyleReadyKey] = appliedStyleJson != null
+                    this[MapAppliedStyleMatchesRequestKey] =
+                        styleJson != null && appliedStyleJson == styleJson && appliedMapRevision == mapRevision
+                    this[MapStyleLoadErrorKey] = styleLoadError
+                    this[MapLoadFailureKey] = mapImportError.orEmpty()
+                    val cameraLocked = if (guidanceRequested) guidanceCameraLocked else followMe
+                    this[FollowCameraLockedKey] = cameraLocked
+                    this[FollowCameraSuspendedKey] = cameraLocked &&
+                        cameraFollowSuspension.isSuspended(SystemClock.elapsedRealtime())
+                    this[GuidanceActiveKey] = guidanceRequested && navSnapshot.state != NavigationState.Idle
+                    this[DarkRideMapEnabledKey] = darkRideMapEnabled
+                    this[DarkGuidanceStyleReadyKey] = darkGuidanceStyle &&
                         styleJson != null && loadedStyleJson == styleJson
+                    this[MediaPanelOpenKey] = mediaPanelOpen
+                    this[MediaCenterStatusKey] = mediaState.status.name.lowercase()
+                    this[MediaAccessGrantedKey] = mediaState.access.name == "GRANTED"
+                    this[ActiveRegionKey] = activeDataset.regionId
+                    this[ActiveRegionGenerationKey] = activeDataset.generation
+                    this[InstalledRegionCountKey] = mapsState.installed.size
                 }
         ) {
-            AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
-            if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
-                NavigationHud(
-                    snapshot = navSnapshot,
-                    voiceGuidanceEnabled = voiceGuidanceEnabled,
-                    voiceGuidanceReady = voiceSpeechStatus is OfflineSpeechStatus.Ready,
-                    voiceGuidanceStatusDescription = voiceSpeechStatus.hudDescription(),
-                    onVoiceSettings = {
-                        voiceGuidanceOutput.refreshAvailability()
-                        voiceSettingsOpen = true
-                    },
-                    darkRideMapEnabled = darkRideMapEnabled,
-                    onDarkRideMapToggle = {
-                        darkRideMapEnabled = !darkRideMapEnabled
-                        routePreferences.edit()
-                            .putBoolean(DARK_RIDE_MAP_PREF, darkRideMapEnabled)
-                            .apply()
-                    },
-                    modifier = Modifier.align(Alignment.TopStart),
-                )
-            }
-            if (!guidanceRequested) {
-                RouteActionsPill(
-                    onLoadMap = chooseMapFile,
-                    onImportGpx = {
-                        gpxPicker.launch(
-                            arrayOf(
-                                "application/gpx+xml",
-                                "application/gpx",
-                                "text/xml",
-                                "application/xml",
-                                "*/*",
-                            )
-                        )
-                    },
-                    onRouteSettings = { routeSettingsOpen = true },
-                    onVoiceSettings = {
-                        voiceGuidanceOutput.refreshAvailability()
-                        voiceSettingsOpen = true
-                    },
-                    voiceGuidanceEnabled = voiceGuidanceEnabled,
-                    voiceSpeechStatus = voiceSpeechStatus,
-                    onOpenSavedRoutes = { savedRoutesOpen = true },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(top = 32.dp, end = 8.dp),
-                )
-            }
-            if (mapFileChecked && mapUrl == null) {
-                MissingMapCard(
-                    importing = mapImporting,
-                    error = mapImportError,
-                    onChooseFile = chooseMapFile,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
-            Text(
-                text = "© OpenMapTiles.org © OpenStreetMap contributors · Noto (OFL) · icons CC BY 4.0",
-                color = Color.Black,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 4.dp, end = 64.dp, bottom = 4.dp)
-                    .background(Color.White.copy(alpha = 0.78f), RoundedCornerShape(2.dp))
-                    .padding(horizontal = 4.dp, vertical = 1.dp)
-            )
-            CentreOnMeButton(
-                visible = true,
-                active = followMe,
-                onClick = {
-                    val enableFollow = !followMe
-                    if (enableFollow) {
-                        mapRef.value?.cameraPosition?.zoom?.let { followZoom = it }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .semantics {
+                        this[FocusedRouteIndexKey] = selectedIndex
+                        this[MapRouteCountKey] = routeCount
+                        this[MapReadyKey] = mapRef.value != null &&
+                            styleJson != null && loadedStyleJson == styleJson
                     }
-                    followMe = enableFollow
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 8.dp, bottom = 8.dp)
-            )
-            if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
-                NavigationDataBar(
-                    snapshot = navSnapshot,
-                    onEnd = {
-                        guidanceRequested = false
-                        // Return to planning: without this the button stays
-                        // RIDE (state is still Success) and can never start
-                        // a new route search.
-                        coordinator.reset()
-                        Log.i(TAG, "Guidance ended via END button")
-                    },
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
-            }
-            // The keyboard shrinks the map box; in that state the pill rides
-            // up under the RouteActionsPill stack and steals its taps, so it
-            // stays hidden while the IME is visible.
-            if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) {
-                ZoomPill(
-                    onZoomIn = { zoomFromPill(1.0) },
-                    onZoomOut = { zoomFromPill(-1.0) },
+            ) {
+                AndroidView(
+                    factory = { mapView },
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        // In ride mode the data bar occupies the bottom of the
-                        // map box; lift the pill above it so they never overlap.
-                        .padding(
-                            end = 8.dp,
-                            bottom = if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
-                                148.dp
-                            } else {
-                                64.dp
-                            },
-                        )
+                        .fillMaxSize()
+                        .semantics { contentDescription = "Map" },
                 )
-            }
-        }
-        RoutePlanPanel(
-            fromText = fromText,
-            fromResolved = fromPoint != null,
-            onFromChange = {
-                importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
-                fromText = it; fromPoint = null
-                activePlan = null; coordinator.invalidate()
-            },
-            onEditFrom = {
-                fromPoint = null
-                activePlan = null
-                coordinator.invalidate()
-            },
-            onFromPicked = { result ->
-                fromText =
-                    if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
-                fromPoint = GHPoint(result.lat, result.lon)
-                activePlan = null; coordinator.invalidate()
-            },
-            toText = toText,
-            toResolved = toPoint != null,
-            onToChange = {
-                importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
-                toText = it; toPoint = null
-                activePlan = null; coordinator.invalidate()
-            },
-            onEditTo = {
-                toPoint = null
-                activePlan = null
-                coordinator.invalidate()
-            },
-            onToPicked = { result ->
-                toText =
-                    if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
-                toPoint = GHPoint(result.lat, result.lon)
-                activePlan = null; coordinator.invalidate()
-            },
-            geocodeController = geocodeController,
-            state = state,
-            onSelectRoute = latestSelectRoute,
-            onRoute = onRoute,
-            complexity = complexity,
-            onComplexityChange = { complexity = it },
-            gpxImportError = gpxImportError,
-            onDismissGpxError = { gpxImportError = null },
-            onSaveRoute = ::saveProposedRoute,
-            onToggleGuidance = {
-                if (locationPermissionGranted) {
-                    guidanceRequested = true
-                } else {
-                    pendingGuidanceStart = true
-                    permissionLauncher.launch(LocationPermission.requestedPermissions)
+                if (guidanceRequested && navSnapshot.state != NavigationState.Idle) {
+                    NavigationHud(
+                        snapshot = navSnapshot,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .onGloballyPositioned { coordinates ->
+                                hudHeightPx = coordinates.size.height
+                            },
+                    )
                 }
-                Log.i(TAG, "Guidance toggled: $guidanceRequested")
-            },
-            guidanceActive = guidanceRequested,
-            importedGpxName = importedGpxName,
-            importedGpxMilestoneCount = importedGpxMilestones.size,
-            onOpenGpxPreview = { gpxPreviewOpen = true },
-            onEditImportedGpx = {
-                importedGpxName = null
-                importedGpxMilestones = emptyList()
-                gpxImportToken++
-                activePlan = null
-                coordinator.invalidate()
-            },
-            onComplexityChangeFinished = { finalComplexity ->
-                // Re-route only when the knob is released, not for every
-                // drag event. Use the gesture's final value directly so a
-                // release cannot race the next Compose state frame.
-                complexity = finalComplexity
-                Log.i(TAG, "Ride complexity dial released: $finalComplexity")
-                activePlan?.let {
-                    // Keep imported GPX shaping points on every dial edit so
-                    // complexity changes the ride along the imported plan.
-                    submitRoute(
-                        it.from,
-                        it.to,
-                        finalComplexity,
-                        maxRoadShare,
-                        blockUnpaved,
-                        viaPoints = it.viaPoints,
+                if (mapFileChecked && mapUrl == null) {
+                    MissingMapCard(
+                        importing = mapImporting,
+                        error = mapImportError,
+                        onChooseFile = chooseMapFile,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+                Text(
+                    text = "© OpenMapTiles.org © OpenStreetMap contributors · Noto (OFL) · icons CC BY 4.0",
+                    color = Color.Black,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 4.dp, end = 64.dp, bottom = 4.dp)
+                        .background(Color.White.copy(alpha = 0.78f), RoundedCornerShape(2.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                )
+                if (!mapControlsHidden) {
+                    CentreOnMeButton(
+                        visible = true,
+                        active = if (guidanceRequested) guidanceCameraLocked else followMe,
+                        description = when {
+                            guidanceRequested && guidanceCameraLocked -> "Rider lock on; tap to release"
+                            guidanceRequested -> "Rider lock off; tap to follow"
+                            followMe -> "Following your location; tap to release"
+                            else -> "Centre on me"
+                        },
+                        onClick = {
+                            if (guidanceRequested) {
+                                val enableLock = !guidanceCameraLocked
+                                if (!enableLock) {
+                                    mapRef.value?.cancelTransitions()
+                                }
+                                cameraFollowSuspension = CameraFollowSuspension()
+                                guidanceCameraLocked = enableLock
+                            } else {
+                                val enableFollow = !followMe
+                                if (enableFollow) {
+                                    mapRef.value?.cameraPosition?.zoom?.let { followZoom = it }
+                                }
+                                cameraFollowSuspension = CameraFollowSuspension()
+                                followMe = enableFollow
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(
+                                end = 8.dp,
+                                bottom = if (rideActive) dataBarHeightDp + 8.dp else 8.dp,
+                            )
+                    )
+                }
+                // The media panel is drawn BEFORE the data bar on purpose. It
+                // reaches MediaPanelJoin.fuseDepth down into the bar's empty top
+                // padding, and letting the bar paint after it hides that overlap
+                // under the bar's own opaque surface: the pair then reads as one
+                // continuous silhouette instead of two cards with a seam.
+                if (rideActive && mediaPanelOpen) {
+                    // Bound the panel to the space between the directions HUD
+                    // and the measured data bar; the card scrolls inside that
+                    // bound, so landscape cannot cover the HUD or END.
+                    BoxWithConstraints(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxSize()
+                            .padding(bottom = dataBarHeightDp - MediaPanelJoin.fuseDepth),
+                    ) {
+                        val panelMaxHeight = (maxHeight - hudHeightDp - 12.dp)
+                            .coerceAtLeast(96.dp)
+                        MediaControlCenter(
+                            state = mediaState,
+                            onCommand = { mediaController.dispatch(it) },
+                            onVolume = { mediaController.adjustVolume(it) },
+                            onSelectPlayer = { mediaController.selectSession(it) },
+                            onClose = { mediaPanelOpen = false },
+                            maxHeight = panelMaxHeight,
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        )
+                    }
+                }
+                if (rideActive) {
+                    NavigationDataBar(
+                        snapshot = navSnapshot,
+                        onEnd = {
+                            mediaPanelOpen = false
+                            guidanceRequested = false
+                            // Return to planning: without this the button stays
+                            // RIDE (state is still Success) and can never start
+                            // a new route search.
+                            coordinator.reset()
+                            Log.i(TAG, "Guidance ended via END button")
+                        },
+                        mediaPanelOpen = mediaPanelOpen,
+                        onMediaToggle = { mediaPanelOpen = !mediaPanelOpen },
+                        monochrome = darkRideMapEnabled,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            // Measure the real bar so the media panel and map
+                            // controls anchor exactly above it.
+                            .onGloballyPositioned { coordinates ->
+                                dataBarHeightPx = coordinates.size.height
+                            },
+                    )
+                }
+                // The keyboard shrinks the map box; in that state the pill rides
+                // up under the RouteActionsPill stack and steals its taps, so it
+                // stays hidden while the IME is visible.
+                if (WindowInsets.ime.getBottom(LocalDensity.current) == 0 && !mapControlsHidden) {
+                    ZoomPill(
+                        onZoomIn = { zoomFromPill(1.0) },
+                        onZoomOut = { zoomFromPill(-1.0) },
+                        rideMode = rideActive,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            // In ride mode the measured data bar occupies the
+                            // bottom of the map box; lift the pill above it (and
+                            // above the centre button) so they never overlap.
+                            .padding(
+                                end = 8.dp,
+                                bottom = if (rideActive) dataBarHeightDp + 64.dp else 64.dp,
+                            )
                     )
                 }
             }
-        )
+            RoutePlanPanel(
+                fromText = fromText,
+                fromResolved = fromPoint != null,
+                fromHint = when (val locationStatus = fromLocationState.status) {
+                    CurrentLocationStatus.Idle -> "Route from"
+                    is CurrentLocationStatus.WaitingForPermission -> "Waiting for location permission…"
+                    is CurrentLocationStatus.WaitingForFix -> "Finding current location…"
+                    is CurrentLocationStatus.Unavailable -> locationStatus.reason.hint
+                },
+                onFromChange = {
+                    cancelFromLocationRequest()
+                    importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
+                    fromText = it; fromPoint = null
+                    activePlan = null; coordinator.invalidate()
+                },
+                onEditFrom = {
+                    cancelFromLocationRequest()
+                    fromPoint = null
+                    activePlan = null
+                    coordinator.invalidate()
+                },
+                onFromPicked = { result ->
+                    cancelFromLocationRequest()
+                    fromText =
+                        if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
+                    fromPoint = GHPoint(result.lat, result.lon)
+                    activePlan = null; coordinator.invalidate()
+                },
+                onUseCurrentLocation = requestCurrentLocation,
+                toText = toText,
+                toResolved = toPoint != null,
+                onToChange = {
+                    importedGpxName = null; importedGpxMilestones = emptyList(); gpxImportToken++
+                    toText = it; toPoint = null
+                    activePlan = null; coordinator.invalidate()
+                },
+                onEditTo = {
+                    toPoint = null
+                    activePlan = null
+                    coordinator.invalidate()
+                },
+                onToPicked = { result ->
+                    toText =
+                        if (result.subtitle.isNotBlank()) "${result.name}, ${result.subtitle}" else result.name
+                    toPoint = GHPoint(result.lat, result.lon)
+                    activePlan = null; coordinator.invalidate()
+                },
+                geocodeController = geocodeController,
+                state = state,
+                onSelectRoute = latestSelectRoute,
+                onRoute = onRoute,
+                complexity = complexity,
+                onComplexityChange = { complexity = it },
+                gpxImportError = gpxImportError,
+                onDismissGpxError = { gpxImportError = null },
+                onSaveRoute = ::saveProposedRoute,
+                onToggleGuidance = {
+                    if (locationPermissionGranted) {
+                        guidanceRequested = true
+                    } else {
+                        pendingGuidanceStart = true
+                        permissionLauncher.launch(LocationPermission.requestedPermissions)
+                    }
+                    Log.i(TAG, "Guidance toggled: $guidanceRequested")
+                },
+                guidanceActive = guidanceRequested,
+                importedGpxName = importedGpxName,
+                importedGpxMilestoneCount = importedGpxMilestones.size,
+                onOpenGpxPreview = { gpxPreviewOpen = true },
+                onEditImportedGpx = {
+                    importedGpxName = null
+                    importedGpxMilestones = emptyList()
+                    gpxImportToken++
+                    activePlan = null
+                    coordinator.invalidate()
+                },
+                onComplexityChangeFinished = { finalComplexity ->
+                    // Re-route only when the knob is released, not for every
+                    // drag event. Use the gesture's final value directly so a
+                    // release cannot race the next Compose state frame.
+                    complexity = finalComplexity
+                    Log.i(TAG, "Ride complexity dial released: $finalComplexity")
+                    activePlan?.let {
+                        // Keep imported GPX shaping points on every dial edit so
+                        // complexity changes the ride along the imported plan.
+                        submitRoute(
+                            it.from,
+                            it.to,
+                            finalComplexity,
+                            maxRoadShare,
+                            blockUnpaved,
+                            viaPoints = it.viaPoints,
+                        )
+                    }
+                }
+            )
+        }
+        // Tapping anywhere outside the expanded card dismisses the settings
+        // menu. The rail is drawn after this scrim, so its own 48 dp targets
+        // stay reachable while the menu is open.
+        if (mapsSettingsOpen) {
+            MapsSettingsScreen(
+                state = visualMapsPreview ?: mapsState,
+                rideActive = rideActive,
+                onDismiss = {
+                    regionManager.clearMessages()
+                    mapsSettingsOpen = false
+                },
+                onCheckServer = { address ->
+                    regionManager.saveServerAddress(address)
+                    regionManager.checkServer()
+                },
+                onToggleInsecure = regionManager::setAllowInsecureLocal,
+                onRequestBuild = regionManager::requestBuild,
+                onCancelBuild = regionManager::cancelActiveJob,
+                onDownloadPackage = { regionId ->
+                    pendingMapsDownload = MapsDownloadAction.New(regionId)
+                    mapsDownloadPicker.launch(regionManager.suggestedFileName(regionId))
+                },
+                onCancelDownload = regionManager::cancelDownload,
+                onResumeDownload = {
+                    pendingMapsDownload = MapsDownloadAction.Resume
+                    mapsDownloadPicker.launch(regionManager.suggestedFileNameForResume())
+                },
+                onSaveRecoveredPackage = {
+                    pendingMapsDownload = MapsDownloadAction.SaveRecovered
+                    mapsDownloadPicker.launch(regionManager.suggestedFileNameForRecovered())
+                },
+                onImportRecoveredPackage = regionManager::importRecoveredPackage,
+                onImportSavedPackage = regionManager::importSavedPackage,
+                onImportPackage = {
+                    mapsPackagePicker.launch(arrayOf("application/octet-stream", "application/zip", "*/*"))
+                },
+                onActivate = regionManager::activate,
+                onActivateBundled = regionManager::activateBundled,
+                onRemove = regionManager::requestRemove,
+                onDismissMessage = regionManager::clearMessages,
+            )
+        }
+        if (settingsMenuOpen) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .clickable(
+                        interactionSource = null,
+                        indication = null,
+                        onClick = { settingsMenuOpen = false },
+                    )
+            )
+        }
+        if (!guidanceRequested || rideActive) {
+            RouteActionsPill(
+                onLoadMap = chooseMapFile,
+                onImportGpx = {
+                    gpxPicker.launch(
+                        arrayOf(
+                            "application/gpx+xml",
+                            "application/gpx",
+                            "text/xml",
+                            "application/xml",
+                            "*/*",
+                        )
+                    )
+                },
+                onRouteSettings = {
+                    // The settings dialogs share the APPLY label; only one may
+                    // be open at a time so the confirm action is unambiguous.
+                    voiceSettingsOpen = false
+                    routeSettingsOpen = true
+                },
+                onMapsSettings = {
+                    regionManager.clearMessages()
+                    routeSettingsOpen = false
+                    voiceSettingsOpen = false
+                    mapsSettingsOpen = true
+                },
+                onVoiceSettings = {
+                    routeSettingsOpen = false
+                    voiceGuidanceOutput.refreshAvailability()
+                    voiceSettingsOpen = true
+                },
+                voiceGuidanceEnabled = voiceGuidanceEnabled,
+                voiceSpeechStatus = voiceSpeechStatus,
+                onOpenSavedRoutes = { savedRoutesOpen = true },
+                settingsMenuExpanded = settingsMenuOpen,
+                onSettingsMenuExpandedChange = { settingsMenuOpen = it },
+                rideMode = rideActive,
+                darkRideMapEnabled = darkRideMapEnabled,
+                monochrome = darkRideMapEnabled,
+                onDarkRideMapToggle = {
+                    darkRideMapEnabled = !darkRideMapEnabled
+                    routePreferences.edit()
+                        .putBoolean(DARK_RIDE_MAP_PREF, darkRideMapEnabled)
+                        .apply()
+                },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 32.dp, end = if (rideActive) 0.dp else 8.dp),
+            )
+        }
+    }
+    BackHandler(enabled = settingsMenuOpen) { settingsMenuOpen = false }
+    // The Maps screen is a full-screen surface; system Back closes it like the
+    // other screens opened from the settings card. The card keeps priority
+    // when it is also open (it is drawn above the Maps screen).
+    BackHandler(enabled = mapsSettingsOpen && !settingsMenuOpen) {
+        regionManager.clearMessages()
+        mapsSettingsOpen = false
+    }
+    // System Back closes the open media panel instead of leaving the app. The
+    // settings card keeps priority: this handler is disabled while it is open,
+    // so one Back always peels exactly the top-most surface.
+    BackHandler(enabled = rideActive && mediaPanelOpen && !settingsMenuOpen) {
+        mediaPanelOpen = false
     }
 
     if (routeSettingsOpen) {
@@ -1675,6 +2442,25 @@ fun RouteScreen() {
 private fun coordinateLabel(point: GeoPoint): String =
     "%.5f, %.5f".format(Locale.US, point.lat, point.lon)
 
+/**
+ * Turns GraphHopper's routing errors into honest user-facing messages. Points
+ * outside the active dataset are the expected failure when a saved ride or a
+ * search result belongs to a region that is not installed; the message says so
+ * instead of leaking the engine's internal wording.
+ */
+internal fun describeRoutingFailure(message: String): String {
+    val lower = message.lowercase(Locale.US)
+    return when {
+        lower.contains("out of bounds") || lower.contains("outside of the") ->
+            "That place is outside the active region. Install or activate a region that covers it."
+        lower.contains("no route was found") ->
+            "No route was found in the active region."
+        lower.contains("no road") ->
+            "No routable road was found near one of the points in the active region."
+        else -> message
+    }
+}
+
 private fun milestoneEndpointLabel(milestone: GpxMilestone): String =
     listOfNotNull(milestone.placeName, milestone.placeDetail?.takeIf(String::isNotBlank))
         .joinToString(", ")
@@ -1742,6 +2528,13 @@ internal fun guidanceOrientationNeedsUpdate(
     cameraTilt: Double,
 ): Boolean = bearingDistanceDegrees(cameraBearing, targetBearing) >= 6.0 ||
     !cameraTilt.isFinite() || kotlin.math.abs(cameraTilt - GUIDANCE_TILT_DEGREES) >= 1.0
+
+/** Planner follow always returns a manually tilted/rotated map to north-up. */
+internal fun planningOrientationNeedsUpdate(
+    cameraBearing: Double,
+    cameraTilt: Double,
+): Boolean = bearingDistanceDegrees(cameraBearing, 0.0) >= 1.0 ||
+    !cameraTilt.isFinite() || kotlin.math.abs(cameraTilt) >= 1.0
 
 private fun normalizeBearing(bearing: Double): Double = ((bearing % 360.0) + 360.0) % 360.0
 
@@ -1838,40 +2631,45 @@ internal fun savedRouteViaPoints(saved: SavedRoute): List<GHPoint> {
 private fun ZoomPill(
     onZoomIn: () -> Unit,
     onZoomOut: () -> Unit,
+    rideMode: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val iconColor = if (rideMode) RideSurfaceColor else Color(0x8A000000)
     Column(
         modifier = modifier
             .size(width = 48.dp, height = 96.dp)
             .clip(RoundedCornerShape(24.dp))
             .background(Color.White)
     ) {
-        ZoomPillCell(plus = true, onClick = onZoomIn)
+        ZoomPillCell(plus = true, iconColor = iconColor, onClick = onZoomIn)
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(1.dp)
                 .background(Color(0xFF1E000000))
         )
-        ZoomPillCell(plus = false, onClick = onZoomOut)
+        ZoomPillCell(plus = false, iconColor = iconColor, onClick = onZoomOut)
     }
 }
 
 /**
- * 48 dp round button that locks the camera on the rider's position. While
- * active it tints blue and recentres on every fix; any manual map gesture
- * releases the lock. Sits at the bottom-right of the map, below the zoom pill.
+ * A 48 dp map control that toggles camera lock to the rider. Planning keeps its
+ * selected zoom; guidance restores its speed-based framing when the lock returns.
+ *
+ * It shares the map pills' palette — white fill with [RideSurfaceColor] ink —
+ * and inverts it while the lock is on, so no third colour appears on the map.
  */
 @Composable
 private fun CentreOnMeButton(
     visible: Boolean,
     active: Boolean,
+    description: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (!visible) return
     val backgroundColor by animateColorAsState(
-        targetValue = if (active) Color(0xFF249CF2) else Color.White,
+        targetValue = if (active) RideSurfaceColor else Color.White,
         label = "followMeBackground",
     )
     Box(
@@ -1880,31 +2678,35 @@ private fun CentreOnMeButton(
             .clip(RoundedCornerShape(24.dp))
             .background(backgroundColor)
             .semantics {
-                contentDescription =
-                    if (active) "Following your location; tap to release" else "Centre on me"
+                contentDescription = description
             }
             .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
-        Canvas(Modifier.size(24.dp)) {
-            // Crosshair: dot ring plus four ticks, like the repo's other
-            // hand-drawn map icons.
-            val stroke = 2.dp.toPx()
-            val color = if (active) Color.White else Color(0xFF249CF2)
-            drawCircle(color = color, radius = 5.dp.toPx(), style = Stroke(stroke))
-            drawCircle(color = color, radius = 1.8.dp.toPx())
-            val tick = 4.dp.toPx()
-            val edge = 11.dp.toPx()
-            drawLine(color, Offset(center.x, center.y - edge - tick), Offset(center.x, center.y - edge), stroke, StrokeCap.Round)
-            drawLine(color, Offset(center.x, center.y + edge), Offset(center.x, center.y + edge + tick), stroke, StrokeCap.Round)
-            drawLine(color, Offset(center.x - edge - tick, center.y), Offset(center.x - edge, center.y), stroke, StrokeCap.Round)
-            drawLine(color, Offset(center.x + edge, center.y), Offset(center.x + edge + tick, center.y), stroke, StrokeCap.Round)
-        }
+        CentreOnMeGlyph(color = if (active) Color.White else RideSurfaceColor)
+    }
+}
+
+/**
+ * The shared map-target glyph for the planner and ride camera-lock controls.
+ */
+@Composable
+internal fun CentreOnMeGlyph(color: Color = RideSurfaceColor) {
+    Canvas(Modifier.size(24.dp)) {
+        val stroke = 2.dp.toPx()
+        drawCircle(color = color, radius = 5.dp.toPx(), style = Stroke(stroke))
+        drawCircle(color = color, radius = 1.8.dp.toPx())
+        val tick = 4.dp.toPx()
+        val edge = 11.dp.toPx()
+        drawLine(color, Offset(center.x, center.y - edge - tick), Offset(center.x, center.y - edge), stroke, StrokeCap.Round)
+        drawLine(color, Offset(center.x, center.y + edge), Offset(center.x, center.y + edge + tick), stroke, StrokeCap.Round)
+        drawLine(color, Offset(center.x - edge - tick, center.y), Offset(center.x - edge, center.y), stroke, StrokeCap.Round)
+        drawLine(color, Offset(center.x + edge, center.y), Offset(center.x + edge + tick, center.y), stroke, StrokeCap.Round)
     }
 }
 
 @Composable
-private fun ZoomPillCell(plus: Boolean, onClick: () -> Unit) {
+private fun ZoomPillCell(plus: Boolean, iconColor: Color, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     Box(
@@ -1918,7 +2720,7 @@ private fun ZoomPillCell(plus: Boolean, onClick: () -> Unit) {
         Canvas(Modifier.size(20.dp)) {
             val stroke = 2.5.dp.toPx()
             val half = 10.dp.toPx()
-            val lineColor = Color(0xFF8A000000)
+            val lineColor = iconColor
             if (plus) {
                 drawLine(
                     color = lineColor,
@@ -2031,28 +2833,35 @@ private fun rememberMapView(
     val mapView = remember { MapView(context) }
 
     DisposableEffect(lifecycleOwner, mapView) {
+        var destroyedByLifecycle = false
         val observer = LifecycleEventObserver { _, event ->
+            if (isDebugBuild(context.applicationContext)) {
+                Log.d(TAG, "MapView lifecycle event=$event state=${lifecycleOwner.lifecycle.currentState}")
+            }
             when (event) {
                 Lifecycle.Event.ON_CREATE -> mapView.onCreate(null)
                 Lifecycle.Event.ON_START -> mapView.onStart()
                 Lifecycle.Event.ON_RESUME -> mapView.onResume()
                 Lifecycle.Event.ON_PAUSE -> mapView.onPause()
                 Lifecycle.Event.ON_STOP -> mapView.onStop()
-                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                Lifecycle.Event.ON_DESTROY -> {
+                    destroyedByLifecycle = true
+                    mapView.onDestroy()
+                }
                 else -> Unit
             }
         }
+        if (isDebugBuild(context.applicationContext)) {
+            Log.d(TAG, "Registering MapView lifecycle observer at ${lifecycleOwner.lifecycle.currentState}")
+        }
         lifecycleOwner.lifecycle.addObserver(observer)
-        val current = lifecycleOwner.lifecycle.currentState
-        if (current.isAtLeast(Lifecycle.State.CREATED)) mapView.onCreate(null)
-        if (current.isAtLeast(Lifecycle.State.STARTED)) mapView.onStart()
-        if (current.isAtLeast(Lifecycle.State.RESUMED)) mapView.onResume()
         mapView.getMapAsync { map ->
+            map.uiSettings.isTiltGesturesEnabled = true
             onMapReady(map)
         }
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            mapView.onDestroy()
+            if (!destroyedByLifecycle) mapView.onDestroy()
         }
     }
     return mapView

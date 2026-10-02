@@ -154,9 +154,17 @@ class CameraFollowPolicyTest {
     }
 
     @Test
-    fun aMapDragReleasesFollowButAZoomGestureDoesNotCountAsAPan() {
+    fun cameraGestureMovementCanDistinguishPanFromZoom() {
         assertTrue(isManualPan(0.0, 0.0, 16.0, 0.0002, 0.0, 16.0))
         assertFalse(isManualPan(0.0, 0.0, 16.0, 0.0002, 0.0, 16.5))
         assertFalse(isManualPan(0.0, 0.0, 16.0, 0.00001, 0.0, 16.0))
+    }
+
+    @Test
+    fun plannerFollowRestoresNorthUpAfterManualTiltOrRotation() {
+        assertFalse(planningOrientationNeedsUpdate(cameraBearing = 0.0, cameraTilt = 0.0))
+        assertTrue(planningOrientationNeedsUpdate(cameraBearing = 0.0, cameraTilt = 20.0))
+        assertTrue(planningOrientationNeedsUpdate(cameraBearing = 45.0, cameraTilt = 0.0))
+        assertTrue(planningOrientationNeedsUpdate(cameraBearing = Double.NaN, cameraTilt = 0.0))
     }
 }

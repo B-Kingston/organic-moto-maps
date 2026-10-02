@@ -55,6 +55,24 @@ class FontScaleTest {
         assertStableSurfaceAndStart()
     }
 
+    @Test
+    fun fontScaleTwoKeepsSettingsCardRowsTappable() {
+        setRouteScreen(fontScale = 2f)
+        composeRule.onNodeWithContentDescription("Planning settings").performClick()
+        val minimum = 48f * composeRule.density.density
+        val root = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
+        listOf("Route settings", "Load map file", "Import GPX route", "Sound settings")
+            .forEach { label ->
+                val row = composeRule.onNodeWithText(label)
+                row.assertExists()
+                row.assertHasClickAction()
+                val bounds = row.fetchSemanticsNode().boundsInRoot
+                assertTrue("$label height ${bounds.height}", bounds.height >= minimum)
+                assertTrue("$label must stay on screen", bounds.left >= root.left)
+                assertTrue("$label must stay on screen", bounds.right <= root.right)
+            }
+    }
+
     private fun setRouteScreen(fontScale: Float) {
         val density = composeRule.density
         composeRule.setContent {

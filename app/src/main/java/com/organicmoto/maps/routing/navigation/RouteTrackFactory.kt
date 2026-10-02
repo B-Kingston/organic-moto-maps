@@ -2,6 +2,7 @@ package com.organicmoto.maps.routing.navigation
 
 import com.graphhopper.ResponsePath
 import com.graphhopper.util.RoundaboutInstruction
+import com.organicmoto.maps.routing.MOTO_LANES_DETAIL
 
 /**
  * Builds a [RouteTrack] from a GraphHopper [ResponsePath].
@@ -46,6 +47,25 @@ object RouteTrackFactory {
         return RouteTrack.fromPath(
             latitudes, longitudes, signs, names, pointCounts, times,
             roundaboutExitNumbers, roundaboutClockwise,
+            segmentLanes = segmentLanes(path, points.size()),
         )
+    }
+
+    /**
+     * Expands the `moto_lanes` path detail into one value per geometry
+     * segment (index v covers v -> v+1). Graphs imported before lane guidance
+     * carry no such detail and yield an empty list.
+     */
+    internal fun segmentLanes(path: ResponsePath, pointCount: Int): List<String?> {
+        val details = path.pathDetails?.get(MOTO_LANES_DETAIL) ?: return emptyList()
+        if (pointCount < 2) return emptyList()
+        val lanes = arrayOfNulls<String>(pointCount - 1)
+        for (detail in details) {
+            val value = detail.value as? String ?: continue
+            for (segment in detail.first.coerceAtLeast(0) until detail.last.coerceAtMost(pointCount - 1)) {
+                lanes[segment] = value
+            }
+        }
+        return lanes.asList()
     }
 }

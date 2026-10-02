@@ -33,9 +33,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,20 +49,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.view.View
 import com.graphhopper.ResponsePath
 import com.organicmoto.maps.geocoding.GeocodeController
 import com.organicmoto.maps.geocoding.GeocodeResult
 import com.organicmoto.maps.map.routeColorHex
 import kotlin.math.absoluteValue
+import kotlin.math.roundToInt
 
 /** Card width inside the swipeable route bar; edge padding centers the active card. */
 private val ROUTE_CARD_WIDTH = 220.dp
@@ -72,6 +78,7 @@ internal val ROUTE_PANEL_COLOR = Color(0xFFF5F5F5)
 
 /** 50 dp From/To row inside the panel (see RoutePlanSearchField). */
 private val SEARCH_FIELD_ROW_HEIGHT = 50.dp
+internal const val ROUTE_ENDPOINT_GROUP_TEST_TAG = "route-endpoint-group"
 
 /**
  * Panel-frame slot heights. Every routeless panel state — idle, typing,
@@ -89,111 +96,6 @@ internal val CAROUSEL_SLOT_HEIGHT = ROUTE_CARD_HEIGHT + 12.dp
 /** Ride controls + 50 dp From/To rows + START action row (2 + 48 + 10) + divider. */
 private val BASE_PANEL_HEIGHT = RIDE_CONTROLS_HEIGHT +
     SEARCH_FIELD_ROW_HEIGHT * 2 + 60.dp + 3.dp
-
-/**
- * Compact map-side action rail for the three less-frequent planning actions.
- * It stays in the upper-right reach zone instead of crowding the complexity
- * dial, while each cell remains a full 48 dp touch target.
- */
-@Composable
-internal fun RouteActionsPill(
-    onLoadMap: () -> Unit,
-    onImportGpx: () -> Unit,
-    onRouteSettings: () -> Unit,
-    onVoiceSettings: () -> Unit,
-    voiceGuidanceEnabled: Boolean,
-    voiceSpeechStatus: OfflineSpeechStatus,
-    onOpenSavedRoutes: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val shape = RoundedCornerShape(28.dp)
-    Surface(
-        color = Color.White.copy(alpha = 0.94f),
-        shape = shape,
-        shadowElevation = 5.dp,
-        modifier = modifier
-            .width(48.dp)
-            .border(1.dp, Color(0x22000000), shape),
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(vertical = 4.dp),
-        ) {
-            RouteActionsPillButton(
-                contentDescription = "Load map file",
-                onClick = onLoadMap,
-            ) { Text("MAP", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold) }
-            HorizontalDivider(
-                color = Color(0x1A000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-            RouteActionsPillButton(
-                contentDescription = "Import GPX route",
-                onClick = onImportGpx,
-            ) { ImportIcon() }
-            HorizontalDivider(
-                color = Color(0x1A000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-            RouteActionsPillButton(
-                contentDescription = "Route settings",
-                onClick = onRouteSettings,
-            ) { SettingsCogIcon() }
-            HorizontalDivider(
-                color = Color(0x1A000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-            RouteActionsPillButton(
-                contentDescription = "Voice guidance settings",
-                stateDescription = when {
-                    !voiceGuidanceEnabled -> "Disabled"
-                    voiceSpeechStatus is OfflineSpeechStatus.Ready -> "English offline voice ready"
-                    voiceSpeechStatus is OfflineSpeechStatus.Checking -> "Checking for an English offline voice"
-                    voiceSpeechStatus is OfflineSpeechStatus.NotStarted -> "English offline voice not checked yet"
-                    else -> "English offline voice unavailable"
-                },
-                onClick = onVoiceSettings,
-            ) {
-                VoiceGuidanceIcon(
-                    enabled = voiceGuidanceEnabled && voiceSpeechStatus is OfflineSpeechStatus.Ready,
-                    color = Color(0xFF616161),
-                )
-            }
-            HorizontalDivider(
-                color = Color(0x1A000000),
-                thickness = 1.dp,
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-            RouteActionsPillButton(
-                contentDescription = "Saved routes",
-                onClick = onOpenSavedRoutes,
-            ) { BookmarkIcon(filled = false) }
-        }
-    }
-}
-
-@Composable
-private fun RouteActionsPillButton(
-    contentDescription: String,
-    onClick: () -> Unit,
-    stateDescription: String? = null,
-    icon: @Composable () -> Unit,
-) {
-    IconButton(
-        onClick = onClick,
-        modifier = Modifier
-            .size(48.dp)
-            .semantics {
-                this.contentDescription = contentDescription
-                if (stateDescription != null) this.stateDescription = stateDescription
-            },
-    ) {
-        icon()
-    }
-}
 
 /**
  * Thin horizontal bar on top of the route-planning panel: one card per
@@ -374,9 +276,11 @@ private fun RouteCard(
 internal fun RoutePlanPanel(
     fromText: String,
     fromResolved: Boolean,
+    fromHint: String,
     onFromChange: (String) -> Unit,
     onEditFrom: () -> Unit,
     onFromPicked: (GeocodeResult) -> Unit,
+    onUseCurrentLocation: () -> Unit,
     toText: String,
     toResolved: Boolean,
     onToChange: (String) -> Unit,
@@ -400,6 +304,8 @@ internal fun RoutePlanPanel(
     onEditImportedGpx: () -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
+    val density = LocalDensity.current
+    val view = LocalView.current
     val fromSearch = rememberRouteFieldSearchState()
     val toSearch = rememberRouteFieldSearchState()
     Surface(
@@ -459,22 +365,64 @@ internal fun RoutePlanPanel(
                 // Anchor the shared result popup to the top of the complete
                 // endpoint group, not to the active field. This keeps results
                 // above both From and To when To owns the search.
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                var searchPopupAvailableHeightPx by remember {
+                    mutableStateOf(0)
+                }
+                val preferredSearchPopupHeightPx = with(density) {
+                    MAX_DROPDOWN_HEIGHT.roundToPx()
+                }
+                BoxWithConstraints(
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag(ROUTE_ENDPOINT_GROUP_TEST_TAG)
+                        .onGloballyPositioned { coordinates ->
+                            // The IME resizes this bottom-anchored panel. Measure
+                            // the open space above both endpoint rows so result
+                            // rows stay visible without changing the panel height.
+                            val visibleViewportTopPx = visibleViewportTopInWindowPx(view)
+                            val available = maxSearchDropdownHeightPx(
+                                coordinates.positionInWindow().y.roundToInt(),
+                                preferredSearchPopupHeightPx,
+                                visibleViewportTopPx,
+                            )
+                            if (available != searchPopupAvailableHeightPx) {
+                                searchPopupAvailableHeightPx = available
+                            }
+                        },
+                ) {
                     Column(Modifier.fillMaxWidth()) {
-                        RoutePlanSearchField(
-                            label = "From",
-                            hint = "Route from",
-                            icon = { StartDotIcon() },
-                            value = fromText,
-                            onValueChange = onFromChange,
-                            onResultPicked = onFromPicked,
-                            controller = geocodeController,
-                            searchState = fromSearch,
-                            modifier = Modifier.fillMaxWidth(),
-                            renderResultsPopup = false,
-                            isResolved = fromResolved,
-                            onEditResolved = onEditFrom,
-                        )
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(SEARCH_FIELD_ROW_HEIGHT),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RoutePlanSearchField(
+                                label = "From",
+                                hint = fromHint,
+                                icon = { StartDotIcon() },
+                                value = fromText,
+                                onValueChange = onFromChange,
+                                onResultPicked = onFromPicked,
+                                controller = geocodeController,
+                                searchState = fromSearch,
+                                modifier = Modifier.weight(1f),
+                                renderResultsPopup = false,
+                                isResolved = fromResolved,
+                                onEditResolved = onEditFrom,
+                            )
+                            IconButton(
+                                onClick = onUseCurrentLocation,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .semantics {
+                                        contentDescription = "Use current location"
+                                        stateDescription = fromHint
+                                    },
+                            ) {
+                                CurrentLocationPoiIcon()
+                            }
+                        }
                         HorizontalDivider(
                             color = Color(0xFF1E000000),
                             thickness = 1.dp,
@@ -496,10 +444,19 @@ internal fun RoutePlanPanel(
                         )
                     }
                     val activeSearch = fromSearch.takeIf { it.active } ?: toSearch.takeIf { it.active }
-                    if (activeSearch != null && maxWidth > 0.dp) {
+                    val searchPopupWidth = (maxWidth - 64.dp).coerceAtLeast(0.dp)
+                    if (
+                        activeSearch != null &&
+                        searchPopupWidth > 0.dp &&
+                        searchPopupAvailableHeightPx > 0
+                    ) {
                         RoutePlanSearchResultsPopup(
                             state = activeSearch,
-                            width = maxWidth,
+                            width = searchPopupWidth,
+                            maxHeight = with(density) {
+                                searchPopupAvailableHeightPx.toDp()
+                            },
+                            centerHorizontally = true,
                         )
                     }
                 }
@@ -600,6 +557,16 @@ internal fun RoutePlanPanel(
             },
         )
     }
+}
+
+/** Returns the viewport's top inset relative to the root view's window origin. */
+private fun visibleViewportTopInWindowPx(view: View): Int {
+    val rootView = view.rootView
+    val rootScreenLocation = IntArray(2)
+    rootView.getLocationOnScreen(rootScreenLocation)
+    val visibleFrame = android.graphics.Rect()
+    rootView.getWindowVisibleDisplayFrame(visibleFrame)
+    return (visibleFrame.top - rootScreenLocation[1]).coerceAtLeast(0)
 }
 
 /** Read-only, geolocated endpoint row used while an imported GPX owns the plan. */

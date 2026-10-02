@@ -3,6 +3,7 @@ package com.organicmoto.maps
 import com.graphhopper.util.Instruction
 import com.organicmoto.maps.routing.navigation.NavigationSnapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Contract of the motorsport delta formatting used by the HUD cell. */
@@ -129,9 +130,63 @@ class NavigationHudDeltaFormatTest {
     }
 
     @Test
+    fun `compact eta keeps the data bar narrow`() {
+        assertEquals("1h 19m", NavigationHudFormat.etaCompactText(79 * 60.0))
+        assertEquals("2h", NavigationHudFormat.etaCompactText(2 * 3600.0))
+        assertEquals("45m", NavigationHudFormat.etaCompactText(45 * 60.0))
+        assertEquals("<1m", NavigationHudFormat.etaCompactText(30.0))
+        assertEquals("<1m", NavigationHudFormat.etaCompactText(0.0))
+        assertEquals("12h 5m", NavigationHudFormat.etaCompactText((12 * 60 + 5) * 60.0))
+    }
+
+    @Test
     fun `delta accessibility text states direction`() {
         assertEquals("pace delta unavailable", NavigationHudFormat.deltaDescription(Double.NaN))
         assertEquals("pace +1.0 s lost", NavigationHudFormat.deltaDescription(1.0))
         assertEquals("pace -1.0 s gained", NavigationHudFormat.deltaDescription(-1.0))
+    }
+
+    @Test
+    fun narrowDataBarUsesTwoRowsInsteadOfEllipsis() {
+        val values = listOf("88", "1h 19m", "12.3 km", "+12.3 s")
+        // 320 dp cannot fit four cells plus the glove-sized media opener and
+        // END at any font scale: the bar must switch to the two-row grid.
+        assertEquals(
+            DataBarLayout.TWO_ROW,
+            NavigationHudFormat.dataBarLayout(320f, 1f, values),
+        )
+        assertEquals(
+            DataBarLayout.TWO_ROW,
+            NavigationHudFormat.dataBarLayout(320f, 1.5f, values),
+        )
+        assertEquals(
+            DataBarLayout.TWO_ROW,
+            NavigationHudFormat.dataBarLayout(320f, 2f, values),
+        )
+    }
+
+    @Test
+    fun wideDataBarKeepsTheCompactSingleRow() {
+        val values = listOf("88", "1h 19m", "12.3 km", "+12.3 s")
+        assertEquals(
+            DataBarLayout.SINGLE_ROW,
+            NavigationHudFormat.dataBarLayout(465f, 1f, values),
+        )
+        // A wide screen at a large font scale still needs the grid.
+        assertEquals(
+            DataBarLayout.TWO_ROW,
+            NavigationHudFormat.dataBarLayout(465f, 2f, values),
+        )
+    }
+
+    @Test
+    fun metricCellWidthGrowsWithValueLengthAndFontScale() {
+        val short = NavigationHudFormat.metricCellWidthDp("8", 1f)
+        val long = NavigationHudFormat.metricCellWidthDp("12.3 km", 1f)
+        assertTrue("longer value must need more room", long > short)
+        assertTrue(
+            "2x font scale must need more room",
+            NavigationHudFormat.metricCellWidthDp("12.3 km", 2f) > long * 1.5f,
+        )
     }
 }

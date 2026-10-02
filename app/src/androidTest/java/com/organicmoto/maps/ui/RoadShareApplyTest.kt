@@ -47,6 +47,9 @@ class RoadShareApplyTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
+
     @Test(timeout = 300_000)
     fun applyingRoadSharePersistsPreferenceAndReroutes() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -63,7 +66,8 @@ class RoadShareApplyTest {
         composeRule.onNodeWithText("START").performClick()
         UiTestWaits.waitForState(composeRule, "success")
 
-        composeRule.onNodeWithContentDescription("Route settings").performClick()
+        composeRule.onNodeWithContentDescription("Planning settings").performClick()
+        composeRule.onNodeWithText("Route settings").performClick()
         composeRule.onNodeWithText("Route settings", substring = true).assertExists()
 
         val currentPercent = readDialogPercent()

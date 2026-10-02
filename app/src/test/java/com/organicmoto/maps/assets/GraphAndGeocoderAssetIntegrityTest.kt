@@ -22,17 +22,24 @@ class GraphAndGeocoderAssetIntegrityTest {
         listOf("nodes", "edges", "properties").forEach { name ->
             assertTrue(
                 "Missing graph asset $name; run JAVA_HOME=/opt/homebrew/opt/openjdk@17 " +
-                    "\$JAVA_HOME/bin/java -Xmx12g -jar tools/gh/graphhopper-web-11.0.jar " +
-                    "import tools/gh/config.yml; cp -R data/graph-cache app/src/main/assets/graph-cache",
+                    "\$JAVA_HOME/bin/java -Xmx12g -cp tools/gh/graphhopper-web-11.0.jar " +
+                    "tools/gh/MotoGraphImport.java import tools/gh/config.yml; cp -R data/graph-cache app/src/main/assets/graph-cache",
                 graph.resolve(name).isFile,
             )
         }
         val properties = graph.resolve("properties").readBytes().toString(Charsets.ISO_8859_1)
         assertTrue(
             "Graph profile marker is missing; run JAVA_HOME=/opt/homebrew/opt/openjdk@17 " +
-                "\$JAVA_HOME/bin/java -Xmx12g -jar tools/gh/graphhopper-web-11.0.jar " +
-                "import tools/gh/config.yml; cp -R data/graph-cache app/src/main/assets/graph-cache",
+                "\$JAVA_HOME/bin/java -Xmx12g -cp tools/gh/graphhopper-web-11.0.jar " +
+                "tools/gh/MotoGraphImport.java import tools/gh/config.yml; cp -R data/graph-cache app/src/main/assets/graph-cache",
             properties.contains("profiles=motorcycle|198752012"),
+        )
+        // Lane guidance is written to edge KV storage only by tools/gh/MotoGraphImport.java;
+        // a graph from the stock `-jar ... import` would silently drop every lane hint.
+        val kvKeys = graph.resolve("edgekv_keys")
+        assertTrue(
+            "Graph has no moto_lanes lane guidance; re-import with tools/gh/MotoGraphImport.java",
+            kvKeys.isFile && kvKeys.readBytes().toString(Charsets.ISO_8859_1).contains("moto_lanes"),
         )
     }
 

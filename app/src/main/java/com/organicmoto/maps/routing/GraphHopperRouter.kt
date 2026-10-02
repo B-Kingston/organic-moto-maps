@@ -12,6 +12,8 @@ import java.io.File
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.util.Collections
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.withLock
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -33,10 +35,25 @@ class RouteResult(routes: List<ResponsePath>) {
     }
 }
 
-class GraphHopperRouter(context: Context) {
+/**
+ * GraphHopper-backed router.
+ *
+ * [graphDir] is the dataset's graph directory: the bundled fallback still
+ * copies from APK assets on first use, while an installed regional package
+ * reads its immutable directory directly. [close] waits for in-flight routing
+ * to finish and then releases the graph's MMAP handles, which is required
+ * before switching to another region's dataset.
+ */
+class GraphHopperRouter(
+    context: Context,
+    private val graphDir: File = File(context.applicationContext.filesDir, "gh-cache"),
+    private val copyGraphFromAssets: Boolean = true,
+) {
 
     private val appContext = context.applicationContext
-    private val graphDir = File(appContext.filesDir, "gh-cache")
+    private val lifecycleLock = ReentrantReadWriteLock()
+    @Volatile
+    private var closed = false
 
     // Distinct routes already assigned to each dial-detent level (one knob
     // click). Keeping the edge-distance signature lets later detents reject
@@ -63,16 +80,19 @@ class GraphHopperRouter(context: Context) {
             ): Boolean = size > MAX_CACHED_ENDPOINT_PAIRS
         }
 
-    private val hopper: GraphHopper by lazy {
+    private val hopperDelegate = lazy {
         synchronized(GRAPH_CACHE_COPY_LOCK) {
             withGraphCacheFileLock {
                 Log.i(TAG, "Initializing GraphHopper (graph dir: ${graphDir.absolutePath})")
                 val started = SystemClock.elapsedRealtime()
-                copyGraphFromAssetsIfNeededUnlocked()
+                if (copyGraphFromAssets) {
+                    copyGraphFromAssetsIfNeededUnlocked()
+                }
                 if (!graphDir.isDirectory || graphDir.listFiles().isNullOrEmpty()) {
                     throw IllegalStateException(
-                        "Graph data not found. Build the graph with tools/gh/config.yml " +
-                            "and place it in app/src/main/assets/graph-cache"
+                        "Graph data not found in ${graphDir.absolutePath}. " +
+                            "Install a region package or build the bundled graph " +
+                            "with tools/gh/config.yml into app/src/main/assets/graph-cache"
                     )
                 }
                 val config = GraphHopperConfig().apply {
@@ -88,6 +108,7 @@ class GraphHopperRouter(context: Context) {
                         MotorcycleWeightingFactory(baseGraph, encodingManager)
                 }.apply {
                     init(config)
+                    setPathDetailsBuilderFactory(MotoPathDetailsBuilderFactory())
                     setProfiles(motorcycleProfile())
                     importOrLoad()
                 }
@@ -95,6 +116,53 @@ class GraphHopperRouter(context: Context) {
                 loaded
             }
         }
+    }
+
+    private val hopper: GraphHopper by hopperDelegate
+
+    /**
+     * Releases the graph. Waits for any in-flight [route] call, so the MMAP
+     * files are never unmapped underneath a routing thread. Safe to call twice.
+     */
+    fun close() {
+        lifecycleLock.writeLock().withLock { doClose() }
+    }
+
+    /**
+     * Releases the graph without ever blocking the caller: when no route is in
+     * flight the work happens inline, otherwise a short-lived daemon thread
+     * waits for the route and then closes. Used by screen disposal.
+     *
+     * Returns the daemon thread that is draining an in-flight route, or null
+     * when the close completed inline. Callers that must not delete the graph
+     * directory under a live reader join the returned thread off the UI thread
+     * before doing so.
+     */
+    fun closeAsync(): Thread? {
+        if (lifecycleLock.writeLock().tryLock()) {
+            try {
+                doClose()
+            } finally {
+                lifecycleLock.writeLock().unlock()
+            }
+            return null
+        }
+        return Thread({ close() }, "gh-close").apply { isDaemon = true; start() }
+    }
+
+    private fun doClose() {
+        if (closed) return
+        closed = true
+        if (hopperDelegate.isInitialized()) {
+            runCatching { hopper.close() }
+                .onFailure {
+                    // ART has no sun.misc.Unsafe.invokeCleaner, so GraphHopper's
+                    // explicit MMAP cleanup cannot run; the mapping is reclaimed
+                    // by the garbage collector instead.
+                    Log.i(TAG, "GraphHopper close deferred to the GC: ${it.message}")
+                }
+        }
+        Log.i(TAG, "GraphHopper released (${graphDir.name})")
     }
 
     private inline fun <T> withGraphCacheFileLock(block: () -> T): T {
@@ -182,6 +250,20 @@ class GraphHopperRouter(context: Context) {
         maxRoadShare: Double = DEFAULT_MAX_ROUTE_SHARE,
         blockUnpaved: Boolean = false,
         viaPoints: List<GHPoint> = emptyList(),
+    ): RouteResult {
+        lifecycleLock.readLock().withLock {
+            check(!closed) { "The routing engine is no longer available" }
+            return routeLocked(from, to, complexity, maxRoadShare, blockUnpaved, viaPoints)
+        }
+    }
+
+    private fun routeLocked(
+        from: GHPoint,
+        to: GHPoint,
+        complexity: Double,
+        maxRoadShare: Double,
+        blockUnpaved: Boolean,
+        viaPoints: List<GHPoint>,
     ): RouteResult {
         if (viaPoints.isEmpty() && abs(from.lat - to.lat) < 1e-4 && abs(from.lon - to.lon) < 1e-4) {
             throw IllegalStateException("No route was found")

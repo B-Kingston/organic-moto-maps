@@ -26,5 +26,9 @@ data/style/
 app/src/main/assets/glyphs/
 app/src/main/assets/sprites/
 
+# map-server runtime state and local exports (see map-server/README.md)
+map-server/state/
+map-server/dist/
+
 # Local-only knowledge notes
 *.local.md

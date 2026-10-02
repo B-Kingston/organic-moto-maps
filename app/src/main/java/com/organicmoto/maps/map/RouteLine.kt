@@ -109,9 +109,9 @@ internal class RouteGeometryCache {
     }
 }
 
-private fun casingLayer(darkGuidanceMode: Boolean): LineLayer =
+private fun casingLayer(): LineLayer =
     LineLayer(ROUTE_CASING_ID, ROUTE_SOURCE_ID).withProperties(
-        PropertyFactory.lineColor(if (darkGuidanceMode) "#050505" else ROUTE_CASING_COLOR),
+        PropertyFactory.lineColor(ROUTE_CASING_COLOR),
         PropertyFactory.lineOpacity(Expression.get(ROUTE_CASING_OPACITY_PROPERTY)),
         PropertyFactory.lineWidth(Expression.get(ROUTE_CASING_WIDTH_PROPERTY)),
         PropertyFactory.lineSortKey(Expression.get(ROUTE_SORT_PROPERTY)),
@@ -142,11 +142,11 @@ private fun hitLayer(): LineLayer =
 private fun focusedRouteFilter(index: Int): Expression =
     Expression.eq(Expression.get(ROUTE_INDEX_PROPERTY), Expression.literal(index))
 
-private fun focusedCasingLayer(focusedIndex: Int, darkGuidanceMode: Boolean): LineLayer =
+private fun focusedCasingLayer(focusedIndex: Int): LineLayer =
     LineLayer(ROUTE_FOCUS_CASING_ID, ROUTE_SOURCE_ID)
         .withFilter(focusedRouteFilter(focusedIndex))
         .withProperties(
-            PropertyFactory.lineColor(if (darkGuidanceMode) "#050505" else ROUTE_CASING_COLOR),
+            PropertyFactory.lineColor(ROUTE_CASING_COLOR),
             PropertyFactory.lineOpacity(ROUTE_CASING_OPACITY),
             PropertyFactory.lineWidth(ROUTE_SELECTED_CASING_WIDTH),
             PropertyFactory.lineSortKey(ROUTE_SELECTED_SORT),
@@ -154,13 +154,14 @@ private fun focusedCasingLayer(focusedIndex: Int, darkGuidanceMode: Boolean): Li
             PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
         )
 
-private fun focusedVisualLayer(focusedIndex: Int): LineLayer =
+private fun focusedVisualLayer(focusedIndex: Int, darkGuidanceMode: Boolean = false): LineLayer =
     LineLayer(ROUTE_FOCUS_LINE_ID, ROUTE_SOURCE_ID)
         .withFilter(focusedRouteFilter(focusedIndex))
         .withProperties(
             PropertyFactory.lineColor(Expression.get(ROUTE_COLOR_PROPERTY)),
             PropertyFactory.lineOpacity(ROUTE_SELECTED_OPACITY),
-            PropertyFactory.lineWidth(ROUTE_SELECTED_WIDTH),
+            if (darkGuidanceMode) PropertyFactory.lineWidth(darkRouteWidthExpression())
+            else PropertyFactory.lineWidth(ROUTE_SELECTED_WIDTH),
             PropertyFactory.lineSortKey(ROUTE_SELECTED_SORT),
             PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
             PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
@@ -174,16 +175,16 @@ internal fun buildRouteFeatureCollection(
 ): FeatureCollection {
     if (routes.isEmpty()) return FeatureCollection.fromFeatures(emptyList())
     val cachedGeometry = geometryCache.geometriesFor(routes)
-    val displayedIndices = if (darkGuidanceMode) {
-        listOf(focusedIndex.coerceIn(routes.indices))
-    } else {
-        routes.indices.toList()
+    if (darkGuidanceMode) {
+        val index = focusedIndex.coerceIn(routes.indices)
+        val geometry = cachedGeometry[index] ?: return FeatureCollection.fromFeatures(emptyList())
+        return FeatureCollection.fromFeatures(darkRouteFeatures(routes[index], geometry, index))
     }
-    val features = displayedIndices.mapNotNull { index ->
+    val features = routes.indices.mapNotNull { index ->
         val geometry = cachedGeometry[index] ?: return@mapNotNull null
         Feature.fromGeometry(geometry).apply {
             addNumberProperty(ROUTE_INDEX_PROPERTY, index)
-            addStringProperty(ROUTE_COLOR_PROPERTY, if (darkGuidanceMode) "#FFFFFF" else routeColorHex(index))
+            addStringProperty(ROUTE_COLOR_PROPERTY, routeColorHex(index))
             addNumberProperty(ROUTE_OPACITY_PROPERTY, ROUTE_UNSELECTED_OPACITY)
             addNumberProperty(ROUTE_CASING_OPACITY_PROPERTY, ROUTE_CASING_OPACITY)
             addNumberProperty(ROUTE_WIDTH_PROPERTY, ROUTE_UNSELECTED_WIDTH)
@@ -230,20 +231,29 @@ internal fun MapLibreMap.drawRoutes(
             geometryCache.markSourceCurrent(routes)
         }
 
-        if (style.getLayer(ROUTE_CASING_ID) == null) style.addLayer(casingLayer(darkGuidanceMode))
-        if (style.getLayer(ROUTE_LINE_ID) == null) style.addLayer(visualLayer())
-        if (style.getLayer(ROUTE_HIT_ID) == null) style.addLayer(hitLayer())
+        if (!darkGuidanceMode) {
+            if (style.getLayer(ROUTE_CASING_ID) == null) style.addLayer(casingLayer())
+            if (style.getLayer(ROUTE_LINE_ID) == null) style.addLayer(visualLayer())
+            if (style.getLayer(ROUTE_HIT_ID) == null) style.addLayer(hitLayer())
+        }
 
         val focusedCasing = style.getLayerAs<LineLayer>(ROUTE_FOCUS_CASING_ID)
-        if (focusedCasing == null) {
-            style.addLayer(focusedCasingLayer(focusedIndex, darkGuidanceMode))
+        if (darkGuidanceMode) {
+            style.removeLayer(ROUTE_FOCUS_CASING_ID)
+        } else if (focusedCasing == null) {
+            style.addLayer(focusedCasingLayer(focusedIndex))
         } else {
             focusedCasing.setFilter(focusedRouteFilter(focusedIndex))
         }
 
         val focusedVisual = style.getLayerAs<LineLayer>(ROUTE_FOCUS_LINE_ID)
         if (focusedVisual == null) {
-            style.addLayer(focusedVisualLayer(focusedIndex))
+            val layer = focusedVisualLayer(focusedIndex, darkGuidanceMode)
+            if (darkGuidanceMode && style.getLayer("ride-road-labels") != null) {
+                style.addLayerBelow(layer, "ride-road-labels")
+            } else {
+                style.addLayer(layer)
+            }
         } else {
             focusedVisual.setFilter(focusedRouteFilter(focusedIndex))
         }

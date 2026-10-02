@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 private const val TAG = "OrganicMoto.NavGps"
 private const val PROVIDER_RECHECK_INTERVAL_MS = 5_000L
 private const val PROVIDER_FAILURE_RETRY_MS = 10_000L
-private const val MAX_FIX_AGE_MS = 30_000L
+internal const val LOCATION_FIX_MAX_AGE_MS = 30_000L
 
 /** Narrow platform seam so the adaptive subscription can be exercised on-device. */
 internal interface LocationProviderClient {
@@ -60,7 +60,7 @@ object GpsFixSource {
     ): Flow<GpsFix> = callbackFlow {
         val startedAt = nowElapsedMs()
         val policy = AdaptiveLocationPolicy(startedAt)
-        val freshnessGate = MonotonicFixGate(MAX_FIX_AGE_MS)
+        val freshnessGate = MonotonicFixGate(LOCATION_FIX_MAX_AGE_MS)
         val stateLock = Any()
         val activeRequests = mutableMapOf<LocationFixProvider, Long>()
         val failedUntil = mutableMapOf<LocationFixProvider, Long>()
@@ -147,7 +147,7 @@ object GpsFixSource {
                 val passiveIsReceiving = LocationFixProvider.PASSIVE in activeRequests
                 if (closed || (provider !in activeRequests && !passiveIsReceiving)) return
                 val age = now - fixTimestampMs
-                if (age !in 0..MAX_FIX_AGE_MS) return
+                if (age !in 0..LOCATION_FIX_MAX_AGE_MS) return
                 val speed = if (location.hasSpeed()) location.speed.toDouble() else -1.0
                 // Passive callbacks retain the name of the provider that made
                 // the original fix. If that provider is not one of our active
@@ -220,7 +220,7 @@ object GpsFixSource {
                         )
                     },
                     nowElapsedMs(),
-                    MAX_FIX_AGE_MS,
+                    LOCATION_FIX_MAX_AGE_MS,
                 )
                 val seedLocation = seed?.let { selected ->
                     candidates.firstOrNull { (provider, location) ->

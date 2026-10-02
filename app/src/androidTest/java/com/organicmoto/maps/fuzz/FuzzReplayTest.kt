@@ -1,5 +1,6 @@
 package com.organicmoto.maps.fuzz
 
+import com.organicmoto.maps.ui.dismissMediaStartupPrompt
 import android.Manifest
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -20,6 +21,9 @@ class FuzzReplayTest {
 
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
+
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
 
     @Test(timeout = 300_000)
     fun replayCheckedInSeedWithoutCrash() {

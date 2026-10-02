@@ -18,7 +18,12 @@ androidxTestEspresso = "3.7.0"
 kxml = "2.3.0"
 
 [libraries]
+# MapLibre 13.5.0 publishes one rendering backend per artifact: `android-sdk`
+# is Vulkan-only and `android-sdk-opengl` is OpenGL-ES-only (same version, same
+# Java API, different libmaplibre.so). app/build.gradle.kts chooses between
+# them; see the maplibreBackend comment there.
 maplibre-android-sdk = { module = "org.maplibre.gl:android-sdk", version.ref = "maplibre" }
+maplibre-android-sdk-opengl = { module = "org.maplibre.gl:android-sdk-opengl", version.ref = "maplibre" }
 graphhopper-core = { module = "com.graphhopper:graphhopper-core", version.ref = "graphhopper" }
 slf4j-android = { module = "org.slf4j:slf4j-android", version.ref = "slf4j" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }

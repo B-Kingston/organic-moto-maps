@@ -7,6 +7,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.organicmoto.maps.media.MediaAccessPrompt
+import com.organicmoto.maps.media.MediaPermission
 import org.maplibre.android.MapLibre
 
 class MainActivity : ComponentActivity() {
@@ -19,7 +25,20 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             MaterialTheme {
+                var showMediaAccessPrompt by rememberSaveable {
+                    mutableStateOf(savedInstanceState == null && !MediaPermission.isGranted(this))
+                }
                 RouteScreen()
+                if (showMediaAccessPrompt) {
+                    MediaAccessPrompt(
+                        onDismiss = { showMediaAccessPrompt = false },
+                        onEnable = {
+                            showMediaAccessPrompt = false
+                            runCatching { startActivity(MediaPermission.settingsIntent()) }
+                                .onFailure { android.util.Log.w("OrganicMoto.Media", "Notification settings unavailable", it) }
+                        },
+                    )
+                }
             }
         }
     }

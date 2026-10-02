@@ -3,13 +3,37 @@ package com.organicmoto.maps
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+import com.organicmoto.maps.map.MapPerfSweepQueue
+import com.organicmoto.maps.map.MapPerfSweepRequest
+import org.json.JSONObject
 
 /** Debug-build-only bridge from ADB to RouteScreen's real navigation session. */
 class VisualRouteControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent == null || intent.action !in setOf(
                 VisualRouteSnapshot.FIX_ACTION, VisualRouteSnapshot.CAMERA_ACTION, VisualRouteSnapshot.MAP_PROBE_ACTION,
+                MapPerfSweepQueue.SWEEP_ACTION, VisualMapsPreview.ACTION,
             )) return
+        if (intent.action == VisualMapsPreview.ACTION) {
+            val scenario = intent.getStringExtra("scenario") ?: return
+            if (scenario == "clear") {
+                VisualMapsPreview.clear()
+            } else if (!VisualMapsPreview.show(scenario)) {
+                Log.w(TAG, "Rejected unknown Maps preview scenario: $scenario")
+            }
+            return
+        }
+        if (intent.action == MapPerfSweepQueue.SWEEP_ACTION) {
+            val plan = intent.getStringExtra("plan") ?: return
+            val request = runCatching { MapPerfSweepRequest.fromJson(JSONObject(plan)) }.getOrNull()
+            if (request == null) {
+                Log.w(TAG, "Rejected malformed map performance sweep plan")
+                return
+            }
+            MapPerfSweepQueue.queue(context.cacheDir, request)
+            return
+        }
         val requestId = intent.getStringExtra("request_id")?.toLongOrNull() ?: return
         if (intent.action == VisualRouteSnapshot.MAP_PROBE_ACTION) {
             VisualRouteSnapshot.queueMapProbe(context.cacheDir, requestId)
@@ -32,5 +56,9 @@ class VisualRouteControlReceiver : BroadcastReceiver() {
             .takeIf { it.isFinite() && it >= 0f }
             ?.toDouble()
         VisualRouteSnapshot.queueFix(context.cacheDir, requestId, lat, lon, speedMps)
+    }
+
+    private companion object {
+        const val TAG = "OrganicMoto.MapPerf"
     }
 }

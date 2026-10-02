@@ -35,6 +35,19 @@ CAMERA_SNAPSHOT = "cache/visual-camera.json"
 LEVEL_PREFIX = "Ride complexity level "
 DEFAULT_OUTPUT = Path("build/visual-inspection")
 
+# Debug map-performance sweep (MapPerfSweepQueue / MapPerfSweepRunner).
+PERF_SWEEP_ACTION = "com.organicmoto.maps.DEBUG_MAP_PERF_SWEEP"
+PERF_RESULT_PREFIX = "cache/map-perf-result-"
+PERF_TARGETS = {
+    "cbd": (-27.4679, 153.0281),
+    "houses": (-27.4616, 153.0466),
+}
+DEFAULT_PERF_REPORT = Path("build/brisbane-performance-report.md")
+
+# Debug Maps-screen preview (VisualMapsPreview): deterministic download,
+# import, and delete states for screenshots without a live server or SAF.
+MAPS_PREVIEW_ACTION = "com.organicmoto.maps.DEBUG_VISUAL_MAPS_STATE"
+
 # Mirrors RouteScreen's guidance camera policy. CameraFollowPolicyTest pins the
 # Kotlin side, so drift shows up as a failed JVM suite before a visual run.
 GUIDANCE_TILT_DEGREES = 58.0
@@ -54,6 +67,23 @@ class VisualError(RuntimeError):
 
 def emit(event: str, **values: Any) -> None:
     print(json.dumps({"event": event, **values}, ensure_ascii=False), flush=True)
+
+
+def run_optional(action: Any, *arguments: Any, **kwargs: Any) -> None:
+    """Best-effort restore step that never masks the original failure.
+
+    Screenshot runs must put the device back the way they found it (dark-map
+    preference, notification access, ride state); a restore step failing is
+    reported but must not replace the error that triggered the cleanup.
+    """
+    try:
+        action(*arguments, **kwargs)
+    except Exception as error:  # noqa: BLE001 - cleanup must not mask failures
+        emit(
+            "restore_warning",
+            action=getattr(action, "__name__", str(action)),
+            error=str(error),
+        )
 
 
 def sdk_directory(root: Path) -> Path:
@@ -312,13 +342,37 @@ class VisualHarness:
         self.build_and_install(build=build, skip_map=skip_map, refresh_map=refresh_map)
         self.device_command("shell", "am", "force-stop", APP_ID)
         self.device_command("shell", "am", "start", "-n", ACTIVITY)
-        self.wait_for_node("text", "START", timeout=60)
+        # The startup dialog gets its own window a frame after the planner.
+        # Check both together instead of missing a late dialog while waiting
+        # only for START in the obscured activity window.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            nodes, _ = self.hierarchy()
+            if any(node["text"] == "Not now" for node in nodes):
+                self.capture("00-media-access-startup-prompt")
+                self.tap_node("text", "Not now")
+                continue
+            if any(node["text"] == "START" for node in nodes):
+                windows = self.device_command("shell", "dumpsys", "window", "windows").stdout
+                blocking_dialog = any(
+                    f"package={APP_ID}" in window and "DIM_BEHIND" in window
+                    and "isVisible=true" in window
+                    for window in re.split(r"(?=  Window #\d+ )", windows)
+                )
+                if not blocking_dialog:
+                    break
+            time.sleep(0.2)
+        else:
+            raise VisualError("The planner did not become available after startup setup.")
         self.capture("00-launched")
 
     def hierarchy(self) -> tuple[list[dict[str, Any]], str]:
         xml_text = ""
         last_error = ""
         for attempt in range(8):
+            # A launch/IME transition can make uiautomator fail before writing
+            # XML. Never accept the previous window's dump as the current UI.
+            self.device_command("shell", "rm", "-f", WINDOW_DUMP)
             self.device_command(
                 "shell", "uiautomator", "dump", "--compressed", WINDOW_DUMP,
                 timeout=30, check=False,
@@ -455,7 +509,12 @@ class VisualHarness:
         *,
         contains: bool = False,
         replace: bool = True,
+        verify: bool = False,
     ) -> None:
+        """Types into a field. With ``verify``, the field is read back and
+        corrected: select-all can race the field's focus right after the tap,
+        leaving prefilled text in place or eating the first typed characters.
+        """
         if not value.isascii() or any(ord(char) < 32 for char in value):
             raise VisualError("ADB text entry accepts printable ASCII only.")
         node = self.tap_node(kind, selector, contains=contains)
@@ -476,14 +535,121 @@ class VisualHarness:
         adb_text = value.replace("%", "%25").replace(" ", "%s")
         remote = "input text " + shlex.quote(adb_text)
         self.device_command("shell", remote)
+        if not verify:
+            return
+        for _ in range(3):
+            time.sleep(0.4)
+            current = self.field_text(kind, selector, contains=contains)
+            if current == value:
+                return
+            self.device_command("shell", "input", "keyevent", "KEYCODE_MOVE_END")
+            if current:
+                self.device_command(
+                    "shell", "input", "keyevent",
+                    *("KEYCODE_DEL" for _ in range(len(current) + 2)),
+                )
+            self.device_command("shell", remote)
+        raise VisualError(f"The field {selector!r} did not accept {value!r}.")
+
+    def field_text(self, kind: str, selector: str, *, contains: bool = False) -> str | None:
+        """The editable text behind a field. Compose exposes a field's content
+        description and its EditText as separate nodes with the same bounds."""
+        matches = self.matching_nodes(kind, selector, contains=contains)
+        if not matches:
+            return None
+        nodes, _ = self.hierarchy()
+        bounds = matches[0]["bounds"]
+        for node in nodes:
+            if node["bounds"] == bounds and "EditText" in node["class"]:
+                return node["text"]
+        return matches[0]["text"]
 
     def press_key(self, key: str) -> None:
         self.device_command("shell", "input", "keyevent", key)
+
+    def wait_for_keyboard(self, shown: bool, timeout: float = 10.0) -> None:
+        """Wait for the real IME state before judging result placement."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.device_command("shell", "dumpsys", "input_method").stdout
+            visible = bool(re.search(r"mInputShown=true", state) and
+                           re.search(r"mIsInputViewShown=true", state))
+            if visible and shown:
+                windows = self.device_command("shell", "dumpsys", "window", "windows").stdout
+                ime = next((window for window in re.split(r"(?=  Window #\d+ )", windows)
+                            if "u0 InputMethod}" in window), "")
+                inset = re.search(r"mGivenContentInsets=\[0,(\d+)\]", ime)
+                frame = re.search(r"\bframe=\[\d+,(\d+)\]\[\d+,(\d+)\]", ime)
+                # Gboard can report shown while displaying only a floating
+                # hardware-keyboard toolbar. Require a real resized viewport.
+                visible = bool(inset and frame and
+                               int(frame[2]) - int(frame[1]) - int(inset[1]) > 200)
+            if visible == shown:
+                # Let the resize animation's final layout land as well.
+                time.sleep(0.3)
+                return
+            time.sleep(0.1)
+        raise VisualError(f"Keyboard did not become {'visible' if shown else 'hidden'}.")
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 450) -> None:
         self.device_command(
             "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration_ms)
         )
+
+    def scroll_down(self, *, fraction: float = 0.45) -> None:
+        """Swipes up inside the screen to reveal content below the fold."""
+        nodes, _ = self.hierarchy()
+        # Swipe across the extent of everything visible. Picking one "big"
+        # node is fragile: a banner or card can be the first large node, and
+        # a swipe inside it never travels far enough to scroll the screen.
+        bounds: tuple[int, int, int, int] | None = None
+        for node in nodes:
+            if not node["visible"]:
+                continue
+            match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node["bounds"])
+            if not match:
+                continue
+            x1, y1, x2, y2 = (int(part) for part in match.groups())
+            if bounds is None:
+                bounds = (x1, y1, x2, y2)
+            else:
+                bounds = (min(bounds[0], x1), min(bounds[1], y1), max(bounds[2], x2), max(bounds[3], y2))
+        if bounds is not None and (bounds[2] - bounds[0] <= 100 or bounds[3] - bounds[1] <= 100):
+            bounds = None
+        if bounds is None:
+            raise VisualError("Could not determine the screen bounds for scrolling.")
+        x1, y1, x2, y2 = bounds
+        start_y = y1 + int((y2 - y1) * 0.72)
+        end_y = y1 + int((y2 - y1) * (0.72 - fraction))
+        self.swipe((x1 + x2) // 2, start_y, (x1 + x2) // 2, end_y)
+
+    def scroll_to_node(
+        self,
+        kind: str,
+        value: str,
+        *,
+        contains: bool = False,
+        max_swipes: int = 6,
+    ) -> dict[str, Any]:
+        """Scrolls the current screen until a visible node matches, then returns it."""
+        for _ in range(max_swipes):
+            matches = self.matching_nodes(kind, value, contains=contains)
+            if matches:
+                return matches[0]
+            self.scroll_down()
+            time.sleep(0.5)
+        return self.wait_for_node(kind, value, contains=contains, timeout=5)
+
+    def broadcast_maps_preview(self, scenario: str) -> None:
+        """Shows one deterministic Maps-screen state (debug builds only)."""
+        self.device_command(
+            "shell", "am", "broadcast",
+            "-a", MAPS_PREVIEW_ACTION,
+            "-p", APP_ID,
+            "--es", "scenario", scenario,
+            check=False,
+        )
+        time.sleep(0.3)
 
     def capture(self, label: str, *, include_tree: bool = True) -> Path:
         self.ensure_capture_dirs()
@@ -568,7 +734,9 @@ class VisualHarness:
             return
         if road_share is not None and (road_share < 10 or road_share > 90 or road_share % 5 != 0):
             raise VisualError("Road share must be 10–90 in steps of 5 percent.")
-        self.tap_node("description", "Route settings")
+        self.open_settings_menu()
+        self.capture("settings-menu-open")
+        self.tap_node("text", "Route settings")
         self.wait_for_node("text", "Target maximum shared roads", timeout=10)
         self.capture("route-settings-open")
 
@@ -614,11 +782,194 @@ class VisualHarness:
         self.wait_for_any_text(("START", "RIDE"), timeout=60)
         self.capture("route-settings-applied")
 
-    def set_black_and_white(self, mode: str) -> None:
+    def open_settings_menu(self) -> None:
+        if not self.matching_nodes("text", "Sound settings"):
+            self.tap_node("description", "Planning settings")
+        self.wait_for_node("text", "Sound settings", timeout=10)
+
+    def capture_settings_menu(self, *, build: bool, skip_map: bool, refresh_map: bool) -> None:
+        """Capture the planner menu card, a screen opened from it, and dismissal."""
+        self.launch_app(build=build, skip_map=skip_map, refresh_map=refresh_map)
+        self.open_settings_menu()
+        self.capture("settings-menu-open")
+        # Every screen opened from the card exits through the shared back
+        # button, returning to the closed planner.
+        self.tap_node("text", "Route settings")
+        self.wait_for_node("description", "Back", timeout=10)
+        self.capture("settings-screen-open")
+        self.tap_node("description", "Back")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not self.matching_nodes("text", "Target maximum shared roads"):
+                break
+            time.sleep(0.2)
+        else:
+            raise VisualError("The route-settings screen did not close after Back.")
+        self.capture("settings-screen-back-to-planner")
+        # Re-open the card and verify the system back button dismisses it.
+        self.open_settings_menu()
+        self.press_key("KEYCODE_BACK")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not self.matching_nodes("text", "Sound settings"):
+                break
+            time.sleep(0.2)
+        else:
+            raise VisualError("Settings menu did not dismiss after Back.")
+        self.capture("settings-menu-dismissed")
+
+    def capture_search_results(self, args: argparse.Namespace) -> None:
+        """Capture From's POI action and search while the IME changes available space."""
+        self.ensure_device(start_if_missing=True)
+        setting = "show_ime_with_hard_keyboard"
+        previous = self.device_command("shell", "settings", "get", "secure", setting).stdout.strip()
+        self.device_command("shell", "settings", "put", "secure", setting, "1")
+        try:
+            if previous != "1":
+                ime = self.device_command("shell", "settings", "get", "secure", "default_input_method").stdout.strip()
+                package = ime.partition("/")[0]
+                if re.fullmatch(r"[A-Za-z0-9_.]+", package):
+                    # The emulator's IME caches hardware-keyboard mode. Let
+                    # Android rebind it with the temporary fixture setting.
+                    self.device_command("shell", "am", "force-stop", package)
+            self.launch_app(build=not args.no_build, skip_map=args.skip_map, refresh_map=args.refresh_map)
+            self.capture("search-planner-poi-icon")
+            self.tap_node("description", args.field)
+            self.wait_for_keyboard(shown=True)
+            self.capture("search-focused-keyboard")
+            self.type_into("description", args.field, args.query)
+            self.capture("search-query-entered", include_tree=False)
+            self.wait_for_search_completion(args.field, args.query)
+            self.wait_for_search_window()
+            self.capture("search-results-keyboard-visible")
+            self.press_key("KEYCODE_BACK")
+            self.wait_for_keyboard(shown=False)
+            self.capture("search-results-keyboard-dismissed")
+        finally:
+            if previous == "null":
+                run_optional(self.device_command, "shell", "settings", "delete", "secure", setting)
+            else:
+                run_optional(self.device_command, "shell", "settings", "put", "secure", setting, previous)
+
+    def wait_for_search_completion(self, field: str, query: str, timeout: float = 30.0) -> None:
+        pid = self.device_command("shell", "pidof", APP_ID).stdout.strip().split()[0]
+        expected = f'[{field}] "{query}" -> '
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            logs = self.device_command("logcat", "--pid=" + pid, "-d", "-v", "brief",
+                                       "OrganicMoto.SearchField:D", "*:S").stdout
+            matching = [line for line in logs.splitlines() if expected in line]
+            if matching:
+                if "no results" in matching[-1]:
+                    raise VisualError(f"The fixture search {query!r} returned no results.")
+                (self.run_dir / "search-completion.txt").write_text(matching[-1] + "\n")
+                time.sleep(0.3)
+                return
+            time.sleep(0.1)
+        raise VisualError(f"The fixture search {query!r} did not complete in app PID {pid}.")
+
+    def wait_for_search_window(self, timeout: float = 15.0) -> None:
+        # Legacy uiautomator dump omits nonfocusable Compose popup windows.
+        # Observe WindowManager's actual drawn surface; all controls still use
+        # their accessible labels, and Compose tests assert popup content.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            windows = self.device_command("shell", "dumpsys", "window", "windows").stdout
+            for window in re.split(r"(?=  Window #\d+ )", windows):
+                if ("Pop-Up Window" in window and f"package={APP_ID}" in window
+                        and "Surface: shown=true" in window and "isVisible=true" in window):
+                    (self.run_dir / "search-results-window.txt").write_text(window)
+                    return
+            time.sleep(0.1)
+        raise VisualError("The search results popup did not draw a visible window.")
+
+    def capture_maps_settings(self, args: argparse.Namespace) -> None:
+        """Capture the Maps screen: server, catalog, download/import/delete states, Back.
+
+        The live server is never contacted: typing an address only fills the
+        field, Check server is deliberately not tapped, and the intermediate
+        download/import/delete states come from the debug Maps-preview bridge
+        (VisualMapsPreview), so this scenario needs no network, no map server,
+        and no SAF picker.
+        """
+        self.launch_app(build=not args.no_build, skip_map=args.skip_map, refresh_map=args.refresh_map)
+        self.open_settings_menu()
+        self.tap_node("text", "Maps")
+        self.wait_for_node("description", "Map server address", timeout=15)
+        self.wait_for_node("description", "Import package file", timeout=15)
+        self.capture("maps-settings-empty")
+        self.type_into("description", "Map server address", args.server, verify=True)
+        self.press_key("KEYCODE_BACK")  # dismiss the IME
+        self.capture("maps-settings-address")
+        # A failed check shows a dismissible, actionable error banner.
+        self.broadcast_maps_preview("server-error")
+        self.wait_for_node("description", "Dismiss error", timeout=10)
+        self.capture("maps-preview-server-error")
+
+        # Deterministic intermediate states: a terminal job keeps Download
+        # visible, a failed job keeps Retry visible, and every download/import
+        # step offers its next explicit action.
+        previews = (
+            ("catalog-ready", "Download package queensland", "maps-preview-catalog-ready"),
+            ("build-failed", "Retry package queensland", "maps-preview-build-failed"),
+            ("download-progress", "Cancel download", "maps-preview-download-progress"),
+            ("download-retrying", "Cancel download", "maps-preview-download-retrying"),
+            ("download-verifying", "Cancel download", "maps-preview-download-verifying"),
+            ("download-interrupted", "Resume download", "maps-preview-download-interrupted"),
+            ("package-saved", "Import saved file", "maps-preview-package-saved"),
+            ("recovered-package", "Save downloaded package to device", "maps-preview-recovered-package"),
+        )
+        for scenario, description, label in previews:
+            self.broadcast_maps_preview(scenario)
+            self.scroll_to_node("description", description)
+            self.capture(label)
+
+        # Installed maps list: real installed size, a rubbish bin per entry, and
+        # a confirmation that names the dataset and the reclaimed space.
+        self.broadcast_maps_preview("installed")
+        self.scroll_to_node("description", "Delete Queensland map")
+        self.capture("maps-preview-installed")
+        self.tap_node("description", "Delete Queensland map")
+        self.wait_for_node("text", "Delete installed map?", timeout=10)
+        self.capture("maps-delete-confirmation")
+        self.tap_node("description", "Cancel delete Queensland map")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not self.matching_nodes("text", "Delete installed map?"):
+                break
+            time.sleep(0.2)
+        else:
+            raise VisualError("The delete confirmation did not dismiss after Cancel.")
+        self.capture("maps-delete-cancelled")
+
+        # Active-map deletion shows the pending drain state truthfully.
+        self.broadcast_maps_preview("removal-pending")
+        self.scroll_to_node("text", "releasing this map", contains=True)
+        self.capture("maps-preview-removal-pending")
+        self.broadcast_maps_preview("clear")
+
+        # Back closes the Maps screen and returns to the planner rail.
+        self.press_key("KEYCODE_BACK")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not self.matching_nodes("description", "Map server address"):
+                break
+            time.sleep(0.2)
+        else:
+            raise VisualError("The Maps screen did not close after Back.")
+        self.capture("maps-settings-back-to-planner")
+
+    def apply_black_and_white(self, mode: str) -> None:
+        """Toggles the ride-map style through its accessible control, no capture.
+
+        The accessibility state changes before MapLibre finishes loading the
+        alternate local style, so a real toggle waits for the style and route
+        line to repaint; an already-correct state returns immediately.
+        """
         if mode not in {"on", "off"}:
             raise VisualError("Black-and-white mode must be 'on' or 'off'.")
-        enabled = mode == "on"
         target = f"Dark ride map, {mode}"
+        enabled = mode == "on"
         opposite = f"Dark ride map, {'off' if enabled else 'on'}"
         if not self.matching_nodes("description", target):
             if not self.matching_nodes("description", opposite):
@@ -633,8 +984,11 @@ class VisualHarness:
         # pixels still need inspection to prove readability and visibility.
         self.wait_for_ride_map(dark=enabled)
         time.sleep(0.5)
+
+    def set_black_and_white(self, mode: str) -> None:
+        self.apply_black_and_white(mode)
         self.capture(f"ride-map-black-and-white-{mode}")
-        emit("ride_map_mode", black_and_white=enabled, screenshot=str(self.output_dir / "latest.png"))
+        emit("ride_map_mode", black_and_white=mode == "on", screenshot=str(self.output_dir / "latest.png"))
 
     def capture_icon_states(self) -> None:
         """Capture appearance and speaker states through accessible controls."""
@@ -656,6 +1010,178 @@ class VisualHarness:
             self.capture(f"guidance-icons-voice-{'on' if enabled else 'off'}")
             if index < 2:
                 self.tap_node("description", "Voice guidance settings", contains=True)
+
+    def grant_media_listener(self, granted: bool) -> None:
+        """Grant/revoke this app's notification-listener (media session) access."""
+        component = (
+            f"{APP_ID}/com.organicmoto.maps.media.MediaNotificationListenerService"
+        )
+        command = "allow_listener" if granted else "disallow_listener"
+        self.device_command("shell", "cmd", "notification", command, component, check=False)
+        time.sleep(1.5)
+
+    def media_listener_granted(self) -> bool:
+        """Whether this app's notification listener is currently enabled.
+
+        Reads the platform's own enabled-listener setting (a colon-separated
+        list), so the runner can restore the exact starting state instead of
+        assuming access was off.
+        """
+        component = (
+            f"{APP_ID}/com.organicmoto.maps.media.MediaNotificationListenerService"
+        )
+        completed = self.device_command(
+            "shell",
+            "settings",
+            "get",
+            "secure",
+            "enabled_notification_listeners",
+            check=False,
+        )
+        value = (completed.stdout or "").strip()
+        return any(entry.strip() == component for entry in value.split(":"))
+
+    def set_media_session(self, state: str, title: str, artist: str) -> None:
+        """Drive the debug-only synthetic media session used for screenshots."""
+        self.device_command(
+            "shell", "am", "broadcast",
+            "-a", "com.organicmoto.maps.DEBUG_VISUAL_MEDIA_SESSION",
+            "-p", APP_ID,
+            "--es", "state", state,
+            "--es", "title", title,
+            "--es", "artist", artist,
+            check=False,
+        )
+        time.sleep(0.6)
+
+    def capture_media_controls(self, args: argparse.Namespace) -> None:
+        """Capture media states or the focused inactivity interaction."""
+        if not args.reuse_app:
+            self.launch_app(
+                build=not args.no_build,
+                skip_map=args.skip_map,
+                refresh_map=args.refresh_map,
+            )
+        else:
+            self.ensure_device(start_if_missing=False)
+            self.wait_for_any_text(("START", "RIDE"), timeout=15)
+
+        if not self.matching_nodes("text", "RIDE"):
+            self.type_into("description", "From", args.from_text)
+            self.type_into("description", "To", args.to_text)
+            self.press_key("KEYCODE_ENTER")
+            planner_action = self.wait_for_any_text(("START", "RIDE"), timeout=15)
+            if planner_action["text"] == "START":
+                self.tap_node("text", "START")
+                self.wait_for_node("text", "RIDE", timeout=args.route_timeout)
+
+        self.tap_node("text", "RIDE")
+        self.wait_for_node("text", "END", timeout=30)
+        self.capture("media-ride-active")
+        if args.inactivity_only:
+            self.capture_media_inactivity()
+            return
+
+        # Record the exact starting state so the finally block restores it: the
+        # runner must never leave notification access force-granted for the
+        # next command or another test.
+        initial_access = self.media_listener_granted()
+        original_dark = bool(self.matching_nodes("description", "Dark ride map, on"))
+        panel_open = False
+        try:
+            self.grant_media_listener(True)
+
+            # Playing, in colour and in B&W ride mode. Force colour first so a
+            # persisted dark-map preference from an earlier run cannot make the
+            # "colour" capture indistinguishable from the monochrome one.
+            self.set_media_session("playing", args.title, args.artist)
+            if original_dark:
+                self.set_black_and_white("off")
+            self.tap_node("description", "Media controls")
+            panel_open = True
+            self.wait_for_node("description", "Media control center", timeout=10)
+            self.capture("media-panel-color-playing")
+            self.tap_node("description", "Close media controls")
+            panel_open = False
+            # Style settling is independent of the inactivity timer; switch
+            # with the panel closed and give each capture a fresh open window.
+            self.set_black_and_white("on")
+            self.tap_node("description", "Media controls")
+            panel_open = True
+            self.capture("media-panel-bw-playing")
+
+            # Paused.
+            self.tap_node("description", "Close media controls")
+            panel_open = False
+            self.set_media_session("paused", args.title, args.artist)
+            time.sleep(1.0)
+            self.tap_node("description", "Media controls")
+            panel_open = True
+            self.capture("media-panel-bw-paused")
+
+            # No player (access still granted, session stopped).
+            self.tap_node("description", "Close media controls")
+            panel_open = False
+            self.set_media_session("stop", args.title, args.artist)
+            time.sleep(1.0)
+            self.tap_node("description", "Media controls")
+            panel_open = True
+            self.wait_for_node("description", "Media control center", timeout=10)
+            self.capture("media-panel-bw-no-player")
+
+            # Permission needed (notification access revoked).
+            self.tap_node("description", "Close media controls")
+            panel_open = False
+            self.grant_media_listener(False)
+            self.tap_node("description", "Media controls")
+            panel_open = True
+            self.capture("media-panel-bw-permission-needed")
+            # System Back closes the panel instead of leaving the ride; capture
+            # the dismissed state as evidence.
+            self.press_key("KEYCODE_BACK")
+            panel_open = False
+            time.sleep(0.5)
+            self.capture("media-panel-dismissed-with-back")
+            panel_open = True
+            self.capture_media_inactivity()
+            panel_open = False
+        finally:
+            # Restore exactly what the runner found, never force-grant.
+            if panel_open:
+                run_optional(self.tap_node, "description", "Close media controls")
+            run_optional(self.set_media_session, "stop", args.title, args.artist)
+            run_optional(self.grant_media_listener, initial_access)
+            run_optional(self.set_black_and_white, "on" if original_dark else "off")
+            run_optional(self.tap_node, "text", "END")
+        emit("media_controls_captured", restored_notification_access=initial_access)
+
+    def capture_media_inactivity(self) -> None:
+        """Capture the real panel's open timer, reset, and inactivity close."""
+        self.tap_node("description", "Media controls")
+        panel = self.wait_for_node("description", "Media control center", timeout=10)
+        opened_at = time.monotonic()
+        x1, y1, x2, _ = self.center(panel["bounds"])
+        self.capture("media-panel-inactivity-full", include_tree=False)
+        time.sleep(max(0.0, 7.5 - (time.monotonic() - opened_at)))
+        # Tap unused top padding: it must restart the timer without issuing a
+        # transport or volume command.
+        self.tap_point((x1 + x2) // 2, y1 + 2)
+        interacted_at = time.monotonic()
+        time.sleep(max(0.0, 7.5 - (time.monotonic() - interacted_at)))
+        if not self.matching_nodes("description", "Media control center"):
+            raise VisualError("A panel touch did not restart the media inactivity timer")
+        self.capture("media-panel-inactivity-half", include_tree=False)
+        deadline = interacted_at + 17.0
+        while time.monotonic() < deadline:
+            if not self.matching_nodes("description", "Media control center"):
+                break
+            time.sleep(0.25)
+        else:
+            raise VisualError("Media panel did not close 15 seconds after its last interaction")
+        self.capture("media-panel-inactivity-closed", include_tree=False)
+        emit("media_inactivity_captured", timer_reset_by="blank-panel-touch", close="15s inactivity")
+
+
 
     def route(
         self,
@@ -679,9 +1205,33 @@ class VisualHarness:
         self.set_route_settings(road_share=args.road_share, block_unpaved=args.block_unpaved)
         self.capture("01-options-ready")
 
-        self.type_into("description", "From", args.from_text)
-        time.sleep(0.4)
-        self.capture("02-from-entered")
+        from_current_location = getattr(args, "from_current_location", False)
+        from_endpoint_text = "Current location" if from_current_location else args.from_text
+        current_location: tuple[float, float] | None = None
+        if from_current_location:
+            if not self.serial or not self.serial.startswith("emulator-"):
+                raise VisualError("The current-location visual scenario requires an Android emulator.")
+            try:
+                latitude_text, longitude_text = args.location.split(",", 1)
+                latitude, longitude = float(latitude_text), float(longitude_text)
+            except (AttributeError, ValueError) as error:
+                raise VisualError("--location must be a latitude,longitude pair.") from error
+            if (
+                not all(map(math.isfinite, (latitude, longitude)))
+                or not -90.0 <= latitude <= 90.0
+                or not -180.0 <= longitude <= 180.0
+            ):
+                raise VisualError("--location must contain valid geographic coordinates.")
+            current_location = (latitude, longitude)
+            self.device_command("emu", "geo", "fix", str(longitude), str(latitude))
+            self.tap_node("description", "Use current location")
+            self.wait_for_node("text", "Current location", timeout=20)
+            self.wait_for_node("text", "START", timeout=10)
+            self.capture("02-current-location-selected")
+        else:
+            self.type_into("description", "From", args.from_text)
+            time.sleep(0.4)
+            self.capture("02-from-entered")
         self.type_into("description", "To", args.to_text)
         self.press_key("KEYCODE_ENTER")
         planner_action = self.wait_for_any_text(("START", "RIDE"), timeout=15)
@@ -691,7 +1241,7 @@ class VisualHarness:
             self.tap_node("text", "START")
             emit(
                 "routing_started",
-                from_text=args.from_text,
+                from_text=from_endpoint_text,
                 to_text=args.to_text,
                 complexity=args.complexity,
                 road_share=args.road_share,
@@ -721,8 +1271,7 @@ class VisualHarness:
                     f"Routing did not reach the RIDE state within {args.timeout:g}s.\n"
                     f"Recent app logs:\n{logs}"
                 )
-        else:
-            emit("existing_route_ready", from_text=args.from_text, to_text=args.to_text)
+            emit("existing_route_ready", from_text=from_endpoint_text, to_text=args.to_text)
 
         self.wait_for_node("text", "RIDE", timeout=10)
         if args.route_index > 1:
@@ -735,6 +1284,16 @@ class VisualHarness:
         snapshot = self.wait_for_route_snapshot(args.route_index - 1)
         selected_route = snapshot["routes"][args.route_index - 1]
         start = point_at_percent(selected_route["points"], 0.0)
+        if current_location is not None and distance_metres(
+            start[0],
+            start[1],
+            current_location[0],
+            current_location[1],
+        ) > 1_500.0:
+            raise VisualError(
+                "The route did not start near the selected emulator location; "
+                "the From coordinate may be stale."
+            )
         if not self.serial or not self.serial.startswith("emulator-"):
             emit("gps_start_not_changed", reason="selected ADB device is not an Android emulator")
         else:
@@ -993,6 +1552,242 @@ class VisualHarness:
             if parked_gps and self.serial and self.serial.startswith("emulator-"):
                 self.device_command("emu", "geo", "fix", parked_gps.group(2), parked_gps.group(1), check=False)
 
+    def installed_map_bytes(self) -> int | None:
+        result = self.device_command(
+            "shell", "run-as", APP_ID, "sh", "-c", "ls -l files/tiles/basemap.pmtiles",
+            check=False, timeout=20,
+        )
+        match = re.search(r"\s(\d+)\s+\d{4}-\d{2}-\d{2}", result.stdout)
+        return int(match.group(1)) if match else None
+
+    def gpu_identity(self) -> dict[str, str]:
+        """Best-effort GPU identity so a perf report can be attributed.
+
+        Vulkan map rendering goes through ``cmd gpu vkjson``'s device; the
+        emulator's OpenGL ES path is what ``dumpsys SurfaceFlinger`` reports.
+        Both are optional evidence: a missing probe never fails the run.
+        """
+        identity: dict[str, str] = {}
+        vkjson = self.device_command("shell", "cmd", "gpu", "vkjson", check=False, timeout=30).stdout
+        match = re.search(r'"deviceName"\s*:\s*"([^"]*)"', vkjson)
+        if match and match.group(1):
+            identity["vulkanDeviceName"] = match.group(1)
+        surface_flinger = self.device_command("shell", "dumpsys", "SurfaceFlinger", check=False, timeout=30).stdout
+        gles = re.search(r"GLES:\s*(\S.*)", surface_flinger)
+        if gles:
+            identity["glesRenderer"] = gles.group(1).strip()
+        return identity
+
+    def set_emulator_location(self, lat: float, lon: float) -> None:
+        if not self.serial or not self.serial.startswith("emulator-"):
+            raise VisualError("Cold sweep positioning is available only on an Android emulator.")
+        self.device_command("emu", "geo", "fix", str(lon), str(lat))
+
+    def restart_app(self) -> None:
+        self.device_command("shell", "am", "force-stop", APP_ID)
+        self.device_command("shell", "am", "start", "-n", ACTIVITY)
+        self.wait_for_node("text", "START", timeout=60)
+
+    def queue_map_perf_sweep(self, plan: dict[str, Any]) -> int:
+        request_id = int(plan["requestId"])
+        payload = json.dumps(plan, separators=(",", ":"))
+        # The device shell re-tokenizes adb's argument list, so the JSON must
+        # reach `am` as one single-quoted argument (labels are already
+        # restricted to [a-z0-9-], so no quote can appear inside the plan).
+        if "'" in payload:
+            raise VisualError("Perf sweep plans must not contain single quotes.")
+        self.device_command(
+            "shell",
+            f"am broadcast -a {PERF_SWEEP_ACTION} -p {APP_ID} --es plan '{payload}'",
+        )
+        return request_id
+
+    def read_map_perf_result(self, request_id: int, *, timeout: float) -> dict[str, Any]:
+        path = f"{PERF_RESULT_PREFIX}{request_id}.json"
+        deadline = time.monotonic() + timeout
+        last_error = ""
+        while time.monotonic() < deadline:
+            try:
+                raw = self.raw_device_bytes("exec-out", "run-as", APP_ID, "cat", path, timeout=20)
+                result = json.loads(raw.decode("utf-8"))
+                if isinstance(result, dict) and result.get("requestId") == request_id:
+                    return result
+            except (VisualError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                last_error = str(error)
+            time.sleep(0.4)
+        raise VisualError(
+            f"Sweep {request_id} never exported a report within {timeout:.0f}s ({last_error})."
+        )
+
+    def run_perf_sweep(
+        self,
+        case: str,
+        mode: str,
+        lat: float,
+        lon: float,
+        zoom: float,
+        phase: str,
+        *,
+        settle: bool,
+        args: argparse.Namespace,
+    ) -> dict[str, Any]:
+        """Queues one sweep, waits for its exported report, and keeps evidence."""
+        request_id = time.time_ns()
+        label = f"{case}-{mode}-{phase}"
+        plan = perf_sweep_plan(
+            request_id=request_id,
+            label=label,
+            motion=args.motion,
+            lat=lat,
+            lon=lon,
+            zoom=zoom,
+            tilt=args.tilt,
+            duration_ms=int(args.duration * 1000),
+            building_mode=mode,
+            settle=settle,
+        )
+        self.queue_map_perf_sweep(plan)
+        if args.screenshot_motion:
+            time.sleep(max(0.7, args.duration * 0.45))
+            self.capture(f"{label}-motion", include_tree=False)
+        result = self.read_map_perf_result(request_id, timeout=args.duration + 45)
+        result["case"] = case
+        result["phase"] = phase
+        result["zoom"] = zoom
+        result["requestedTilt"] = args.tilt
+        self.ensure_capture_dirs()
+        report_path = self.run_dir / f"{label}.json"
+        report_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        all_stats = perf_segment(result)
+        emit(
+            "perf_sweep",
+            case=case,
+            mode=mode,
+            phase=phase,
+            label=label,
+            report=str(report_path),
+            completed=result.get("completed"),
+            interrupted=result.get("interrupted"),
+            frames=int(perf_number(all_stats, "frames")),
+            fps=round(perf_primary_fps(result), 2),
+            p50Ms=round(perf_number(all_stats, "p50Ms"), 2),
+            p95Ms=round(perf_number(all_stats, "p95Ms"), 2),
+            p99Ms=round(perf_number(all_stats, "p99Ms"), 2),
+            stalls50=int(perf_number(all_stats, "stalls50")),
+            stalls100=int(perf_number(all_stats, "stalls100")),
+        )
+        return result
+
+    def perf(self, args: argparse.Namespace) -> None:
+        """Repeatable native-frame benchmark of the real offline map.
+
+        Cold runs measure tile/geometry loading on a fresh process (the app is
+        restarted and parked far away first so the case's tiles are genuinely
+        cold); warm runs repeat the same motion on the settled map. Building
+        modes A/B the extrusion rendering with the identical camera plan.
+        """
+        if not self.requested_serial:
+            raise VisualError("perf requires --serial or ANDROID_SERIAL for an exclusively owned device.")
+        targets = [item.strip() for item in args.targets.split(",") if item.strip()]
+        if not targets:
+            raise VisualError("perf needs at least one target.")
+        for target in targets:
+            if target not in PERF_TARGETS:
+                raise VisualError(
+                    f"Unknown perf target '{target}'. Known targets: {', '.join(sorted(PERF_TARGETS))}."
+                )
+        zoom_plan = perf_zoom_plan(targets, args.zooms)
+        modes = [item.strip().lower() for item in args.building_modes.split(",") if item.strip()]
+        for mode in modes:
+            if mode not in ("current", "opaque", "hidden"):
+                raise VisualError(f"Unknown building mode '{mode}'.")
+        if args.repeat < 1:
+            raise VisualError("perf needs --repeat of at least 1.")
+        if not 1.0 <= args.duration <= 60.0:
+            raise VisualError("perf --duration must be between 1 and 60 seconds.")
+
+        self.launch_app(build=not args.no_build, skip_map=args.skip_map, refresh_map=args.refresh_map)
+        archive_bytes = self.installed_map_bytes()
+        gpu = self.gpu_identity()
+        original_location = None
+        if self.serial and self.serial.startswith("emulator-"):
+            locations = self.device_command("shell", "dumpsys", "location", check=False).stdout
+            parked = re.search(r"last location=Location\[gps (-?[\d.]+),(-?[\d.]+)", locations)
+            if parked:
+                original_location = (float(parked.group(1)), float(parked.group(2)))
+        results: list[dict[str, Any]] = []
+        try:
+            for mode in modes:
+                for target in targets:
+                    lat, lon = PERF_TARGETS[target]
+                    for zoom in zoom_plan[target]:
+                        case = f"brisbane-{target}-z{zoom:g}"
+                        if not args.no_cold and mode == modes[0]:
+                            # Park the emulator far away so the app's one-shot
+                            # initial centring cannot warm the case tiles and
+                            # cannot yank the camera mid-sweep.
+                            if original_location is not None:
+                                self.set_emulator_location(-16.9203, 145.7710)
+                            self.restart_app()
+                            time.sleep(args.settle)
+                            results.append(
+                                self.run_perf_sweep(case, mode, lat, lon, zoom, "cold", settle=False, args=args)
+                            )
+                        if not args.no_warm:
+                            self.inspect_camera(lat, lon, zoom, args.tilt)
+                            for repeat in range(1, args.repeat + 1):
+                                results.append(
+                                    self.run_perf_sweep(case, mode, lat, lon, zoom, "warm", settle=True, args=args)
+                                )
+                                if repeat == 1 and args.screenshots:
+                                    # A settled view of the case camera is the
+                                    # building-visibility evidence; it runs
+                                    # after the sweep so it never perturbs the
+                                    # measured frames.
+                                    self.inspect_camera(lat, lon, zoom, args.tilt)
+                                    self.capture(f"{case}-{mode}-view", include_tree=False)
+        finally:
+            if original_location is not None:
+                self.set_emulator_location(*original_location)
+
+        generated = utc_now()
+        summary = {
+            "generated": generated,
+            "serial": self.serial,
+            "avd": self.avd,
+            "archiveBytes": archive_bytes,
+            "deviceGpu": gpu,
+            "zooms": {target: list(zoom_plan[target]) for target in targets},
+            "durationSeconds": args.duration,
+            "motion": args.motion,
+            "tilt": args.tilt,
+            "repeat": args.repeat,
+            "sweeps": results,
+        }
+        self.ensure_capture_dirs()
+        summary_path = self.run_dir / "perf-summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        report = perf_report_markdown(
+            results,
+            device=f"{self.serial} ({self.avd})",
+            generated=generated,
+            app_build="debug (assembleDebug; MapLibre backend per sweep 'backend' object)",
+            archive_bytes=archive_bytes,
+            device_gpu=gpu,
+        )
+        report_path = Path(args.report).expanduser()
+        if not report_path.is_absolute():
+            report_path = self.root / report_path
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        emit(
+            "perf_report",
+            report=str(report_path),
+            summary=str(summary_path),
+            sweeps=len(results),
+            warm=[result for result in results if result.get("phase") == "warm"],
+        )
+
     def wait_for_camera(
         self,
         description: str,
@@ -1192,14 +1987,85 @@ class VisualHarness:
         """Lets the 600 ms camera animation and the repaint frame land before capturing."""
         time.sleep(max(0.0, args.settle))
 
-    def navigation_camera(self, args: argparse.Namespace) -> None:
-        """Captures the immersive guidance camera states on a real ride.
+    @staticmethod
+    def ride_map_modes(black_and_white: str | None) -> list[str | None]:
+        """Requested ride-map styles per frame; `None` leaves the style alone."""
+        if black_and_white is None:
+            return [None]
+        if black_and_white == "both":
+            return ["off", "on"]
+        return [black_and_white]
 
-        Repeatable frames: navigation start, street-close framing, one frame
-        per speed band, a heading turn, and the planning-camera restore after
-        END. The debug camera probe makes each state checkable, not only
-        viewable. Queued debug fixes own the guidance session while they flow,
-        so the emulator's live provider cannot pull the camera away.
+    def capture_ride_frame(self, args: argparse.Namespace, label: str) -> None:
+        """Captures one guidance frame once per requested ride-map style.
+
+        With `--black-and-white both`, every guidance frame (street-close,
+        each speed band's z14-z18 zoom, and the turn) is saved in colour and in
+        B&W, including the compact sound/moon rail and its toggle states.
+        The street-close frames show the raised arrow and its dark grayscale
+        outline over the routed road at the same camera state.
+        A single requested mode keeps the historical label with
+        no suffix, so existing runs keep their artifact names.
+        """
+        for mode in self.ride_map_modes(args.black_and_white):
+            suffix = ""
+            if args.black_and_white == "both":
+                suffix = "-bw" if mode == "on" else "-color"
+            if mode is not None:
+                self.apply_black_and_white(mode)
+            self.capture(label + suffix)
+            if mode is not None:
+                emit(
+                    "ride_map_mode_frame",
+                    label=label + suffix,
+                    black_and_white=mode == "on",
+                    screenshot=str(self.output_dir / "latest.png"),
+                )
+
+    def capture_follow_pause(self, args: argparse.Namespace, lat: float, lon: float) -> None:
+        """Pan inside accessible map bounds, capture the pause, then prove automatic return."""
+        for mode in self.ride_map_modes(args.black_and_white):
+            if mode is not None:
+                self.apply_black_and_white(mode)
+            suffix = "-bw" if mode == "on" else "-color" if mode == "off" else ""
+            self.wait_for_camera("locked follow before pan", lambda probe: camera_near(probe, lat, lon))
+            if self.matching_nodes("description", "Map"):
+                node = self.select_node("description", "Map")
+            else:
+                node = self.select_node(
+                    "description", "Showing a Map created with MapLibre", contains=True,
+                )
+            left, top, right, bottom = self.center(node["bounds"])
+            width, height = right - left, bottom - top
+            self.swipe(
+                int(left + width * 0.30), int(top + height * 0.45),
+                int(left + width * 0.65), int(top + height * 0.50), 500,
+            )
+            paused = self.read_camera()
+            if paused is None or not paused.get("followSuspended"):
+                raise VisualError(f"A locked map pan did not report its follow pause: {paused}")
+            self.capture("nav-camera-gesture-paused" + suffix, include_tree=False)
+            camera = self.wait_for_camera(
+                "automatic return after the gesture pause",
+                lambda probe: not probe.get("followSuspended") and camera_near(probe, lat, lon)
+                and abs(probe_number(probe, "tilt") - GUIDANCE_TILT_DEGREES) <= 1.0,
+            )
+            self.wait_for_node("description", "Rider lock on; tap to release", timeout=10)
+            self.capture("nav-camera-gesture-returned" + suffix)
+            emit("nav_camera", stage="gesture-pause-return", paused=paused, camera=camera)
+
+    def navigation_camera(self, args: argparse.Namespace) -> None:
+        """Captures the guidance camera and rider-lock states during a ride.
+
+        Repeatable frames cover navigation start, street-close framing, rider
+        lock release while fixes advance, relock at the latest fix, one frame
+        per speed band, an off-rider inspection with a lock cycle, a heading
+        turn, and camera restore after END. The debug camera probe makes each
+        state checkable, not only viewable. Queued debug fixes own the guidance
+        session while they flow, so the emulator's live provider cannot pull
+        the camera away. With `--black-and-white both`, every frame is captured
+        in colour and B&W. The street-close and speed-band frames also show the
+        raised arrow and its outline against the full-width white routed road.
         """
         self.navigation_camera_steps(args)
 
@@ -1211,7 +2077,7 @@ class VisualHarness:
         planning_holder: list[dict[str, Any] | None] = []
         self.route(args, before_ride=lambda: planning_holder.append(self.read_camera()))
         planning_camera = planning_holder[0] if planning_holder else None
-        self.capture("nav-camera-00-guidance-start")
+        self.capture_ride_frame(args, "nav-camera-00-guidance-start")
 
         snapshot = self.read_route_snapshot()
         index = int(snapshot.get("selectedIndex", 0))
@@ -1243,8 +2109,104 @@ class VisualHarness:
             not_before_ms=run_started_ms - 2_000,
         )
         self.settle_for_capture(args)
-        self.capture("nav-camera-01-street-close")
+        self.capture_ride_frame(args, "nav-camera-01-street-close")
         emit("nav_camera", stage="street-close", camera=camera)
+
+        expected_zoom = guidance_zoom_band(0.0)
+        self.tap_node("description", "Zoom out")
+        initial_zoomed_out = self.wait_for_camera(
+            "ride zoom-out before releasing the rider lock",
+            lambda probe: probe.get("guidance") is True
+            and camera_near(probe, street_lat, street_lon)
+            and probe_number(probe, "zoom") < expected_zoom - 0.5
+        )
+        self.capture_ride_frame(args, "nav-camera-lock-on-zoomed-out")
+        # Switching the ride style restarts the guidance marker collector, which
+        # can restore its speed-band zoom after the earlier zoom-out snapshot.
+        # Reapply the inspection zoom after the final style capture so the lock
+        # release comparison uses a fresh settled native camera snapshot.
+        self.tap_node("description", "Zoom out")
+        zoomed_out = self.wait_for_camera(
+            "ride zoom-out after the final style capture",
+            lambda probe: probe.get("guidance") is True
+            and probe.get("cameraLocked") is True
+            and camera_near(probe, street_lat, street_lon)
+            and probe_number(probe, "zoom") < expected_zoom - 0.5
+            and probe.get("createdAtMillis", 0) > initial_zoomed_out.get("createdAtMillis", 0),
+        )
+        self.tap_node("description", "Rider lock on; tap to release")
+        self.wait_for_node("description", "Rider lock off; tap to follow", timeout=10)
+        unlocked_offset = min(street_offset + 200.0, total_distance * 0.5)
+        unlocked_lat, unlocked_lon = self.inject_route_span(
+            points,
+            cumulative,
+            street_offset,
+            unlocked_offset,
+            step_m=ROUTE_FOLLOW_STEP_M,
+            speed_mps=0.0,
+        )
+        expected_relock_bearing = bearing_degrees(
+            point_at_offset(points, cumulative, max(0.0, unlocked_offset - 40.0)),
+            point_at_offset(points, cumulative, min(total_distance, unlocked_offset + 40.0)),
+        )
+        self.settle_for_capture(args)
+        camera = self.wait_for_camera(
+            "released lock to preserve the inspection camera while fixes advance",
+            lambda probe: probe.get("guidance") is True
+            and camera_near(probe, street_lat, street_lon)
+            and abs(probe_number(probe, "zoom") - probe_number(zoomed_out, "zoom")) <= 0.25
+        )
+        self.capture_ride_frame(args, "nav-camera-rider-lock-off")
+        emit(
+            "nav_camera",
+            stage="rider-lock-off",
+            rider=(unlocked_lat, unlocked_lon),
+            camera=camera,
+        )
+
+        self.tap_node("description", "Rider lock off; tap to follow")
+        camera = self.wait_for_camera(
+            "rider lock to restore guidance framing at the latest fix",
+            lambda probe: probe.get("guidance") is True
+            and camera_near(probe, unlocked_lat, unlocked_lon)
+            and abs(probe_number(probe, "zoom") - expected_zoom) <= 0.25
+            and abs(probe_number(probe, "tilt") - GUIDANCE_TILT_DEGREES) <= 1.0
+            and bearing_distance_degrees(
+                probe_number(probe, "bearing"),
+                expected_relock_bearing,
+            ) <= 8.0,
+        )
+        self.capture_ride_frame(args, "nav-camera-rider-lock-relocked")
+        emit("nav_camera", stage="rider-lock-reenabled", camera=camera)
+
+        self.capture_follow_pause(args, unlocked_lat, unlocked_lon)
+
+        # Use the debug inspection camera to create a repeatable off-rider
+        # view, then exercise the same unlock/relock control without relying
+        # on emulator-specific synthetic drag dispatch.
+        off_rider_lat = unlocked_lat + 0.005
+        off_rider_lon = unlocked_lon + 0.005
+        self.inspect_camera(
+            off_rider_lat,
+            off_rider_lon,
+            expected_zoom,
+            25.0,
+            expected_relock_bearing,
+        )
+        self.capture_ride_frame(args, "nav-camera-lock-on-inspection")
+        self.tap_node("description", "Rider lock on; tap to release")
+        self.wait_for_node("description", "Rider lock off; tap to follow", timeout=10)
+        self.capture_ride_frame(args, "nav-camera-lock-off-inspection")
+        self.tap_node("description", "Rider lock off; tap to follow")
+        camera = self.wait_for_camera(
+            "explicit relock from the off-rider inspection view",
+            lambda probe: probe.get("guidance") is True
+            and camera_near(probe, unlocked_lat, unlocked_lon)
+            and abs(probe_number(probe, "zoom") - expected_zoom) <= 0.25
+            and abs(probe_number(probe, "tilt") - GUIDANCE_TILT_DEGREES) <= 1.0,
+        )
+        self.capture_ride_frame(args, "nav-camera-recenter-restored")
+        emit("nav_camera", stage="explicit-relock", camera=camera)
 
         # One frame per speed band; the rider keeps moving along the route so
         # the camera also has to re-centre, not just re-zoom.
@@ -1268,7 +2230,7 @@ class VisualHarness:
                 and abs(probe_number(probe, "zoom") - expected_zoom) <= 0.25,
             )
             self.settle_for_capture(args)
-            self.capture(f"nav-camera-02-speed-{speed:g}")
+            self.capture_ride_frame(args, f"nav-camera-02-speed-{speed:g}")
             emit(
                 "nav_camera",
                 stage="speed-band",
@@ -1289,7 +2251,7 @@ class VisualHarness:
         )
         if turn is None:
             emit("nav_camera", stage="heading-turn", status="no-turn-found")
-            self.capture("nav-camera-03-straight-heading")
+            self.capture_ride_frame(args, "nav-camera-03-straight-heading")
         else:
             turn_offset, incoming, outgoing = turn
             approach_end = max(0.0, turn_offset - 25.0)
@@ -1308,14 +2270,14 @@ class VisualHarness:
                 and bearing_distance_degrees(probe_number(probe, "bearing"), incoming) <= 30.0,
             )
             self.settle_for_capture(args)
-            self.capture("nav-camera-03-turn-approach")
+            self.capture_ride_frame(args, "nav-camera-03-turn-approach")
             emit("nav_camera", stage="turn-approach", camera=camera, expected_bearing=incoming)
 
             self.inject_route_fix(
                 points, cumulative, turn_offset + args.turn_step * 0.5, speed_mps=args.turn_speed
             )
             self.settle_for_capture(args)
-            self.capture("nav-camera-04-turn-mid")
+            self.capture_ride_frame(args, "nav-camera-04-turn-mid")
 
             exit_end = turn_offset + args.turn_step * 5.0
             exit_lat, exit_lon = self.inject_route_span(
@@ -1333,7 +2295,7 @@ class VisualHarness:
                 and bearing_distance_degrees(probe_number(probe, "bearing"), outgoing) <= 35.0,
             )
             self.settle_for_capture(args)
-            self.capture("nav-camera-05-turn-exited")
+            self.capture_ride_frame(args, "nav-camera-05-turn-exited")
             observed_delta = abs(
                 bearing_delta_degrees(incoming, probe_number(camera, "bearing"))
             )
@@ -1374,6 +2336,52 @@ class VisualHarness:
                     f"zoom drift {zoom_drift:.2f}, bearing drift {bearing_drift:.2f}."
                 )
 
+    def lane_guidance(self, args: argparse.Namespace) -> None:
+        """Rides the route and captures each maneuver that shows lane guidance.
+
+        The guidance card exposes the lane strip as a "Lane guidance: ..."
+        content description. Fixes advance in --step metres; each time a new
+        lane recommendation appears, an approach frame is captured, then one
+        more after riding past that maneuver so the strip's hand-over to the
+        next turn is visible. Fails when the ride ends without any lane
+        guidance, which catches a graph imported without lane data.
+        """
+        if args.plan_only:
+            raise VisualError("lanes starts guidance; omit --plan-only.")
+        self.route(args)
+        self.capture_ride_frame(args, "lanes-00-guidance-start")
+        snapshot = self.read_route_snapshot()
+        route = snapshot["routes"][int(snapshot.get("selectedIndex", 0))]
+        points = route["points"]
+        cumulative, total_distance = cumulative_distance(points)
+        seen: list[str] = []
+        pending_exit: str | None = None
+        offset = 0.0
+        while offset < total_distance and len(seen) < args.max_captures:
+            offset = min(total_distance, offset + args.step)
+            self.inject_route_fix(points, cumulative, offset, speed_mps=args.speed)
+            nodes = self.matching_nodes("description", "Lane guidance:", contains=True)
+            guidance = self.matching_nodes("description", "Navigation guidance:", contains=True)
+            card = guidance[0]["description"] if guidance else ""
+            lane = nodes[0]["description"] if nodes else ""
+            if pending_exit is not None and card != pending_exit:
+                self.settle_for_capture(args)
+                self.capture_ride_frame(args, f"lanes-{len(seen):02d}-after")
+                emit("lanes", stage="after", offset_m=round(offset), card=card, lanes=lane or None)
+                pending_exit = None
+            if lane and f"{card}|{lane}" not in seen:
+                seen.append(f"{card}|{lane}")
+                self.settle_for_capture(args)
+                self.capture_ride_frame(args, f"lanes-{len(seen):02d}-approach")
+                emit("lanes", stage="approach", offset_m=round(offset), card=card, lanes=lane)
+                pending_exit = card
+        emit("lanes", stage="done", captured=len(seen), ridden_m=round(offset), total_m=round(total_distance))
+        if not seen:
+            raise VisualError(
+                "No lane guidance appeared on this ride. Check that the graph was imported with "
+                "tools/gh/MotoGraphImport.java (preflight checks for moto_lanes)."
+            )
+
     def app_logs(self, *, lines: int) -> str:
         result = self.device_command(
             "logcat", "-d", "-t", str(lines),
@@ -1387,6 +2395,405 @@ class VisualHarness:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def perf_pan_metres(zoom: float) -> float:
+    """Roughly one screen width of motion at [zoom], so every case sweeps the
+    same amount of visible map instead of a few pixels at z14."""
+    return 300.0 * 2.0 ** (18.0 - zoom)
+
+
+def perf_zoom_plan(targets: list[str], zooms_argument: str) -> dict[str, list[float]]:
+    """Parses the perf --zooms grammar into a zoom list per target.
+
+    Comma-separated items are either a default zoom that applies to every
+    target (`18`) or a target-specific zoom (`houses=18.5`). A target with at
+    least one target-specific zoom uses only those; every other target uses the
+    default zooms. This is what lets one run cover the acceptance matrix
+    (`cbd=14,cbd=16,cbd=18,houses=18.5`) without re-running the command and
+    hand-merging reports.
+    """
+    defaults: list[float] = []
+    overrides: dict[str, list[float]] = {}
+    for raw in zooms_argument.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        target: str | None = None
+        value = item
+        if "=" in item:
+            head, _, tail = item.partition("=")
+            target = head.strip()
+            value = tail.strip()
+            if target not in targets:
+                raise VisualError(
+                    f"Zoom override '{item}' names target '{target}', which --targets did not select."
+                )
+        try:
+            zoom = float(value)
+        except ValueError as error:
+            raise VisualError(f"Invalid perf zoom '{item}'.") from error
+        if not 0.0 <= zoom <= 22.0:
+            raise VisualError(f"Perf zoom '{item}' is outside the supported 0..22 range.")
+        if target is None:
+            defaults.append(zoom)
+        else:
+            overrides.setdefault(target, []).append(zoom)
+    plan = {target: list(overrides.get(target, defaults)) for target in targets}
+    missing = [target for target, values in plan.items() if not values]
+    if missing:
+        raise VisualError(
+            "No zoom selected for perf target(s): "
+            + ", ".join(missing)
+            + ". Pass default zooms or `target=zoom` overrides."
+        )
+    return plan
+
+
+def perf_sweep_plan(
+    *,
+    request_id: int,
+    label: str,
+    motion: str,
+    lat: float,
+    lon: float,
+    zoom: float,
+    tilt: float,
+    duration_ms: int,
+    building_mode: str,
+    settle: bool,
+) -> dict[str, Any]:
+    """Builds the JSON plan the debug receiver queues; mirrors MapPerfSweepRequest."""
+    pan_m = perf_pan_metres(zoom)
+    d_lat = (pan_m * math.cos(math.radians(45.0))) / 111_320.0
+    d_lon = (pan_m * math.sin(math.radians(45.0))) / (
+        111_320.0 * math.cos(math.radians(lat))
+    )
+    return {
+        "requestId": request_id,
+        "label": label,
+        "motion": motion,
+        "lat": lat,
+        "lon": lon,
+        "latEnd": lat + d_lat,
+        "lonEnd": lon + d_lon,
+        "zoomStart": zoom,
+        "zoomEnd": min(zoom + 1.0, 18.5),
+        "tilt": tilt,
+        "bearingStart": 0.0,
+        "bearingEnd": 90.0,
+        "durationMs": duration_ms,
+        "settle": settle,
+        "buildingMode": building_mode,
+    }
+
+
+def perf_segment(result: dict[str, Any], name: str = "all") -> dict[str, Any]:
+    segments = result.get("segments") or {}
+    segment = segments.get(name)
+    return segment if isinstance(segment, dict) else {}
+
+
+def perf_number(source: dict[str, Any], key: str) -> float:
+    value = source.get(key)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def perf_primary_fps(result: dict[str, Any]) -> float:
+    """The primary cadence evidence for one sweep.
+
+    `nativeFps.harmonic` comes from MapLibre's per-render-thread frame listener
+    (`1e9/delta` per frame, elapsed-average recovered by the app, first
+    pre-sweep idle interval discarded). The finish-callback timestamp series is
+    the secondary series: it is taken inside the app's callback, so anything
+    that coalesces or delays that callback would bias it.
+    """
+    native = result.get("nativeFps") or {}
+    harmonic = perf_number(native, "harmonic")
+    if harmonic > 0.0:
+        return harmonic
+    return perf_number(perf_segment(result), "fps")
+
+
+def perf_merge(args: argparse.Namespace) -> None:
+    """Merges `perf` run summaries into one labelled before/after report."""
+    labels = [item.strip() for item in args.labels.split(",") if item.strip()]
+    summaries: list[dict[str, Any]] = []
+    for path in args.summaries:
+        summary_path = Path(path).expanduser()
+        if not summary_path.is_absolute():
+            summary_path = Path.cwd() / summary_path
+        summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
+    if not summaries:
+        raise VisualError("perf-merge needs at least one perf-summary.json.")
+    if labels and len(labels) != len(summaries):
+        raise VisualError(
+            f"perf-merge got {len(labels)} labels for {len(summaries)} summaries."
+        )
+    results: list[dict[str, Any]] = []
+    device_gpu: dict[str, str] = {}
+    for index, summary in enumerate(summaries):
+        label = labels[index] if labels else f"run{index + 1}"
+        for result in summary.get("sweeps") or []:
+            labelled = dict(result)
+            labelled["case"] = f"{label}/{result.get('case', '?')}"
+            results.append(labelled)
+        gpu = summary.get("deviceGpu")
+        if isinstance(gpu, dict):
+            device_gpu.update(gpu)
+    first = summaries[0]
+    report = perf_report_markdown(
+        results,
+        device=f"{first.get('serial', '?')} ({first.get('avd', '?')})",
+        generated=utc_now(),
+        app_build="debug sweeps (per-row backend identity below)",
+        archive_bytes=first.get("archiveBytes"),
+        device_gpu=device_gpu or None,
+    )
+    report_path = Path(args.report).expanduser()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
+    emit("perf_report", report=str(report_path), summaries=len(summaries), sweeps=len(results))
+
+
+def perf_backend_label(result: dict[str, Any]) -> str:
+    """One sweep's measured backend, from `RenderingEngine.getCurrentType()`.
+
+    The renderer value is read at runtime by the app and is the authoritative
+    bit: the single-backend MapLibre artifacts reject the other backend, so
+    `vulkan` can only come from the Vulkan artifact and `opengl` only from the
+    OpenGL one. The artifact's `BuildConfig` flavor is reported in the per-sweep
+    JSON as extra context but is deliberately not used in this header: those
+    constants are compile-time inlined, so an incrementally built APK can carry
+    a stale value even when the runtime backend is correct.
+    """
+    backend = result.get("backend")
+    if not isinstance(backend, dict):
+        return "not reported"
+    renderer = str(backend.get("renderer", "unknown"))
+    build_type = backend.get("appBuildType")
+    return f"{renderer} ({build_type})" if build_type else renderer
+
+
+def perf_report_markdown(
+    results: list[dict[str, Any]],
+    *,
+    device: str,
+    generated: str,
+    app_build: str,
+    archive_bytes: int | None,
+    device_gpu: dict[str, str] | None = None,
+) -> str:
+    """Human-readable evidence for the numeric benchmark, one table per view."""
+    backends = sorted({perf_backend_label(result) for result in results})
+    lines: list[str] = [
+        "# Brisbane map performance report",
+        "",
+        f"- Generated: {generated}",
+        f"- Device: {device}",
+        f"- App build: {app_build}",
+        (
+            f"- Installed basemap: {archive_bytes} bytes"
+            if archive_bytes
+            else "- Installed basemap: not reported"
+        ),
+        (
+            "- Rendering backend (measured in-process): " + "; ".join(backends)
+            if backends
+            else "- Rendering backend: not reported"
+        ),
+    ]
+    if device_gpu:
+        vulkan = device_gpu.get("vulkanDeviceName")
+        gles = device_gpu.get("glesRenderer")
+        if vulkan:
+            lines.append(f"- Vulkan device (`cmd gpu vkjson`): {vulkan}")
+        if gles:
+            lines.append(f"- GLES renderer (`dumpsys SurfaceFlinger`): {gles}")
+    lines += [
+        f"- Sweeps: {len(results)}",
+        "",
+        "Frame intervals are wall-clock deltas between native MapLibre",
+        "`OnDidFinishRenderingFrame` callbacks, i.e. the renderer's own frame",
+        "cadence. `fps` is the primary cadence: `nativeFps.harmonic`, the",
+        "elapsed average recovered from MapLibre's per-render-thread frame",
+        "listener (first pre-sweep idle interval discarded). `elapsed fps` is",
+        "the secondary finish-callback series `(frames-1)*1000/durationMs`;",
+        "the in-app callback can be coalesced, so it never overrides the native",
+        "series. `enc`/`render` are",
+        "MapLibre `RenderingStats` times converted from seconds to ms; on",
+        "Vulkan `enc` includes `Context::beginFrame` fence waits, so it is",
+        "encode+GPU-wait, not pure CPU encode time. `draws` is the mean",
+        "per-frame `numDrawCalls`; `upload KB/f` is the mean per-frame delta of",
+        "the cumulative `bufferUpdateBytes` counter (never its running total).",
+        "`gpu`/`total` are per-frame durations from the activity window's",
+        "`Window.FrameMetrics` (`GPU_DURATION`/`TOTAL_DURATION`); a",
+        "SurfaceView-backed MapView renders on its own GL surface, so those",
+        "columns describe the window, not map presentation. Each sweep's",
+        "`backend.renderer` is read at runtime via",
+        "`RenderingEngine.getCurrentType()`, which the single-backend MapLibre",
+        "artifacts make authoritative; the per-sweep JSON `maplibreFlavor` is",
+        "informational (compile-time-inlined constants can go stale after an",
+        "ABI-identical artifact swap).",
+        "",
+        "## Sweeps",
+        "",
+        "| case | mode | phase | fps | elapsed fps | p50 ms | p95 ms | p99 ms | >50 ms | >100 ms | enc mean | render mean | draws | upload KB/f | gpu p95 | total p95 | frames |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for result in results:
+        all_stats = perf_segment(result)
+        presentation = result.get("windowFrameMetrics") or {}
+        gpu = presentation.get("gpu") if isinstance(presentation.get("gpu"), dict) else {}
+        total = presentation.get("total") if isinstance(presentation.get("total"), dict) else {}
+        counters = result.get("nativeRenderStats") or {}
+        lines.append(
+            "| {case} | {mode} | {phase} | {fps:.1f} | {elapsed:.1f} | {p50:.1f} | {p95:.1f} | {p99:.1f} | {s50} | {s100} | "
+            "{enc:.1f} | {render:.1f} | {draws:.0f} | {upload:.0f} | {gpu:.1f} | {total:.1f} | {frames} |".format(
+                case=result.get("case", "?"),
+                mode=result.get("buildingMode", "?"),
+                phase=result.get("phase", "?"),
+                fps=perf_primary_fps(result),
+                elapsed=perf_number(all_stats, "fps"),
+                p50=perf_number(all_stats, "p50Ms"),
+                p95=perf_number(all_stats, "p95Ms"),
+                p99=perf_number(all_stats, "p99Ms"),
+                s50=int(perf_number(all_stats, "stalls50")),
+                s100=int(perf_number(all_stats, "stalls100")),
+                enc=perf_number(all_stats, "encodingMeanMs"),
+                render=perf_number(all_stats, "renderingMeanMs"),
+                draws=perf_number(counters, "drawCallsMean"),
+                upload=perf_number(counters, "bufferUpdateBytesPerFrameMean") / 1024.0,
+                gpu=perf_number(gpu, "p95Ms"),
+                total=perf_number(total, "p95Ms"),
+                frames=int(perf_number(all_stats, "frames")),
+            )
+        )
+    warm = [result for result in results if result.get("phase") == "warm"]
+    if warm:
+        lines += [
+            "",
+            "## Warmed motion (grouped by case and mode)",
+            "",
+            "| case | mode | mean fps | mean p95 ms | mean p99 ms | total >100 ms |",
+            "| --- | --- | ---: | ---: | ---: | ---: |",
+        ]
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for result in warm:
+            groups.setdefault((result.get("case", "?"), result.get("buildingMode", "?")), []).append(result)
+        for (case, mode), group in sorted(groups.items()):
+            count = len(group)
+            fps = sum(perf_primary_fps(item) for item in group) / count
+            p95 = sum(perf_number(perf_segment(item), "p95Ms") for item in group) / count
+            p99 = sum(perf_number(perf_segment(item), "p99Ms") for item in group) / count
+            stalls = sum(int(perf_number(perf_segment(item), "stalls100")) for item in group)
+            lines.append(
+                f"| {case} | {mode} | {fps:.1f} | {p95:.1f} | {p99:.1f} | {stalls} |"
+            )
+    # Explicit before/after comparison for merged runs labelled
+    # `<before|after>-<variant>` (for example `before-opengl`/`after-opengl`).
+    # Only valid warm sweeps count: a settle timeout or an interrupted leg is
+    # never a measured improvement, and variants are never averaged together.
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for result in warm:
+        if result.get("interrupted") or result.get("cancelled") or result.get("settleTimedOut"):
+            continue
+        case = str(result.get("case", "?"))
+        label, _, suffix = case.partition("/")
+        side, _, variant = label.partition("-")
+        if side not in ("before", "after") or not variant:
+            continue
+        grouped.setdefault((variant, suffix, side), []).append(result)
+    pairs = sorted(
+        {
+            (variant, suffix)
+            for (variant, suffix, side) in grouped
+            if (variant, suffix, "before") in grouped and (variant, suffix, "after") in grouped
+        }
+    )
+    if pairs:
+        lines += [
+            "",
+            "## Valid warm before/after (primary cadence)",
+            "",
+            "Mean `nativeFps.harmonic` over the valid warmed sweeps of each merged",
+            "run, paired per backend variant; sweeps with a settle timeout,",
+            "interruption or cancellation are excluded from both sides.",
+            "",
+            "| variant | case | before fps | after fps | factor | before p95 ms | after p95 ms |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for variant, suffix in pairs:
+            before = grouped[(variant, suffix, "before")]
+            after = grouped[(variant, suffix, "after")]
+            before_fps = sum(perf_primary_fps(item) for item in before) / len(before)
+            after_fps = sum(perf_primary_fps(item) for item in after) / len(after)
+            before_p95 = sum(perf_number(perf_segment(item), "p95Ms") for item in before) / len(before)
+            after_p95 = sum(perf_number(perf_segment(item), "p95Ms") for item in after) / len(after)
+            factor = after_fps / before_fps if before_fps > 0.0 else 0.0
+            lines.append(
+                f"| {variant} | {suffix} | {before_fps:.1f} | {after_fps:.1f} | {factor:.2f}x | "
+                f"{before_p95:.1f} | {after_p95:.1f} |"
+            )
+    cold = [result for result in results if result.get("phase") == "cold"]
+    if cold:
+        lines += [
+            "",
+            "## Cold loading (fresh process, tiles still streaming)",
+            "",
+            "| case | mode | fps | p50 ms | p95 ms | >100 ms | cold frames | warm frames |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for result in cold:
+            all_stats = perf_segment(result)
+            segments = result.get("segments") or {}
+            lines.append(
+                "| {case} | {mode} | {fps:.1f} | {p50:.1f} | {p95:.1f} | {s100} | {cold} | {warm} |".format(
+                    case=result.get("case", "?"),
+                    mode=result.get("buildingMode", "?"),
+                    fps=perf_number(all_stats, "fps"),
+                    p50=perf_number(all_stats, "p50Ms"),
+                    p95=perf_number(all_stats, "p95Ms"),
+                    s100=int(perf_number(all_stats, "stalls100")),
+                    cold=int(segments.get("coldFrames", 0) or 0),
+                    warm=int(segments.get("warmFrames", 0) or 0),
+                )
+            )
+    lines += [
+        "",
+        "## Acceptance",
+        "",
+        "Targets: ~60 fps, warm p95 <= 33 ms, no warm >100 ms stalls. A warm",
+        "sweep whose legs were interrupted/cancelled or whose settle window",
+        "timed out is INVALID, never folded into a pass. Emulator numbers below",
+        "the target are reported as measured; the benchmark is never loosened to",
+        "make a case pass.",
+        "",
+    ]
+    for result in results:
+        if result.get("phase") != "warm":
+            continue
+        all_stats = perf_segment(result)
+        fps = perf_primary_fps(result)
+        p95 = perf_number(all_stats, "p95Ms")
+        stalls = int(perf_number(all_stats, "stalls100"))
+        interrupted = bool(result.get("interrupted")) or bool(result.get("cancelled"))
+        settle_timed_out = bool(result.get("settleTimedOut"))
+        if interrupted or settle_timed_out:
+            verdict = "INVALID"
+        else:
+            verdict = "PASS" if fps >= 55.0 and p95 <= 33.0 and stalls == 0 else "MISS"
+        detail = f"{fps:.1f} fps, p95 {p95:.1f} ms, {stalls} stalls >100 ms"
+        if interrupted:
+            detail += "; interrupted leg"
+        if settle_timed_out:
+            detail += "; settle window timed out (not a verified warmed run)"
+        lines.append(
+            f"- {result.get('case', '?')} / {result.get('buildingMode', '?')}: "
+            f"{verdict} ({detail})"
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def cumulative_distance(points: list[list[float]]) -> tuple[list[float], float]:
@@ -1532,8 +2939,11 @@ def add_selector(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--index", type=int, default=0, help="Choose one match when there are duplicates.")
 
 
-def add_route_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--from", dest="from_text", required=True, help="Place name or lat,lon.")
+def add_route_options(parser: argparse.ArgumentParser, *, require_from: bool = True) -> None:
+    if require_from:
+        parser.add_argument("--from", dest="from_text", required=True, help="Place name or lat,lon.")
+    else:
+        parser.set_defaults(from_text="")
     parser.add_argument("--to", dest="to_text", required=True, help="Place name or lat,lon.")
     parser.add_argument("--complexity", type=int, default=0, help="Ride-complexity detent (default: 0).")
     parser.add_argument("--road-share", type=int, default=70, help="Maximum shared roads, 10–90 by 5%% (default: 70).")
@@ -1543,7 +2953,7 @@ def add_route_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--progress-interval", type=float, default=2.0, help="Seconds between screenshots while routing.")
     parser.add_argument("--progress", "--progress-percent", dest="progress_percent", type=float, help="Enter ride mode and jump to this route percentage.")
     parser.add_argument("--step-delay", type=float, default=0.15, help="Delay between simulated GPS fixes in seconds.")
-    parser.add_argument("--black-and-white", choices=("on", "off", "both"), help="Set ride-map style; 'both' captures both styles.")
+    parser.add_argument("--black-and-white", choices=("on", "off", "both"), help="Set ride-map style; 'both' captures every frame in both styles.")
     parser.add_argument("--plan-only", action="store_true", help="Stop after the route is ready; leave the planner visible.")
     parser.add_argument("--reuse-app", action="store_true", help="Use the running app without rebuilding or relaunching it.")
     parser.add_argument("--no-build", action="store_true", help="Use the existing debug APK when launching.")
@@ -1559,12 +2969,18 @@ def create_parser() -> argparse.ArgumentParser:
             "  tools/test/visual.py launch\n"
             "  tools/test/visual.py route --from '-27.4698,153.0251' --to '-27.3353,152.7720'\n"
             "  tools/test/visual.py route --from 'Brisbane' --to 'Mount Glorious' --complexity 2 --road-share 45 --block-unpaved\n"
+            "  tools/test/visual.py current-location --to '-27.3353,152.7720' --plan-only\n"
+            "  tools/test/visual.py lanes --from '-27.4698,153.0251' --to '-27.5598,153.0811'\n"
             "  tools/test/visual.py nav-camera --from 'Brisbane' --to 'Mount Glorious'\n"
+            "  tools/test/visual.py nav-camera --from 'Brisbane' --to 'Mount Glorious' --black-and-white both\n"
+            "  tools/test/visual.py nav-camera --from '-27.4700,153.0250' --to 'Mount Glorious' --black-and-white on\n"
             "  tools/test/visual.py route --from 'Brisbane' --to 'Mount Glorious' --black-and-white both\n"
             "  tools/test/visual.py map-mode --black-and-white on\n"
+            "  tools/test/visual.py settings-menu\n"
+            "  tools/test/visual.py search-results --query Brisbane\n"
             "  tools/test/visual.py screenshot --label before-change\n"
             "  tools/test/visual.py tree\n"
-            "  tools/test/visual.py tap --description 'Route settings'\n"
+            "  tools/test/visual.py tap --description 'Planning settings'\n"
             "  tools/test/visual.py type --description From --value 'Samford'\n"
             "  tools/test/visual.py swipe 500 700 800 900 --duration 500\n"
             "  tools/test/visual.py logs --lines 100"
@@ -1581,11 +2997,134 @@ def create_parser() -> argparse.ArgumentParser:
     launch.add_argument("--skip-map", action="store_true", help="Do not seed the PMTiles archive.")
     launch.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
 
+    settings_menu = commands.add_parser(
+        "settings-menu",
+        help="Capture the planner settings menu and its dismissed state.",
+    )
+    settings_menu.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+    settings_menu.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
+    settings_menu.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
+
+    search_results = commands.add_parser(
+        "search-results", help="Capture the From POI action and search results with and without the keyboard.",
+    )
+    search_results.add_argument("--field", choices=("From", "To"), default="From")
+    search_results.add_argument("--query", default="Brisbane")
+    search_results.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+    search_results.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
+    search_results.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when installed.")
+
+    maps_settings = commands.add_parser(
+        "maps-settings",
+        help=(
+            "Capture the Maps screen: server address, catalog, download/import "
+            "intermediate states, installed-map delete confirmation, and Back."
+        ),
+    )
+    maps_settings.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+    maps_settings.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
+    maps_settings.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
+    maps_settings.add_argument(
+        "--server",
+        default="https://maps.example.net",
+        help="Address typed into the server field (no request is sent).",
+    )
+
+    media_controls = commands.add_parser(
+        "media-controls",
+        help="Capture the ride media control center across B&W player states.",
+    )
+    media_controls.add_argument("--from", dest="from_text", default="-27.4698,153.0251", help="Place name or lat,lon.")
+    media_controls.add_argument("--to", dest="to_text", default="-27.3353,152.7720", help="Place name or lat,lon.")
+    media_controls.add_argument("--title", default="Debug Track", help="Synthetic track title.")
+    media_controls.add_argument("--artist", default="Debug Artist", help="Synthetic artist.")
+    media_controls.add_argument("--route-timeout", type=float, default=300, help="Maximum route wait in seconds.")
+    media_controls.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+    media_controls.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
+    media_controls.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
+    media_controls.add_argument("--reuse-app", action="store_true", help="Reuse the running app and enter ride mode from the current screen.")
+    media_controls.add_argument(
+        "--inactivity-only",
+        action="store_true",
+        help="Capture only the real ride panel's inactivity timer and blank-panel touch reset.",
+    )
+
     route = commands.add_parser("route", help="Load endpoints, apply options, route, and optionally enter ride mode.")
     add_route_options(route)
+    current_location = commands.add_parser(
+        "current-location",
+        help="Select a real emulator GPS fix as From, then continue the route flow.",
+    )
+    add_route_options(current_location, require_from=False)
+    current_location.add_argument(
+        "--location",
+        default="-27.4698,153.0251",
+        help="Emulator GPS coordinate to supply to the app (default: Brisbane).",
+    )
+    current_location.set_defaults(from_current_location=True)
 
     buildings = commands.add_parser("buildings", help="Offline 3D houses, city navigation, silhouettes, style switches and landscape (explicit owned serial required).")
     buildings.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+
+    perf = commands.add_parser(
+        "perf",
+        help="Native-frame FPS benchmark over deterministic camera sweeps on the real offline map (explicit owned serial required).",
+        description=(
+            "Queues camera sweeps through the debug receiver and reports native\n"
+            "MapLibre frame intervals (p50/p95/p99, >50/>100 ms stalls) for cold\n"
+            "loading and warmed motion, A/B-ing the building extrusion paint. Each\n"
+            "sweep records the rendering backend MapLibre actually initialized and\n"
+            "the per-frame renderer counters; the report names the device GPU.\n\n"
+            "  tools/test/visual.py --serial emulator-5554 perf\n"
+            "  tools/test/visual.py --serial emulator-5554 perf --targets cbd --zooms 18 \\\n"
+            "      --building-modes current,opaque,hidden --repeat 2\n"
+            "  tools/test/visual.py --serial emulator-5554 perf --targets cbd,houses \\\n"
+            "      --zooms cbd=14,cbd=16,cbd=18,houses=18.5 --screenshots"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    perf.add_argument("--targets", default="cbd,houses", help="Comma-separated targets: cbd,houses (default both).")
+    perf.add_argument(
+        "--zooms",
+        default="14,16,18",
+        help=(
+            "Comma-separated zooms. A bare zoom applies to every target; "
+            "`target=zoom` applies only to that target and, when present for a "
+            "target, replaces the bare zooms there (default 14,16,18). Example: "
+            "--zooms cbd=14,cbd=16,cbd=18,houses=18.5"
+        ),
+    )
+    perf.add_argument("--motion", default="combo", choices=("orbit", "pan", "zoom", "combo"), help="Camera motion kind (default combo).")
+    perf.add_argument("--tilt", type=float, default=58.0, help="Camera pitch in degrees (default 58).")
+    perf.add_argument("--duration", type=float, default=6.0, help="Sweep motion duration in seconds (default 6).")
+    perf.add_argument("--repeat", type=int, default=2, help="Warmed repeats per case (default 2).")
+    perf.add_argument("--building-modes", default="current", help="Comma-separated extrusion diagnostics: current,opaque,hidden (default current).")
+    perf.add_argument("--no-cold", action="store_true", help="Skip the fresh-process cold-loading runs.")
+    perf.add_argument("--no-warm", action="store_true", help="Skip the warmed motion runs.")
+    perf.add_argument("--settle", type=float, default=1.0, help="Seconds to wait after a cold restart (default 1).")
+    perf.add_argument("--screenshots", action="store_true", help="Capture a settled case view for building visibility evidence.")
+    perf.add_argument("--screenshot-motion", action="store_true", help="Also capture one mid-motion frame per sweep (adds a known hitch to that sweep's frames).")
+    perf.add_argument("--report", default=str(DEFAULT_PERF_REPORT), help=f"Markdown report path (default {DEFAULT_PERF_REPORT}).")
+    perf.add_argument("--no-build", action="store_true", help="Use the existing debug APK.")
+    perf.add_argument("--skip-map", action="store_true", help="Launch without copying the PMTiles archive.")
+    perf.add_argument("--refresh-map", action="store_true", help="Recopy PMTiles even when a map is already installed.")
+
+    perf_merge_parser = commands.add_parser(
+        "perf-merge",
+        help="Merge several perf summaries into one before/after report.",
+        description=(
+            "Reads the perf-summary.json of one or more `perf` runs (each run\n"
+            "covers one style/backend combination) and writes one report with\n"
+            "every sweep labelled by its run, using the same markdown renderer\n"
+            "as a single run.\n\n"
+            "  tools/test/visual.py perf-merge --labels before-opengl,after-opengl \\\n"
+            "      build/visual-inspection/*/perf-summary.json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    perf_merge_parser.add_argument("summaries", nargs="+", help="perf-summary.json files, in report order.")
+    perf_merge_parser.add_argument("--labels", default="", help="Comma-separated run labels, one per summary.")
+    perf_merge_parser.add_argument("--report", default=str(DEFAULT_PERF_REPORT), help=f"Markdown report path (default {DEFAULT_PERF_REPORT}).")
 
     camera = commands.add_parser("camera", help="Set a deterministic debug inspection camera, not a production camera policy.")
     camera.add_argument("--lat", type=float, required=True)
@@ -1594,9 +3133,19 @@ def create_parser() -> argparse.ArgumentParser:
     camera.add_argument("--tilt", type=float, default=58.0)
     camera.add_argument("--bearing", type=float, default=0.0)
 
+    lanes = commands.add_parser(
+        "lanes",
+        help="Ride a route and capture every maneuver whose guidance card shows recommended lanes.",
+    )
+    add_route_options(lanes)
+    lanes.add_argument("--step", type=float, default=30.0, help="Metres between injected GPS fixes (default: 30).")
+    lanes.add_argument("--speed", type=float, default=12.0, help="Speed in m/s for the injected fixes (default: 12).")
+    lanes.add_argument("--max-captures", type=int, default=6, help="Stop after this many lane maneuvers (default: 6).")
+    lanes.add_argument("--settle", type=float, default=0.7, help="Seconds to let the HUD repaint before a capture (default: 0.7).")
+
     nav_camera = commands.add_parser(
         "nav-camera",
-        help="Start a ride and capture the guidance camera states plus the exit restore.",
+        help="Capture guidance camera lock/relock, speed, turn, and exit restore (both ride-map styles with --black-and-white both).",
     )
     add_route_options(nav_camera)
     nav_camera.add_argument(
@@ -1693,14 +3242,34 @@ def main() -> int:
             )
         elif args.command == "route":
             harness.route(args)
+        elif args.command == "search-results":
+            harness.capture_search_results(args)
+        elif args.command == "current-location":
+            harness.route(args)
         elif args.command == "nav-camera":
             harness.navigation_camera(args)
+        elif args.command == "lanes":
+            harness.lane_guidance(args)
         elif args.command == "buildings":
             harness.buildings(args)
+        elif args.command == "perf":
+            harness.perf(args)
+        elif args.command == "perf-merge":
+            perf_merge(args)
         elif args.command == "camera":
             harness.ensure_device(start_if_missing=False)
             harness.inspect_camera(args.lat, args.lon, args.zoom, args.tilt, args.bearing)
             harness.capture("inspection-camera")
+        elif args.command == "settings-menu":
+            harness.capture_settings_menu(
+                build=not args.no_build,
+                skip_map=args.skip_map,
+                refresh_map=args.refresh_map,
+            )
+        elif args.command == "maps-settings":
+            harness.capture_maps_settings(args)
+        elif args.command == "media-controls":
+            harness.capture_media_controls(args)
         elif args.command in {"options", "progress", "map-mode", "icon-states", "screenshot", "tree", "status", "tap", "type", "key", "swipe", "watch", "logs", "stop"}:
             harness.ensure_device(start_if_missing=False)
             if args.command == "options":

@@ -442,6 +442,20 @@ class GeocoderIndex private constructor() {
             }
         }
 
+        /**
+         * Loads an installed region's index from an explicit file. The file is
+         * already integrity-checked by the package importer, so this path does
+         * not consult the packaged-asset fingerprint (and must never overwrite
+         * an imported regional index with the bundled Queensland one).
+         */
+        fun loadFile(file: File): GeocoderIndex {
+            if (!file.isFile || file.length() == 0L) {
+                throw IllegalStateException("Geocoder index not found: ${file.absolutePath}")
+            }
+            val started = SystemClock.elapsedRealtime()
+            return parseFile(file).also { logLoaded(it, started, file) }
+        }
+
         private fun fileFingerprint(file: File): String =
             FileInputStream(file).use { digestHex(it) }
 

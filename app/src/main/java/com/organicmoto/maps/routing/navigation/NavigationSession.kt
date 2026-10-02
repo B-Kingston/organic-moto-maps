@@ -74,6 +74,8 @@ data class NavigationSnapshot(
         val roundaboutClockwise: Boolean? = null,
         /** Stable identity within this route, used to avoid repeated prompts. */
         val maneuverId: Int = -1,
+        /** Recommended lane(s) on the road being left, when it has two or more lanes. */
+        val lanes: LaneGuidance? = null,
     )
 }
 
@@ -421,6 +423,7 @@ class NavigationSession(
                 roundaboutExitNumber = node.roundaboutExitNumber,
                 roundaboutClockwise = node.roundaboutClockwise,
                 maneuverId = node.vertexIndex,
+                lanes = node.lanes,
             )
         }
         emit(fix, lat, lon, bearing, offset, upcomingTurns)

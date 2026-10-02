@@ -1,10 +1,12 @@
 package com.organicmoto.maps.map
 
+import com.organicmoto.maps.ui.dismissMediaStartupPrompt
 import android.Manifest
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
@@ -26,6 +28,9 @@ class OfflineMapSmokeTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @org.junit.Before
+    fun dismissStartupSetup() = composeRule.dismissMediaStartupPrompt()
+
     @Test(timeout = 240_000)
     fun separatelyInstalledMapOrImportPromptSurvivesControls() {
         composeRule.waitUntil(180_000) {
@@ -42,7 +47,8 @@ class OfflineMapSmokeTest {
         if (!mapReady) {
             composeRule.onNode(hasText("Offline map file needed")).assertExists()
             composeRule.onNode(hasText("Choose map file")).assertExists()
-            composeRule.onNodeWithContentDescription("Load map file").assertExists()
+            composeRule.onNodeWithContentDescription("Planning settings").performClick()
+            composeRule.onNodeWithText("Load map file").assertExists()
         }
         composeRule.onNode(hasText("© OpenMapTiles.org © OpenStreetMap contributors", substring = true)).assertExists()
         // Zoom actions use semantics and do not depend on API-private touch injection.

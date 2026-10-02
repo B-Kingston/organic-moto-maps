@@ -15,6 +15,8 @@ import com.organicmoto.maps.GuidanceActiveKey
 import com.organicmoto.maps.DarkRideMapEnabledKey
 import com.organicmoto.maps.DarkGuidanceStyleReadyKey
 import com.organicmoto.maps.MapRouteCountKey
+import com.organicmoto.maps.MediaCenterStatusKey
+import com.organicmoto.maps.MediaPanelOpenKey
 import com.organicmoto.maps.RouteCountKey
 import com.organicmoto.maps.RouteGenerationKey
 import com.organicmoto.maps.RouteUiStateKey
@@ -35,10 +37,14 @@ data class StateFingerprint(
     val mapRouteCount: Int,
     val dialog: String?,
     val sheetOpen: Boolean,
+    val settingsMenuOpen: Boolean,
     val voiceSettingsOpen: Boolean,
     val guidanceActive: Boolean,
     val darkRideMapEnabled: Boolean,
     val darkGuidanceStyleReady: Boolean,
+    val mediaPanelOpen: Boolean,
+    val mediaCenterStatus: String,
+    val mapsSettingsOpen: Boolean,
 )
 
 class StateExtractor(private val rule: ComposeTestRule) {
@@ -60,6 +66,7 @@ class StateExtractor(private val rule: ComposeTestRule) {
             mapRouteCount = map?.let { it.config.valueOrDefault(MapRouteCountKey, 0) } ?: 0,
             dialog = dialogText(),
             sheetOpen = rule.onAllNodes(hasText("Saved routes")).fetchSemanticsNodes().isNotEmpty(),
+            settingsMenuOpen = rule.onAllNodes(hasText("Sound settings")).fetchSemanticsNodes().isNotEmpty(),
             voiceSettingsOpen = rule.onAllNodes(
                 hasText("Spoken turn guidance"),
                 useUnmergedTree = true,
@@ -67,6 +74,12 @@ class StateExtractor(private val rule: ComposeTestRule) {
             guidanceActive = root.config.valueOrDefault(GuidanceActiveKey, false),
             darkRideMapEnabled = root.config.valueOrDefault(DarkRideMapEnabledKey, false),
             darkGuidanceStyleReady = root.config.valueOrDefault(DarkGuidanceStyleReadyKey, false),
+            mediaPanelOpen = root.config.valueOrDefault(MediaPanelOpenKey, false),
+            mediaCenterStatus = root.config.valueOrDefault(MediaCenterStatusKey, "unknown"),
+            mapsSettingsOpen = rule.onAllNodes(
+                hasContentDescription("Map server address"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty(),
         )
     }
 
@@ -132,16 +145,18 @@ class CoverageTracker {
     private var previousState: StateFingerprint? = null
     private var previousAction: FuzzAction? = null
     private val recentActions = ArrayDeque<FuzzAction>()
+    private val hits = mutableMapOf<UiTarget, Int>()
+    private var effectiveSteps = 0
 
     fun score(state: StateFingerprint, action: FuzzAction): Int {
-        val target = action.targetOrNull() ?: UiTarget.MAP
+        val target = action.target ?: UiTarget.MAP
         var score = 0
         if (state !in states) score += 10
         previousState?.let { before ->
             if (before != state && (before to state) !in transitions) score += 8
         }
         if ((state to target) !in visits) score += 5
-        if (action is FuzzAction.RotateKnob && action.detents !in recentActions.mapNotNull { (it as? FuzzAction.RotateKnob)?.detents }) {
+        if (action is RotateKnob && action.detents !in recentActions.mapNotNull { (it as? RotateKnob)?.detents }) {
             score += 5
         }
         val visitsForAction = visits[state to target] ?: 0
@@ -150,8 +165,12 @@ class CoverageTracker {
         return score
     }
 
-    fun record(state: StateFingerprint, action: FuzzAction) {
-        val target = action.targetOrNull() ?: UiTarget.MAP
+    fun record(state: StateFingerprint, action: FuzzAction, effective: Boolean) {
+        if (effective) {
+            effectiveSteps++
+            action.target?.let { hits[it] = (hits[it] ?: 0) + 1 }
+        }
+        val target = action.target ?: UiTarget.MAP
         visits[state to target] = (visits[state to target] ?: 0) + 1
         states += state
         previousState?.let { before -> if (before != state) transitions += before to state }
@@ -163,19 +182,12 @@ class CoverageTracker {
 
     fun discoveredStateCount(): Int = states.size
 
-    private fun FuzzAction.targetOrNull(): UiTarget? = when (this) {
-        is FuzzAction.Click -> target
-        is FuzzAction.LongClick -> target
-        is FuzzAction.TypeText -> target
-        is FuzzAction.SwipeCarousel -> UiTarget.CAROUSEL
-        is FuzzAction.RotateKnob -> UiTarget.KNOB
-        FuzzAction.TapStart -> UiTarget.START
-        FuzzAction.Back -> null
-        FuzzAction.OpenSavedRoutes -> UiTarget.SAVED_ROUTES
-        FuzzAction.ToggleSettings -> UiTarget.SETTINGS_COG
-        FuzzAction.OpenVoiceSettings -> UiTarget.VOICE_SETTINGS
-        FuzzAction.ToggleDarkRideMap -> UiTarget.DARK_RIDE_MAP
-        is FuzzAction.PanMap -> UiTarget.MAP
-        FuzzAction.BackgroundForeground -> null
-    }
+    /** How many distinct states were observed with the media panel open. */
+    fun mediaPanelStateCount(): Int = states.count { it.mediaPanelOpen }
+
+    /** Steps that actually reached the UI, excluding no-ops. */
+    fun effectiveStepCount(): Int = effectiveSteps
+
+    /** How many times each target was genuinely exercised. */
+    fun targetHits(): Map<UiTarget, Int> = hits.toMap()
 }

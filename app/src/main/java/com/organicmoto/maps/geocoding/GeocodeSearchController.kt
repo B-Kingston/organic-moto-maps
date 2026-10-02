@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 private const val TAG = "OrganicMoto.GeocodeCtrl"
 
@@ -12,8 +13,16 @@ private const val TAG = "OrganicMoto.GeocodeCtrl"
  * Controller for offline place search. The geocoding index (asset copy + mmap)
  * is loaded lazily on the first search and cached for the app process lifetime;
  * all searches run on [Dispatchers.IO].
+ *
+ * [geocoderFile] selects an installed regional index; null uses the packaged
+ * Queensland asset (bundled fallback). A dataset switch constructs a new
+ * controller instead of mutating this one, so in-flight searches keep working
+ * against the old index and results can be rejected by generation.
  */
-class GeocodeSearchController(context: Context) : GeocodeController {
+class GeocodeSearchController(
+    context: Context,
+    private val geocoderFile: File? = null,
+) : GeocodeController {
 
     private val appContext = context.applicationContext
     private val lock = Any()
@@ -44,7 +53,12 @@ class GeocodeSearchController(context: Context) : GeocodeController {
         index ?: run {
             Log.i(TAG, "First search — loading geocoder index")
             val started = SystemClock.elapsedRealtime()
-            GeocoderIndex.load(appContext).also {
+            val loaded = if (geocoderFile != null) {
+                GeocoderIndex.loadFile(geocoderFile)
+            } else {
+                GeocoderIndex.load(appContext)
+            }
+            loaded.also {
                 index = it
                 Log.i(
                     TAG,
