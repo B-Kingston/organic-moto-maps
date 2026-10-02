@@ -926,7 +926,7 @@
         ]
       ],
       "layout": {
-        "symbol-sort-key": ["get", "rank"],
+        "symbol-sort-key": ["min", ["floor", ["/", ["coalesce", ["get", "rank"], 30], 10]], 3],
         "icon-image": [
           "match",
           ["get", "class"],
@@ -1297,7 +1297,7 @@
         ]
       ],
       "layout": {
-        "symbol-sort-key": ["get", "rank"],
+        "symbol-sort-key": ["min", ["floor", ["/", ["coalesce", ["get", "rank"], 30], 10]], 3],
         "text-field": ["coalesce", ["get", "name:latin"], ["get", "name"]],
         "text-font": ["Noto Sans Regular"],
         "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9, 15, 10, 18, 11],

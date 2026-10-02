@@ -17,23 +17,51 @@
       "paint": { "background-color": "#000000" }
     },
     {
-      "id": "ride-roads",
+      "id": "ride-water",
+      "type": "fill",
+      "source": "omt",
+      "source-layer": "water",
+      "paint": { "fill-color": "#181818", "fill-antialias": false }
+    },
+    {
+      "id": "ride-service-roads",
       "type": "line",
       "source": "omt",
       "source-layer": "transportation",
-      "filter": [
-        "in",
-        ["get", "class"],
-        ["literal", ["motorway", "trunk", "primary", "secondary", "tertiary", "minor", "service", "track", "path"]]
-      ],
+      "filter": ["all", ["==", ["geometry-type"], "LineString"], ["in", ["get", "class"], ["literal", ["service", "track"]]]],
+      "minzoom": 13,
+      "layout": { "line-cap": "round", "line-join": "round" },
       "paint": {
-        "line-color": "#777777",
-        "line-opacity": 0.72,
-        "line-width": { "base": 1.2, "stops": [[8, 0.45], [12, 1.2], [14, 2.7]] },
-        "line-cap": "round",
-        "line-join": "round"
+        "line-color": "#444444",
+        "line-width": { "base": 1.2, "stops": [[13, 1.5], [14, 2.5], [16, 5], [18, 9], [20, 24]] }
+      }
+    },
+    {
+      "id": "ride-local-roads",
+      "type": "line",
+      "source": "omt",
+      "source-layer": "transportation",
+      "filter": ["all", ["==", ["geometry-type"], "LineString"], ["in", ["get", "class"], ["literal", ["tertiary", "minor"]]]],
+      "minzoom": 10,
+      "layout": { "line-cap": "round", "line-join": "round" },
+      "paint": {
+        "line-color": "#636363",
+        "line-width": { "base": 1.2, "stops": [[10, 1], [12, 2], [14, 4], [16, 9], [18, 18], [20, 48]] }
+      }
+    },
+    {
+      "id": "ride-major-roads",
+      "type": "line",
+      "source": "omt",
+      "source-layer": "transportation",
+      "filter": ["all", ["==", ["geometry-type"], "LineString"], ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary", "secondary"]]]],
+      "minzoom": 6,
+      "layout": { "line-cap": "round", "line-join": "round" },
+      "paint": {
+        "line-color": "#8B8B8B",
+        "line-width": { "base": 1.2, "stops": [[6, 1], [10, 2], [12, 3], [14, 6], [16, 13], [18, 26], [20, 64]] }
       },
-      "minzoom": 8
+      "metadata": { "description": "Solid road centre-lines; widths continue beyond the archive's z14 tile limit for street-close riding." }
     },
     {
       "id": "ride-road-labels",
@@ -49,17 +77,18 @@
       "layout": {
         "symbol-placement": "line",
         "text-rotation-alignment": "map",
+        "text-pitch-alignment": "viewport",
         "text-field": ["coalesce", ["get", "name:latin"], ["get", "name"], ["get", "ref"]],
         "text-font": ["Noto Sans Regular"],
-        "text-size": 10,
+        "text-size": { "stops": [[10, 11], [14, 14], [18, 16]] },
+        "symbol-spacing": 300,
         "text-max-angle": 35,
         "text-optional": true
       },
       "paint": {
-        "text-color": "#B0B0B0",
+        "text-color": "#E0E0E0",
         "text-halo-color": "#000000",
-        "text-halo-width": 1.2,
-        "text-opacity": 0.82
+        "text-halo-width": 1.5
       }
     }
   ]
