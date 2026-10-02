@@ -1,0 +1,11 @@
+{
+  "seed": 0,
+  "comment": "Deterministic replay for the Maps screen: open the settings card, open Maps (server address, catalog, installed regions, offline import), leave with system Back, reopen, and close the card. No network access is involved.",
+  "actions": [
+    {"type": "OpenMapsSettings"},
+    {"type": "Back"},
+    {"type": "OpenMapsSettings"},
+    {"type": "ToggleSettings"},
+    {"type": "Back"}
+  ]
+}
